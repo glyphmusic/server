@@ -1,1 +1,6 @@
 /target
+.dev.vars
+**/.dev.vars
+server.toml
+.wrangler/
+node_modules/
