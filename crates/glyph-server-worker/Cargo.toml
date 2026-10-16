@@ -1,0 +1,20 @@
+[package]
+name = "glyph-server-worker"
+description = "Cloudflare Workers entry point of glyph-server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The Worker SDK only makes sense on wasm32; on native targets this crate is
+# an empty shell so `cargo test --workspace` keeps working everywhere.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+glyph-server-core.workspace = true
+worker = "0.8"
+async-trait.workspace = true
+futures.workspace = true
+console_error_panic_hook = "0.1"

@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: glyph-server
+      # glyph-protocol is a path dependency (../glyph) until the pinned git tag is used.
+      - uses: actions/checkout@v4
+        with:
+          repository: glyphmusic/glyph
+          path: glyph
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: glyph-server
+      - name: Build and test
+        working-directory: glyph-server
+        run: cargo test --workspace
+
+  worker-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: glyph-server
+      - uses: actions/checkout@v4
+        with:
+          repository: glyphmusic/glyph
+          path: glyph
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: glyph-server
+      - name: Check worker for wasm32
+        working-directory: glyph-server
+        run: cargo check -p glyph-server-worker --target wasm32-unknown-unknown

@@ -1,0 +1,29 @@
+name = "glyph-server"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-01-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+# Workers KV: long-lived cache (resolver mappings, lyrics). Create it with
+#   npx wrangler kv namespace create GLYPH_KV
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "GLYPH_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+RATE_LIMIT_PER_MIN = "60"
+YOUTUBE_DAILY_BUDGET_UNITS = "9000"
+
+# Secrets (never put keys in this file). Set each one you have with
+#   npx wrangler secret put <NAME>
+# Missing secrets simply disable that provider.
+#   YOUTUBE_API_KEY
+#   JAMENDO_CLIENT_ID
+#   SOUNDCLOUD_CLIENT_ID
+#   SOUNDCLOUD_CLIENT_SECRET
+#   SPOTIFY_CLIENT_ID
+#   SPOTIFY_CLIENT_SECRET
+#   LASTFM_API_KEY
+# For `wrangler dev`, put the same names in crates/glyph-server-worker/.dev.vars
