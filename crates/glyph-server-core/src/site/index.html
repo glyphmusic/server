@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Glyph — every song, one quiet player</title>
+<meta name="description" content="Glyph is a fast desktop music player for Windows, macOS and Linux. It searches many legal music sources at once and keeps your library, playlists and lyrics in one flat app.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Glyph — every song, one quiet player">
+<meta property="og:description" content="A fast desktop music player for Windows, macOS and Linux.">
+<meta property="og:url" content="https://glyph.my/">
+<meta property="og:image" content="https://glyph.my/shots/og.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0a0a09">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/*BASE*/
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
+nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
+nav .brand { font-weight: 700; text-decoration: none; }
+nav .brand::before { content: "♪ "; color: var(--pink); }
+nav .links { display: flex; gap: 3ch; }
+nav .links a { color: var(--dim); text-decoration: none; }
+nav .links a:hover { color: var(--fg); }
+
+.hero { position: relative; text-align: center; padding: 8px 0 56px; }
+.hero canvas { display: block; width: 100%; height: clamp(300px, 46vw, 420px); }
+.hero h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.15; margin: 8px 0 14px; font-weight: 700; letter-spacing: -0.02em; }
+.hero p.lead { max-width: 56ch; margin: 0 auto 28px; color: var(--dim); }
+.cta { display: flex; gap: 2ch; justify-content: center; flex-wrap: wrap; }
+.hero .meta { margin-top: 18px; color: var(--dim); font-size: 12px; }
+
+section { padding: 40px 0; }
+.shot { position: relative; margin: 0; }
+.shot img { display: none; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); }
+.shot.real img { display: block; }
+.shot.real .mock { display: none; }
+.shot figcaption { color: var(--dim); font-size: 12px; margin-top: 10px; text-align: center; }
+
+/* App mockups: drawn after the app's tokens (src/theme.rs in glyphmusic/desktop). */
+.mock {
+  --r: 10px;
+  font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.4;
+  background: #030303; border: 1px solid #262626; border-radius: var(--r);
+  overflow: hidden; user-select: none; color: #ededed;
+  box-shadow: 0 30px 80px -30px rgba(255, 95, 210, 0.18);
+}
+.mock .mono { font-family: var(--mono); }
+.m-title { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 14px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.m-title .logo { font-family: var(--mono); font-weight: 700; color: var(--pink); width: 36px; }
+.m-search { flex: 1; max-width: 420px; margin: 0 auto; height: 28px; border-radius: 8px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); display: flex; align-items: center; padding: 0 10px; color: #8a8a8a; gap: 8px; }
+.m-search b { color: #ededed; font-weight: 500; }
+.m-win { font-family: var(--mono); color: #6b6b6b; letter-spacing: 1.2em; font-size: 11px; }
+.m-body { display: grid; grid-template-columns: 64px 1fr; min-height: 380px; }
+.m-side { display: flex; flex-direction: column; align-items: center; gap: 14px; padding-top: 16px; border-right: 1px solid rgba(255,255,255,.06); }
+.m-side i { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #5d5d5d; display: block; }
+.m-side i.on { border-color: var(--pink); background: rgba(255,95,210,.15); }
+.m-main { padding: 20px 22px; min-width: 0; }
+.m-h { font-size: 20px; font-weight: 600; margin: 0 0 14px; }
+.m-sub { font-size: 11px; color: #8a8a8a; font-family: var(--mono); text-transform: lowercase; margin: 18px 0 10px; }
+.m-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.m-card { background: rgba(20,20,20,.75); border-radius: 10px; padding: 8px; min-width: 0; }
+.m-card .t { font-weight: 500; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-card .a { color: #8a8a8a; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cover { aspect-ratio: 1; border-radius: 7px; position: relative; overflow: hidden; }
+.cover pre { position: absolute; inset: 0; font: 700 7px/7px var(--mono); color: rgba(255,255,255,.55); letter-spacing: 1px; padding: 4px; mix-blend-mode: overlay; white-space: pre; overflow: hidden; }
+.m-list { display: flex; flex-direction: column; }
+.m-li { display: grid; grid-template-columns: 22px 34px 1fr auto auto; gap: 12px; align-items: center; padding: 6px 8px; border-radius: 8px; }
+.m-li:hover, .m-li.on { background: rgba(255,255,255,.05); }
+.m-li .n { font-family: var(--mono); color: #6b6b6b; font-size: 11px; text-align: right; }
+.m-li .cover { width: 34px; border-radius: 5px; }
+.m-li .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-li .a { color: #8a8a8a; font-size: 12px; }
+.m-li .d { font-family: var(--mono); color: #8a8a8a; font-size: 11px; }
+.m-li.on .t { color: var(--pink); }
+.badge { font-family: var(--mono); font-size: 10px; color: #a8a8a8; border: 1px solid #3a3a3a; border-radius: 4px; padding: 0 5px; }
+.badge.e { color: #030303; background: #a8a8a8; border-color: #a8a8a8; margin-left: 6px; }
+.m-player { height: 80px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid rgba(255,255,255,.06); background: rgba(0,0,0,.6); }
+.m-now { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.m-now .cover { width: 48px; flex: none; }
+.m-now .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-now .a { color: #8a8a8a; font-size: 12px; }
+.m-ctl { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.m-btns { display: flex; gap: 22px; align-items: center; color: #c8c8c8; font-size: 14px; }
+.m-btns .play { width: 32px; height: 32px; border-radius: 50%; background: #ededed; color: #030303; display: grid; place-items: center; font-size: 12px; }
+.m-bar { display: flex; gap: 10px; align-items: center; width: 100%; font-family: var(--mono); font-size: 10px; color: #8a8a8a; }
+.m-bar .track { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.12); position: relative; }
+.m-bar .track::before { content: ""; position: absolute; inset: 0 58% 0 0; border-radius: 2px; background: var(--pink); }
+.m-vol { justify-self: end; display: flex; gap: 10px; align-items: center; color: #8a8a8a; font-family: var(--mono); font-size: 11px; }
+.m-vol .track { width: 80px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.12); position: relative; }
+.m-vol .track::before { content: ""; position: absolute; inset: 0 30% 0 0; background: #ededed; border-radius: 2px; }
+
+/* Now playing with lyrics. */
+.m-np { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 28px; padding: 26px; min-height: 340px; align-items: center; }
+.m-np .big { font: 700 9px/9.5px var(--mono); white-space: pre; color: #ededed; text-align: center; overflow: hidden; }
+.m-np .big .p { color: var(--pink); }
+.m-lyr { font-size: 17px; font-weight: 600; line-height: 1.7; color: #4a4a4a; }
+.m-lyr .now { color: #ededed; }
+.m-lyr .past { color: #6b6b6b; }
+
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+.pair .m-body { min-height: 0; }
+
+.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px 4ch; }
+.features h3 { font: inherit; margin: 0 0 6px; }
+.features p { margin: 0; color: var(--dim); }
+
+.dl { text-align: center; padding: 64px 0 40px; }
+.dl h2 { font-size: clamp(22px, 3.4vw, 32px); margin: 0 0 10px; }
+.dl p { color: var(--dim); margin: 0 0 24px; }
+.plat { display: flex; gap: 3ch; justify-content: center; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin-top: 20px; }
+footer { border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
+footer a { color: var(--dim); }
+
+@media (max-width: 860px) {
+  .pair { grid-template-columns: 1fr; }
+  .features { grid-template-columns: 1fr 1fr; }
+  .m-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .m-row .m-card:nth-child(n+4) { display: none; }
+  .m-vol { display: none; }
+  .m-player { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
+}
+@media (max-width: 560px) {
+  nav .links a.opt { display: none; }
+  .features { grid-template-columns: 1fr; }
+  .m-body { grid-template-columns: 44px 1fr; }
+  .m-main { padding: 14px; }
+  .m-search span.hint { display: none; }
+  .m-win { display: none; }
+  .m-np { grid-template-columns: 1fr; min-height: 0; }
+  .m-np .big { display: none; }
+  .m-li { grid-template-columns: 34px 1fr auto; }
+  .m-li .n, .m-li .d { display: none; }
+  .m-player { grid-template-columns: 1fr; height: auto; padding: 10px 14px; }
+  .m-ctl { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a class="brand" href="/">glyph</a>
+  <div class="links">
+    <a class="opt" href="#features">features</a>
+    <a href="#download">download</a>
+    <a href="https://github.com/glyphmusic/desktop">github</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <canvas id="note" aria-label="The Glyph note, drawn in ASCII characters" role="img"></canvas>
+  <h1>every song, one quiet player.</h1>
+  <p class="lead">Glyph searches many legal music sources at once and keeps your library, playlists, lyrics and downloads in one flat, fast app.</p>
+  <div class="cta">
+    <a class="act" id="dl-main" href="https://github.com/glyphmusic/desktop/releases/latest">download glyph</a>
+    <a class="act alt" href="#features">see what it does</a>
+  </div>
+  <div class="meta">free · open source · windows, macos, linux</div>
+</header>
+
+<section>
+  <figure class="shot">
+    <img src="/shots/home.webp" alt="Glyph home screen with recommendations and recently played songs" width="1600" height="1000">
+    <div class="mock" aria-hidden="true">
+      <div class="m-title">
+        <span class="logo">♪</span>
+        <div class="m-search"><span>⌕</span><span class="hint">search songs, artists, albums</span></div>
+        <span class="m-win">─ □ ✕</span>
+      </div>
+      <div class="m-body">
+        <div class="m-side"><i class="on"></i><i></i><i></i><i></i><i></i></div>
+        <div class="m-main">
+          <p class="m-h">good evening</p>
+          <div class="m-sub">-- recommended for you</div>
+          <div class="m-row">
+            <div class="m-card"><div class="cover" data-c="0"></div><div class="t">Low Tide Static</div><div class="a">Marrow Lake</div></div>
+            <div class="m-card"><div class="cover" data-c="1"></div><div class="t">Paper Satellites</div><div class="a">Juno Vale</div></div>
+            <div class="m-card"><div class="cover" data-c="2"></div><div class="t">Night Bus Hymns</div><div class="a">The Quiet Hours</div></div>
+            <div class="m-card"><div class="cover" data-c="3"></div><div class="t">Glasshouse</div><div class="a">Oda Fenn</div></div>
+            <div class="m-card"><div class="cover" data-c="4"></div><div class="t">Sundial</div><div class="a">Kite Theory</div></div>
+          </div>
+          <div class="m-sub">-- recently played</div>
+          <div class="m-list">
+            <div class="m-li on"><span class="n">1</span><div class="cover" data-c="5"></div><div><div class="t">Halflight</div><div class="a">Marrow Lake</div></div><span class="badge">audius</span><span class="d">3:58</span></div>
+            <div class="m-li"><span class="n">2</span><div class="cover" data-c="6"></div><div><div class="t">Copper Rain<span class="badge e">E</span></div><div class="a">Juno Vale</div></div><span class="badge">jamendo</span><span class="d">2:41</span></div>
+            <div class="m-li"><span class="n">3</span><div class="cover" data-c="7"></div><div><div class="t">Slow Engines</div><div class="a">The Quiet Hours</div></div><span class="badge">archive</span><span class="d">4:12</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="m-player">
+        <div class="m-now"><div class="cover" data-c="5"></div><div style="min-width:0"><div class="t">Halflight</div><div class="a">Marrow Lake</div></div></div>
+        <div class="m-ctl">
+          <div class="m-btns"><span>⇄</span><span>⏮</span><span class="play">▶</span><span>⏭</span><span>↻</span></div>
+          <div class="m-bar"><span>1:42</span><div class="track"></div><span>3:58</span></div>
+        </div>
+        <div class="m-vol"><span>vol</span><div class="track"></div></div>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<section id="features">
+  <pre class="rule" data-rule="features"></pre>
+  <div class="features" style="margin-top:24px">
+    <div><h3>search everywhere</h3><p>Audius, Internet Archive, Deezer, Jamendo and more, merged into one list and ranked by your taste.</p></div>
+    <div><h3>synced lyrics</h3><p>Lyrics that follow the song and scroll smoothly as it plays.</p></div>
+    <div><h3>ascii covers</h3><p>Optional ASCII-art covers, drawn from real characters like everything else here.</p></div>
+    <div><h3>sound you control</h3><p>Crossfade, loudness normalisation, a 10-band equaliser and output device choice.</p></div>
+    <div><h3>your library, everywhere</h3><p>An optional @handle account syncs likes, playlists and settings across your devices.</p></div>
+    <div><h3>share in one link</h3><p>Send a playlist as a short glyph.my link; friends paste it into Glyph to add it.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="pair">
+    <figure class="shot">
+      <img src="/shots/player.webp" alt="Glyph now playing view with synced lyrics" width="1200" height="800">
+      <div class="mock" aria-hidden="true">
+        <div class="m-np">
+          <pre class="big" id="big-cover"></pre>
+          <div class="m-lyr">
+            <div class="past">the streetlights hum a borrowed tune</div>
+            <div class="past">we count the stops till june</div>
+            <div class="now">and every window holds a moon</div>
+            <div>that never learned to fall</div>
+            <div>so leave the radio on low</div>
+          </div>
+        </div>
+      </div>
+      <figcaption>now playing, with lyrics that keep time</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="/shots/search.webp" alt="Glyph search results from several sources" width="1200" height="800">
+      <div class="mock" aria-hidden="true">
+        <div class="m-title">
+          <span class="logo">♪</span>
+          <div class="m-search"><span>⌕</span><b>night drive</b></div>
+        </div>
+        <div class="m-body" style="grid-template-columns:1fr">
+          <div class="m-main">
+            <div class="m-sub" style="margin-top:0">-- songs · 4 sources</div>
+            <div class="m-list">
+              <div class="m-li"><span class="n">1</span><div class="cover" data-c="8"></div><div><div class="t">Night Drive</div><div class="a">Kite Theory</div></div><span class="badge">deezer</span><span class="d">3:21</span></div>
+              <div class="m-li"><span class="n">2</span><div class="cover" data-c="9"></div><div><div class="t">Night Drive (Live)</div><div class="a">Oda Fenn</div></div><span class="badge">archive</span><span class="d">5:07</span></div>
+              <div class="m-li"><span class="n">3</span><div class="cover" data-c="10"></div><div><div class="t">Drive Home Slow</div><div class="a">Marrow Lake</div></div><span class="badge">audius</span><span class="d">3:44</span></div>
+              <div class="m-li"><span class="n">4</span><div class="cover" data-c="11"></div><div><div class="t">Nightdriver<span class="badge e">E</span></div><div class="a">Juno Vale</div></div><span class="badge">jamendo</span><span class="d">2:58</span></div>
+              <div class="m-li"><span class="n">5</span><div class="cover" data-c="12"></div><div><div class="t">Neon Overpass</div><div class="a">The Quiet Hours</div></div><span class="badge">audius</span><span class="d">4:30</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption>one search, every source</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="dl" id="download">
+  <h2>get glyph</h2>
+  <p>Free and open source. No account needed.</p>
+  <a class="act" id="dl-bottom" href="https://github.com/glyphmusic/desktop/releases/latest">download glyph</a>
+  <div class="plat"><span>windows x64</span><span>macos apple silicon · intel</span><span>linux x64 · arm64</span></div>
+</section>
+
+<footer>
+  <span>glyph · mit / apache-2.0</span>
+  <span><a href="https://github.com/glyphmusic/desktop">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a></span>
+</footer>
+</div>
+
+<script>
+/*NOTE*/
+glyphNote(document.getElementById("note"), Math.min(11, Math.max(7, innerWidth / 110)));
+
+// Real screenshots replace the mockups once they load.
+document.querySelectorAll(".shot img").forEach(img => {
+  const real = () => img.naturalWidth > 0 && img.closest(".shot").classList.add("real");
+  if (img.complete) real(); else img.addEventListener("load", real);
+});
+
+// "-- label ------" filling the column.
+document.querySelectorAll("[data-rule]").forEach(el => {
+  const b = document.createElement("b");
+  b.textContent = el.dataset.rule;
+  el.append("-- ", b, " " + "-".repeat(200));
+});
+
+// Covers: a soft gradient with ASCII texture, like the app's ASCII covers.
+const HUES = [[322, 260], [28, 340], [200, 250], [150, 190], [45, 15], [290, 220], [12, 330], [180, 230], [260, 300], [100, 160], [340, 20], [215, 275], [60, 120]];
+function asciiTex(seed, cols, rows) {
+  const ramp = " .:-=+*#%@";
+  let out = "";
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const v = Math.sin(x * 0.35 + seed) * Math.cos(y * 0.3 - seed * 0.7) + Math.sin((x + y) * 0.18 + seed * 1.3);
+      out += ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor((v + 2) / 4 * ramp.length)))];
+    }
+    out += "\n";
+  }
+  return out;
+}
+document.querySelectorAll(".cover[data-c]").forEach(el => {
+  const i = +el.dataset.c, [a, b] = HUES[i % HUES.length];
+  el.style.background = `linear-gradient(135deg, hsl(${a} 70% 52%), hsl(${b} 60% 22%))`;
+  const pre = document.createElement("pre");
+  pre.textContent = asciiTex(i * 1.7, 40, 30);
+  el.append(pre);
+});
+
+// Big ASCII cover in the now playing mockup.
+(() => {
+  const el = document.getElementById("big-cover");
+  const ramp = " .,:-=+*#%@", cols = 44, rows = 30;
+  for (let y = 0; y < rows; y++) {
+    let line = "";
+    for (let x = 0; x < cols; x++) {
+      const dx = (x - cols / 2) / (cols / 2), dy = (y - rows / 2) / (rows / 2);
+      const r = Math.sqrt(dx * dx + dy * dy);
+      const v = r > 1 ? 0 : (Math.cos(r * 9) * 0.5 + 0.5) * (1 - r * 0.6) + (r < 0.12 ? 1 : 0);
+      line += ramp[Math.min(ramp.length - 1, Math.floor(v * ramp.length))];
+    }
+    const s = document.createElement("span");
+    if (y > rows * 0.35 && y < rows * 0.65) s.className = "p";
+    s.textContent = line + "\n";
+    el.append(s);
+  }
+})();
+
+// Name the platform on the download buttons.
+(() => {
+  const ua = navigator.userAgent;
+  const os = /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? "linux" : "";
+  if (os) for (const id of ["dl-main", "dl-bottom"]) document.getElementById(id).textContent = "download for " + os;
+})();
+</script>
+</body>
+</html>

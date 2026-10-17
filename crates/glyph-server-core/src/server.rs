@@ -209,6 +209,9 @@ impl Server {
             }
             return crate::share::handle(&svc, req).await.unwrap_or_else(Response::error);
         }
+        if crate::site::owns(req.path.trim_end_matches('/')) {
+            return crate::site::handle(&req).unwrap_or_else(Response::error);
+        }
         let Some((route, method)) = route(&req.path) else {
             return Response::error(ApiErr::not_found("unknown endpoint"));
         };

@@ -9,7 +9,7 @@
 
 use crate::cache::{self, DAY};
 use crate::error::ApiErr;
-use crate::server::{Body, Request, Response};
+use crate::server::{Request, Response};
 use crate::traits::{Method, RateDecision, Services};
 use glyph_protocol::INSTALL_ID_HEADER;
 use serde::{Deserialize, Serialize};
@@ -148,41 +148,52 @@ fn escape(s: &str) -> String {
 }
 
 /// Landing page for a link opened in a browser: how to open it in Glyph.
+/// Same look as the site at `/` (`site.rs`).
 fn page(status: u16, name: &str, songs: u32, link: &str) -> Response {
-    let body = if status == 200 {
-        let title = if name.is_empty() { "Playlist".to_string() } else { escape(name) };
+    let title = if name.is_empty() { "Playlist".to_string() } else { escape(name) };
+    let (head_title, body) = if status == 200 {
         let count = match songs {
             0 => String::new(),
-            1 => "<p class=\"m\">1 song</p>".into(),
-            n => format!("<p class=\"m\">{n} songs</p>"),
+            1 => "<p class=\"dim\">1 song</p>".into(),
+            n => format!("<p class=\"dim\">{n} songs</p>"),
         };
-        format!(
-            r#"<h1>{title}</h1>{count}
+        let body = format!(
+            r#"<pre class="rule" data-rule="shared playlist"></pre>
+<h1>{title}</h1>{count}
 <p>Paste this link into the search bar of Glyph to add the playlist.</p>
-<div class="l"><code id="l">{link}</code><button onclick="navigator.clipboard.writeText(document.getElementById('l').textContent).then(()=>this.textContent='Copied')">Copy link</button></div>
-<p class="m">No Glyph yet? <a href="https://github.com/glyphmusic/desktop/releases/latest">Download it</a>.</p>"#,
+<div class="l"><code id="l">{link}</code><button class="act" id="cp" type="button">copy</button></div>
+<div class="row"><a class="act alt" href="https://github.com/glyphmusic/desktop/releases/latest">no glyph yet? download it</a></div>"#,
             link = escape(link)
-        )
+        );
+        (format!("{title} · Glyph"), body)
     } else {
-        "<h1>Link not found</h1><p>This playlist link does not exist or has expired.</p>".to_string()
+        (
+            "Glyph".to_string(),
+            r#"<pre class="rule" data-rule="not found"></pre>
+<h1>Link not found</h1><p class="dim">This playlist link does not exist or has expired.</p>
+<div class="row"><a class="act alt" href="/">what is glyph?</a></div>"#
+                .to_string(),
+        )
     };
     let html = format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Glyph</title>
-<style>:root{{color-scheme:dark light}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0c;color:#ececec;font:16px/1.5 system-ui,sans-serif}}main{{max-width:520px;padding:32px 20px}}h1{{font-size:28px;margin:0 0 4px;word-break:break-word}}.m{{color:#9a9a9a;margin:0 0 16px}}.l{{display:flex;gap:8px;align-items:center;margin:20px 0}}code{{flex:1;padding:10px 12px;border-radius:8px;background:#1a1a1c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}button{{padding:10px 14px;border:0;border-radius:8px;background:#ececec;color:#0b0b0c;font:inherit;cursor:pointer}}a{{color:inherit}}</style>
-</head><body><main><p class="m">Glyph</p>{body}</main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="color-scheme" content="dark"><title>{head_title}</title>
+<meta property="og:title" content="{head_title}"><meta property="og:description" content="A playlist to open in Glyph, the desktop music player."><meta property="og:image" content="https://glyph.my/shots/og.jpg"><meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>{css}
+body{{padding:4vh max(16px,env(safe-area-inset-left,0px)) 48px}}main{{max-width:58ch;margin:0 auto;display:flex;flex-direction:column;gap:18px}}
+.top{{display:flex;justify-content:space-between}}.top a{{text-decoration:none;font-weight:700}}.top a::before{{content:"♪ ";color:var(--pink)}}
+canvas{{display:block;width:100%;height:240px}}h1{{font-size:26px;line-height:1.2;margin:0;word-break:break-word}}h1+p{{margin-top:-12px}}p{{margin:0}}
+.l{{display:flex;gap:1ch;align-items:stretch}}code{{flex:1;min-width:0;font:inherit;padding:9px 2ch;border:1px dashed var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:all}}.l .act::after{{content:none}}.row{{display:flex}}</style>
+</head><body><main><div class="top"><a href="/">glyph</a><span class="dim">glyph.my</span></div><canvas id="note" role="img" aria-label="The Glyph note, drawn in ASCII characters"></canvas>{body}</main>
+<script>{js}
+glyphNote(document.getElementById("note"),6);
+document.querySelectorAll("[data-rule]").forEach(el=>{{const b=document.createElement("b");b.textContent=el.dataset.rule;el.append("-- ",b," "+"-".repeat(120))}});
+const cp=document.getElementById("cp");if(cp)cp.onclick=()=>navigator.clipboard.writeText(document.getElementById("l").textContent).then(()=>cp.textContent="copied");
+</script></body></html>"#,
+        css = crate::site::BASE_CSS,
+        js = crate::site::NOTE_JS,
     );
-    Response {
-        status,
-        headers: vec![
-            ("content-type".into(), "text/html; charset=utf-8".into()),
-            ("cache-control".into(), "public, max-age=300".into()),
-            ("x-content-type-options".into(), "nosniff".into()),
-            ("x-frame-options".into(), "DENY".into()),
-            ("referrer-policy".into(), "no-referrer".into()),
-            ("content-security-policy".into(), "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".into()),
-        ],
-        body: Body::Bytes(html.into_bytes()),
-    }
+    crate::site::html_response(status, html, "public, max-age=300")
 }
 
 #[cfg(test)]
