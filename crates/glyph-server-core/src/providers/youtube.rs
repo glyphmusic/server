@@ -136,7 +136,7 @@ pub async fn video_info(svc: &Services, video_id: &str) -> PResult<Option<(Strin
     args.push("--".into());
     args.push(format!("https://www.youtube.com/watch?v={video_id}"));
     let entries = run(svc, &bin, &args, DETAIL_TIMEOUT_MS).await?;
-    Ok(entries.into_iter().find(|e| e.id == video_id && !e.title.is_empty()).map(|e| {
+    Ok(entries.into_iter().find(|e| e.id == video_id && !e.title.is_empty() && e.live_status.as_deref() != Some("is_live")).map(|e| {
         let channel = if e.channel.is_empty() { e.uploader } else { e.channel };
         let ms = e.duration.filter(|s| *s > 0.0).map(|s| (s * 1000.0) as u64);
         (e.title, channel, ms)

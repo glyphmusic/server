@@ -356,7 +356,10 @@ function recoveryCode(handle, code) {
     box.classList.toggle("shown", on);
     box.classList.toggle("secret", !on);
     $("rc-show").textContent = on ? T.rc_hide : T.rc_show;
+    // While blurred, screen readers get the hint instead of the code.
+    if (on) box.removeAttribute("aria-label"); else box.setAttribute("aria-label", T.rc_reveal);
   };
+  show(false);
   box.onclick = () => { if (!box.classList.contains("shown")) show(true); };
   box.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(true); } };
   $("rc-show").onclick = () => show(!box.classList.contains("shown"));
