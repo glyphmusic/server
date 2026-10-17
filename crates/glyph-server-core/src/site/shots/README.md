@@ -1,7 +1,7 @@
 # Screenshots for glyph.my
 
-Replace the empty files here with real screenshots; until then the page shows
-its drawn mockups. Keep each file small (it is compiled into the Worker):
+Replace the empty files here with screenshots of the running app; an empty
+file is left out of the page. Keep each file small (it is compiled into the Worker):
 WebP or JPEG, about 300 KB at most.
 
 | File | Shows | Size |

@@ -34,75 +34,13 @@ nav .links a:hover { color: var(--fg); }
 .hero .meta { margin-top: 18px; color: var(--dim); font-size: 12px; }
 
 section { padding: 40px 0; }
-.shot { position: relative; margin: 0; }
-.shot img { display: none; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); }
-.shot.real img { display: block; }
-.shot.real .mock { display: none; }
+/* A screenshot shows once its file loads; an empty slot hides its figure. */
+.shot { margin: 0; display: none; }
+.shot.real { display: block; }
+.shot img { display: block; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); box-shadow: 0 30px 80px -30px rgba(255, 95, 210, 0.18); }
 .shot figcaption { color: var(--dim); font-size: 12px; margin-top: 10px; text-align: center; }
 
-/* App mockups: drawn after the app's tokens (src/theme.rs in glyphmusic/desktop). */
-.mock {
-  --r: 10px;
-  font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.4;
-  background: #030303; border: 1px solid #262626; border-radius: var(--r);
-  overflow: hidden; user-select: none; color: #ededed;
-  box-shadow: 0 30px 80px -30px rgba(255, 95, 210, 0.18);
-}
-.mock .mono { font-family: var(--mono); }
-.m-title { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 14px; border-bottom: 1px solid rgba(255,255,255,.06); }
-.m-title .logo { font-family: var(--mono); font-weight: 700; color: var(--pink); width: 36px; }
-.m-search { flex: 1; max-width: 420px; margin: 0 auto; height: 28px; border-radius: 8px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); display: flex; align-items: center; padding: 0 10px; color: #8a8a8a; gap: 8px; }
-.m-search b { color: #ededed; font-weight: 500; }
-.m-win { font-family: var(--mono); color: #6b6b6b; letter-spacing: 1.2em; font-size: 11px; }
-.m-body { display: grid; grid-template-columns: 64px 1fr; min-height: 380px; }
-.m-side { display: flex; flex-direction: column; align-items: center; gap: 14px; padding-top: 16px; border-right: 1px solid rgba(255,255,255,.06); }
-.m-side i { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #5d5d5d; display: block; }
-.m-side i.on { border-color: var(--pink); background: rgba(255,95,210,.15); }
-.m-main { padding: 20px 22px; min-width: 0; }
-.m-h { font-size: 20px; font-weight: 600; margin: 0 0 14px; }
-.m-sub { font-size: 11px; color: #8a8a8a; font-family: var(--mono); text-transform: lowercase; margin: 18px 0 10px; }
-.m-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
-.m-card { background: rgba(20,20,20,.75); border-radius: 10px; padding: 8px; min-width: 0; }
-.m-card .t { font-weight: 500; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.m-card .a { color: #8a8a8a; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cover { aspect-ratio: 1; border-radius: 7px; position: relative; overflow: hidden; }
-.cover pre { position: absolute; inset: 0; font: 700 7px/7px var(--mono); color: rgba(255,255,255,.55); letter-spacing: 1px; padding: 4px; mix-blend-mode: overlay; white-space: pre; overflow: hidden; }
-.m-list { display: flex; flex-direction: column; }
-.m-li { display: grid; grid-template-columns: 22px 34px 1fr auto auto; gap: 12px; align-items: center; padding: 6px 8px; border-radius: 8px; }
-.m-li:hover, .m-li.on { background: rgba(255,255,255,.05); }
-.m-li .n { font-family: var(--mono); color: #6b6b6b; font-size: 11px; text-align: right; }
-.m-li .cover { width: 34px; border-radius: 5px; }
-.m-li .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.m-li .a { color: #8a8a8a; font-size: 12px; }
-.m-li .d { font-family: var(--mono); color: #8a8a8a; font-size: 11px; }
-.m-li.on .t { color: var(--pink); }
-.badge { font-family: var(--mono); font-size: 10px; color: #a8a8a8; border: 1px solid #3a3a3a; border-radius: 4px; padding: 0 5px; }
-.badge.e { color: #030303; background: #a8a8a8; border-color: #a8a8a8; margin-left: 6px; }
-.m-player { height: 80px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid rgba(255,255,255,.06); background: rgba(0,0,0,.6); }
-.m-now { display: flex; gap: 10px; align-items: center; min-width: 0; }
-.m-now .cover { width: 48px; flex: none; }
-.m-now .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.m-now .a { color: #8a8a8a; font-size: 12px; }
-.m-ctl { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.m-btns { display: flex; gap: 22px; align-items: center; color: #c8c8c8; font-size: 14px; }
-.m-btns .play { width: 32px; height: 32px; border-radius: 50%; background: #ededed; color: #030303; display: grid; place-items: center; font-size: 12px; }
-.m-bar { display: flex; gap: 10px; align-items: center; width: 100%; font-family: var(--mono); font-size: 10px; color: #8a8a8a; }
-.m-bar .track { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.12); position: relative; }
-.m-bar .track::before { content: ""; position: absolute; inset: 0 58% 0 0; border-radius: 2px; background: var(--pink); }
-.m-vol { justify-self: end; display: flex; gap: 10px; align-items: center; color: #8a8a8a; font-family: var(--mono); font-size: 11px; }
-.m-vol .track { width: 80px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.12); position: relative; }
-.m-vol .track::before { content: ""; position: absolute; inset: 0 30% 0 0; background: #ededed; border-radius: 2px; }
-
-/* Now playing with lyrics. */
-.m-np { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 28px; padding: 26px; min-height: 340px; align-items: center; }
-.m-np .big { font: 700 9px/9.5px var(--mono); white-space: pre; color: #ededed; text-align: center; overflow: hidden; }
-.m-np .big .p { color: var(--pink); }
-.m-lyr { font-size: 17px; font-weight: 600; line-height: 1.7; color: #4a4a4a; }
-.m-lyr .now { color: #ededed; }
-.m-lyr .past { color: #6b6b6b; }
-
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
-.pair .m-body { min-height: 0; }
 
 .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px 4ch; }
 .features h3 { font: inherit; margin: 0 0 6px; }
@@ -118,24 +56,10 @@ footer a { color: var(--dim); }
 @media (max-width: 860px) {
   .pair { grid-template-columns: 1fr; }
   .features { grid-template-columns: 1fr 1fr; }
-  .m-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .m-row .m-card:nth-child(n+4) { display: none; }
-  .m-vol { display: none; }
-  .m-player { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
 }
 @media (max-width: 560px) {
   nav .links a.opt { display: none; }
   .features { grid-template-columns: 1fr; }
-  .m-body { grid-template-columns: 44px 1fr; }
-  .m-main { padding: 14px; }
-  .m-search span.hint { display: none; }
-  .m-win { display: none; }
-  .m-np { grid-template-columns: 1fr; min-height: 0; }
-  .m-np .big { display: none; }
-  .m-li { grid-template-columns: 34px 1fr auto; }
-  .m-li .n, .m-li .d { display: none; }
-  .m-player { grid-template-columns: 1fr; height: auto; padding: 10px 14px; }
-  .m-ctl { display: none; }
 }
 </style>
 </head>
@@ -164,41 +88,6 @@ footer a { color: var(--dim); }
 <section>
   <figure class="shot">
     <img src="/shots/home.webp" alt="Glyph home screen with recommendations and recently played songs" width="1600" height="1000">
-    <div class="mock" aria-hidden="true">
-      <div class="m-title">
-        <span class="logo">♪</span>
-        <div class="m-search"><span>⌕</span><span class="hint">search songs, artists, albums</span></div>
-        <span class="m-win">─ □ ✕</span>
-      </div>
-      <div class="m-body">
-        <div class="m-side"><i class="on"></i><i></i><i></i><i></i><i></i></div>
-        <div class="m-main">
-          <p class="m-h">good evening</p>
-          <div class="m-sub">-- recommended for you</div>
-          <div class="m-row">
-            <div class="m-card"><div class="cover" data-c="0"></div><div class="t">Low Tide Static</div><div class="a">Marrow Lake</div></div>
-            <div class="m-card"><div class="cover" data-c="1"></div><div class="t">Paper Satellites</div><div class="a">Juno Vale</div></div>
-            <div class="m-card"><div class="cover" data-c="2"></div><div class="t">Night Bus Hymns</div><div class="a">The Quiet Hours</div></div>
-            <div class="m-card"><div class="cover" data-c="3"></div><div class="t">Glasshouse</div><div class="a">Oda Fenn</div></div>
-            <div class="m-card"><div class="cover" data-c="4"></div><div class="t">Sundial</div><div class="a">Kite Theory</div></div>
-          </div>
-          <div class="m-sub">-- recently played</div>
-          <div class="m-list">
-            <div class="m-li on"><span class="n">1</span><div class="cover" data-c="5"></div><div><div class="t">Halflight</div><div class="a">Marrow Lake</div></div><span class="badge">audius</span><span class="d">3:58</span></div>
-            <div class="m-li"><span class="n">2</span><div class="cover" data-c="6"></div><div><div class="t">Copper Rain<span class="badge e">E</span></div><div class="a">Juno Vale</div></div><span class="badge">jamendo</span><span class="d">2:41</span></div>
-            <div class="m-li"><span class="n">3</span><div class="cover" data-c="7"></div><div><div class="t">Slow Engines</div><div class="a">The Quiet Hours</div></div><span class="badge">archive</span><span class="d">4:12</span></div>
-          </div>
-        </div>
-      </div>
-      <div class="m-player">
-        <div class="m-now"><div class="cover" data-c="5"></div><div style="min-width:0"><div class="t">Halflight</div><div class="a">Marrow Lake</div></div></div>
-        <div class="m-ctl">
-          <div class="m-btns"><span>⇄</span><span>⏮</span><span class="play">▶</span><span>⏭</span><span>↻</span></div>
-          <div class="m-bar"><span>1:42</span><div class="track"></div><span>3:58</span></div>
-        </div>
-        <div class="m-vol"><span>vol</span><div class="track"></div></div>
-      </div>
-    </div>
   </figure>
 </section>
 
@@ -218,40 +107,10 @@ footer a { color: var(--dim); }
   <div class="pair">
     <figure class="shot">
       <img src="/shots/player.webp" alt="Glyph now playing view with synced lyrics" width="1200" height="800">
-      <div class="mock" aria-hidden="true">
-        <div class="m-np">
-          <pre class="big" id="big-cover"></pre>
-          <div class="m-lyr">
-            <div class="past">the streetlights hum a borrowed tune</div>
-            <div class="past">we count the stops till june</div>
-            <div class="now">and every window holds a moon</div>
-            <div>that never learned to fall</div>
-            <div>so leave the radio on low</div>
-          </div>
-        </div>
-      </div>
       <figcaption>now playing, with lyrics that keep time</figcaption>
     </figure>
     <figure class="shot">
       <img src="/shots/search.webp" alt="Glyph search results from several sources" width="1200" height="800">
-      <div class="mock" aria-hidden="true">
-        <div class="m-title">
-          <span class="logo">♪</span>
-          <div class="m-search"><span>⌕</span><b>night drive</b></div>
-        </div>
-        <div class="m-body" style="grid-template-columns:1fr">
-          <div class="m-main">
-            <div class="m-sub" style="margin-top:0">-- songs · 4 sources</div>
-            <div class="m-list">
-              <div class="m-li"><span class="n">1</span><div class="cover" data-c="8"></div><div><div class="t">Night Drive</div><div class="a">Kite Theory</div></div><span class="badge">deezer</span><span class="d">3:21</span></div>
-              <div class="m-li"><span class="n">2</span><div class="cover" data-c="9"></div><div><div class="t">Night Drive (Live)</div><div class="a">Oda Fenn</div></div><span class="badge">archive</span><span class="d">5:07</span></div>
-              <div class="m-li"><span class="n">3</span><div class="cover" data-c="10"></div><div><div class="t">Drive Home Slow</div><div class="a">Marrow Lake</div></div><span class="badge">audius</span><span class="d">3:44</span></div>
-              <div class="m-li"><span class="n">4</span><div class="cover" data-c="11"></div><div><div class="t">Nightdriver<span class="badge e">E</span></div><div class="a">Juno Vale</div></div><span class="badge">jamendo</span><span class="d">2:58</span></div>
-              <div class="m-li"><span class="n">5</span><div class="cover" data-c="12"></div><div><div class="t">Neon Overpass</div><div class="a">The Quiet Hours</div></div><span class="badge">audius</span><span class="d">4:30</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
       <figcaption>one search, every source</figcaption>
     </figure>
   </div>
@@ -274,7 +133,7 @@ footer a { color: var(--dim); }
 /*NOTE*/
 glyphNote(document.getElementById("note"), Math.min(11, Math.max(7, innerWidth / 110)));
 
-// Real screenshots replace the mockups once they load.
+// A figure shows once its screenshot loads.
 document.querySelectorAll(".shot img").forEach(img => {
   const real = () => img.naturalWidth > 0 && img.closest(".shot").classList.add("real");
   if (img.complete) real(); else img.addEventListener("load", real);
@@ -286,47 +145,6 @@ document.querySelectorAll("[data-rule]").forEach(el => {
   b.textContent = el.dataset.rule;
   el.append("-- ", b, " " + "-".repeat(200));
 });
-
-// Covers: a soft gradient with ASCII texture, like the app's ASCII covers.
-const HUES = [[322, 260], [28, 340], [200, 250], [150, 190], [45, 15], [290, 220], [12, 330], [180, 230], [260, 300], [100, 160], [340, 20], [215, 275], [60, 120]];
-function asciiTex(seed, cols, rows) {
-  const ramp = " .:-=+*#%@";
-  let out = "";
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const v = Math.sin(x * 0.35 + seed) * Math.cos(y * 0.3 - seed * 0.7) + Math.sin((x + y) * 0.18 + seed * 1.3);
-      out += ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor((v + 2) / 4 * ramp.length)))];
-    }
-    out += "\n";
-  }
-  return out;
-}
-document.querySelectorAll(".cover[data-c]").forEach(el => {
-  const i = +el.dataset.c, [a, b] = HUES[i % HUES.length];
-  el.style.background = `linear-gradient(135deg, hsl(${a} 70% 52%), hsl(${b} 60% 22%))`;
-  const pre = document.createElement("pre");
-  pre.textContent = asciiTex(i * 1.7, 40, 30);
-  el.append(pre);
-});
-
-// Big ASCII cover in the now playing mockup.
-(() => {
-  const el = document.getElementById("big-cover");
-  const ramp = " .,:-=+*#%@", cols = 44, rows = 30;
-  for (let y = 0; y < rows; y++) {
-    let line = "";
-    for (let x = 0; x < cols; x++) {
-      const dx = (x - cols / 2) / (cols / 2), dy = (y - rows / 2) / (rows / 2);
-      const r = Math.sqrt(dx * dx + dy * dy);
-      const v = r > 1 ? 0 : (Math.cos(r * 9) * 0.5 + 0.5) * (1 - r * 0.6) + (r < 0.12 ? 1 : 0);
-      line += ramp[Math.min(ramp.length - 1, Math.floor(v * ramp.length))];
-    }
-    const s = document.createElement("span");
-    if (y > rows * 0.35 && y < rows * 0.65) s.className = "p";
-    s.textContent = line + "\n";
-    el.append(s);
-  }
-})();
 
 // Name the platform on the download buttons.
 (() => {

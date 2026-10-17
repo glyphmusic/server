@@ -3,7 +3,7 @@
 //! (`share.rs`) uses the same stylesheet and ASCII note.
 //!
 //! Screenshots are compiled in from `site/shots/`. A file left empty is a
-//! 404, and the page then shows its drawn mockup instead.
+//! 404, and the page then leaves that figure out.
 
 use crate::error::ApiErr;
 use crate::server::{Body, Request, Response};
@@ -85,7 +85,7 @@ mod tests {
         let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert_eq!(r.status, 200);
         assert!(html.contains("function glyphNote") && html.contains("--pink") && !html.contains("/*NOTE*/"));
-        // Empty slots fall back to the mockups.
+        // Empty slots are 404 and the page leaves them out.
         let want = if SHOTS[0].2.is_empty() { 404 } else { 200 };
         assert_eq!(block_on(s.handle(get("/shots/home.webp"))).status, want);
         assert_eq!(block_on(s.handle(get("/shots/../Cargo.toml"))).status, 404);
