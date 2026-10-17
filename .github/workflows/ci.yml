@@ -18,7 +18,7 @@ jobs:
       # glyph-protocol is a path dependency (../glyph) until the pinned git tag is used.
       - uses: actions/checkout@v4
         with:
-          repository: glyphmusic/glyph
+          repository: glyphmusic/desktop
           path: glyph
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -36,7 +36,7 @@ jobs:
           path: glyph-server
       - uses: actions/checkout@v4
         with:
-          repository: glyphmusic/glyph
+          repository: glyphmusic/desktop
           path: glyph
       - uses: dtolnay/rust-toolchain@stable
         with:
