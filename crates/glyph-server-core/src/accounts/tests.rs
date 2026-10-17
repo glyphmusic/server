@@ -629,3 +629,80 @@ fn share_links_need_an_account_and_die_with_it() {
     let page = block_on(t.s.handle(Request::new(Method::Get, &format!("/p/{id}"), vec![], vec![], None)));
     assert_eq!(page.status, 404);
 }
+
+#[test]
+fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
+    let t = setup();
+    let (owner, _, _) = sign_up(&t, "owner");
+    let (viewer, _, _) = sign_up(&t, "viewer");
+    let now = t.h.rt.now_ms();
+    let bearer = |s: &Session| vec![("authorization".to_string(), format!("Bearer {}", s.access_token))];
+    let cover = b"\x89PNG\r\n\x1a\ncover".to_vec();
+    let cover_sha = hex(&Sha256::digest(&cover));
+    let r = block_on(t.s.handle(Request::new(Method::Put, &format!("/v1/sync/covers/{cover_sha}"), bearer(&owner), cover.clone(), None)));
+    assert_eq!(r.status, 200);
+    let track = serde_json::json!({"title": "Song", "artist": "Band"});
+    let items = vec![
+        item("playlist", "p1", Some(serde_json::json!({"name": "Shown", "tracks": [track, track], "cover": cover_sha})), now),
+        item("playlist", "p2", Some(serde_json::json!({"name": "Hidden", "tracks": [track]})), now),
+    ];
+    let (s, _) = call(&t, Method::Post, "/v1/sync/push", serde_json::json!({"items": items}), Some(&owner.access_token));
+    assert_eq!(s, 200);
+
+    // Signed-in only.
+    let (s, _) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, None);
+    assert_eq!(s, 401);
+    // Private by default: handle only.
+    let (s, v) = call(&t, Method::Get, "/v1/profiles/@Owner", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["private"].as_bool(), v["own"].as_bool(), v["playlists"].as_array().map(|a| a.len())), (Some(true), Some(false), Some(0)));
+    let (s, _) = call(&t, Method::Get, "/v1/profiles/nobody", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(s, 404);
+
+    // Picture: stored, served by its hash, the old one removed when replaced.
+    let pic = b"\xff\xd8\xffpicture".to_vec();
+    let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), pic.clone(), None)));
+    assert_eq!(r.status, 200);
+    let settings: serde_json::Value = serde_json::from_slice(r.bytes().unwrap()).unwrap();
+    let pic_sha = settings["avatar"].as_str().unwrap().to_string();
+    let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), b"text".to_vec(), None)));
+    assert_eq!(r.status, 400);
+    let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{pic_sha}"), bearer(&viewer), vec![], None)));
+    assert_eq!((r.status, r.bytes().unwrap()), (200, pic.as_slice()));
+    let pic2 = b"\xff\xd8\xffsecond".to_vec();
+    block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), pic2, None)));
+    assert!(!t.blobs.objects.lock().unwrap().contains_key(&format!("users/{}/profile/{pic_sha}", owner.account.id)));
+
+    // Open the profile, show one playlist and the recent songs.
+    let (s, v) = call(&t, Method::Patch, "/v1/profile", serde_json::json!({"public": true, "show_recent": true, "playlists": ["p1", "p1", "gone"]}), Some(&owner.access_token));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["playlists"], serde_json::json!(["p1", "gone"]));
+    let (s, v) = call(&t, Method::Put, "/v1/profile/recent", serde_json::json!({"tracks": [track]}), Some(&owner.access_token));
+    assert_eq!((s, v["stored"].as_bool()), (200, Some(true)));
+    let (_, v) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(v["private"], false);
+    assert_eq!(v["playlists"], serde_json::json!([{"id": "p1", "name": "Shown", "songs": 2, "cover": cover_sha}]));
+    assert_eq!(v["recent"], serde_json::json!([track]));
+    let (s, v) = call(&t, Method::Get, "/v1/profiles/owner/playlists/p1", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!((s, v["tracks"].as_array().map(|a| a.len())), (200, Some(2)));
+    let (s, _) = call(&t, Method::Get, "/v1/profiles/owner/playlists/p2", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(s, 404);
+    let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{cover_sha}"), bearer(&viewer), vec![], None)));
+    assert_eq!(r.status, 200);
+
+    // Recent songs off: cleared. Private again: nothing, except for the owner.
+    call(&t, Method::Patch, "/v1/profile", serde_json::json!({"show_recent": false, "public": false}), Some(&owner.access_token));
+    let (_, v) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, Some(&owner.access_token));
+    assert_eq!((v["own"].as_bool(), v["recent"].as_array().map(|a| a.len()), v["playlists"].as_array().map(|a| a.len())), (Some(true), Some(0), Some(1)));
+    let (s, _) = call(&t, Method::Get, "/v1/profiles/owner/playlists/p1", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(s, 404);
+    let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{cover_sha}"), bearer(&viewer), vec![], None)));
+    assert_eq!(r.status, 404);
+
+    // Deleting the account removes the profile and its pictures.
+    let (s, _) = call(&t, Method::Delete, "/v1/account", serde_json::json!({"confirm_handle": "owner"}), Some(&owner.access_token));
+    assert_eq!(s, 200);
+    assert!(!t.blobs.objects.lock().unwrap().keys().any(|k| k.starts_with(&format!("users/{}/", owner.account.id))));
+    let (s, _) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, Some(&viewer.access_token));
+    assert_eq!(s, 404);
+}

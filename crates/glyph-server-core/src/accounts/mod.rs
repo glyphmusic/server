@@ -6,6 +6,7 @@
 //! behind [`Entropy`] (this crate has no RNG of its own). Hosts enable accounts
 //! with [`crate::Server::with_accounts`]; without it every route here is a 404.
 
+pub mod profile;
 pub mod store;
 pub mod webauthn;
 
@@ -75,8 +76,10 @@ pub fn max_body_bytes(path: &str) -> Option<usize> {
         Some(MAX_PUSH_BYTES)
     } else if let Some(n) = crate::share::max_body_bytes(path) {
         Some(n)
-    } else if path.starts_with("/v1/sync/covers/") {
+    } else if path.starts_with("/v1/sync/covers/") || path == "/v1/profile/avatar" {
         Some(MAX_OWN_COVER)
+    } else if path == "/v1/profile/banner" {
+        Some(profile::MAX_BANNER)
     } else {
         None
     }
@@ -84,7 +87,7 @@ pub fn max_body_bytes(path: &str) -> Option<usize> {
 
 /// Paths owned by this module.
 pub fn owns(path: &str) -> bool {
-    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/"]
+    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/", "/v1/profile", "/v1/profiles/"]
         .iter()
         .any(|p| path == p.trim_end_matches('/') || path.starts_with(&format!("{}/", p.trim_end_matches('/'))))
 }
@@ -535,6 +538,9 @@ impl Accounts {
             };
             let salt = salt.ok_or_else(|| ApiErr::new(404, "no_password", "no password set for this handle"))?;
             return Ok(Response::json(200, &PasswordSalt { salt }));
+        }
+        if path == "/v1/profile" || path.starts_with("/v1/profile/") || path.starts_with("/v1/profiles/") {
+            return self.profile_route(svc, req, path).await;
         }
         if let Some(rest) = path.strip_prefix("/v1/devices/") {
             let a = self.auth(svc, req).await?;
