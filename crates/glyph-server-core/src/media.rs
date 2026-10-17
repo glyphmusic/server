@@ -62,6 +62,33 @@ pub fn valid_command(args: &[String]) -> bool {
     }
 }
 
+/// Resolved YouTube audio URLs are reused until shortly before they expire,
+/// so replays, seeks and other users skip the yt-dlp run (several seconds).
+const URL_MARGIN_S: u64 = 20 * 60;
+/// Lifetime assumed when the URL carries no `expire=`.
+const URL_DEFAULT_TTL_S: u64 = 60 * 60;
+/// Longest a URL is kept, whatever `expire=` says.
+const URL_MAX_TTL_S: u64 = 6 * 60 * 60;
+
+fn audio_url_key(id: &str) -> String {
+    format!("ytaudio:v1:{id}")
+}
+
+/// Seconds a googlevideo URL may still be handed out, from its `expire=`.
+pub fn url_ttl_s(url: &url::Url, now_s: u64) -> u64 {
+    let expire = url.query_pairs().find(|(k, _)| k == "expire").and_then(|(_, v)| v.parse::<u64>().ok());
+    match expire {
+        Some(e) => e.saturating_sub(now_s).saturating_sub(URL_MARGIN_S).min(URL_MAX_TTL_S),
+        None => URL_DEFAULT_TTL_S,
+    }
+}
+
+/// Drops a cached YouTube URL that the upstream refused (an empty value
+/// counts as a miss; it also overwrites the copy on disk).
+pub async fn forget_audio_url(svc: &Services, id: &str) {
+    svc.cache.put(&crate::cache::norm_key(&audio_url_key(id)), Vec::new(), URL_MAX_TTL_S).await;
+}
+
 pub fn audio_path(provider: ProviderId, id: &str) -> String {
     let name = serde_json::to_value(provider)
         .unwrap()
@@ -123,6 +150,10 @@ pub async fn audio_url(
                 .ytdlp_path
                 .as_deref()
                 .ok_or(ProviderError::NotConfigured)?;
+            let key = audio_url_key(id);
+            if let Some(hit) = crate::cache::get_json::<String>(&*svc.cache, &key).await {
+                return Ok(hit);
+            }
             let video = format!("https://www.youtube.com/watch?v={id}");
             let args: Vec<String> = [
                 "--ignore-config",
@@ -156,7 +187,12 @@ pub async fn audio_url(
             {
                 return Err(ProviderError::Parse);
             }
-            return Ok(url.into());
+            let ttl = url_ttl_s(&url, svc.rt.now_ms() / 1000);
+            let url: String = url.into();
+            if ttl >= 60 {
+                crate::cache::put_json(&*svc.cache, &key, &url, ttl).await;
+            }
+            return Ok(url);
         }
         let pb = if provider == ProviderId::Deezer {
             providers::deezer::by_id(svc, id)
@@ -296,9 +332,21 @@ mod tests {
         assert!(args[0].contains(AUDIO_FORMAT));
         drop(args);
         assert!(block_on(audio_url(&h.svc, ProviderId::YouTube, "../bad")).is_err());
+        // The second request is served from the cache, without yt-dlp.
+        assert!(block_on(audio_url(&h.svc, ProviderId::YouTube, "abcdefghijk")).is_ok());
+        assert_eq!(h.cmds.call_count("--get-url"), 1);
+        block_on(forget_audio_url(&h.svc, "abcdefghijk"));
         h.cmds.rules.lock().unwrap().clear();
         h.cmds.on("--get-url", "https://localhost/private");
         assert!(block_on(audio_url(&h.svc, ProviderId::YouTube, "abcdefghijk")).is_err());
+    }
+    #[test]
+    fn url_lifetime_follows_expire() {
+        let u = url::Url::parse("https://rr1.googlevideo.com/videoplayback?expire=10000&x=1").unwrap();
+        assert_eq!(url_ttl_s(&u, 10000 - 3600), 3600 - URL_MARGIN_S);
+        assert_eq!(url_ttl_s(&u, 10000), 0);
+        let u = url::Url::parse("https://rr1.googlevideo.com/videoplayback").unwrap();
+        assert_eq!(url_ttl_s(&u, 0), URL_DEFAULT_TTL_S);
     }
     #[test]
     fn jamendo_download_requires_permission() {

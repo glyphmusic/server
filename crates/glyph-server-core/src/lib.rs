@@ -23,6 +23,7 @@ pub mod ratelimit;
 pub mod resolver;
 pub mod search;
 pub mod server;
+pub mod share;
 pub mod traits;
 
 #[cfg(test)]

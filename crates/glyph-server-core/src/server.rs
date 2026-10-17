@@ -23,7 +23,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Largest request body accepted for `path` (sync pushes and cover uploads are bigger).
 pub fn max_body_bytes(path: &str) -> usize {
-    crate::accounts::max_body_bytes(path).unwrap_or(MAX_BODY_BYTES)
+    crate::accounts::max_body_bytes(path).or_else(|| crate::share::max_body_bytes(path)).unwrap_or(MAX_BODY_BYTES)
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +202,12 @@ impl Server {
         }
         if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
             return acc.handle(&svc, req).await;
+        }
+        if crate::share::owns(req.path.trim_end_matches('/')) {
+            if let Err(e) = rate_limit(&svc, &req).await {
+                return Response::error(e);
+            }
+            return crate::share::handle(&svc, req).await.unwrap_or_else(Response::error);
         }
         let Some((route, method)) = route(&req.path) else {
             return Response::error(ApiErr::not_found("unknown endpoint"));

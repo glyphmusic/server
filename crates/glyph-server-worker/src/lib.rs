@@ -174,6 +174,8 @@ fn build_server(env: &Env) -> Server {
     // (`glyph-server hash-password`, or `glyph-server cloudflare setup`).
     config.admin_password_hash = secret(env, "ADMIN_PASSWORD_HASH")
         .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
+    // Short playlist links (`/p/<id>`); the domain must route `/p/*` to this Worker.
+    config.share_origin = secret(env, "SHARE_ORIGIN").filter(|o| o.starts_with("https://"));
     if let Some(n) = secret(env, "RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()) {
         config.rate_limit_per_min = n;
     }
