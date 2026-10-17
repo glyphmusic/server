@@ -203,6 +203,9 @@ impl Server {
         if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
             return acc.handle(&svc, req).await;
         }
+        if crate::site::owns(req.path.trim_end_matches('/')) {
+            return crate::site::handle(&req).unwrap_or_else(Response::error);
+        }
         let Some((route, method)) = route(&req.path) else {
             return Response::error(ApiErr::not_found("unknown endpoint"));
         };

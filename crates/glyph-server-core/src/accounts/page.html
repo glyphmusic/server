@@ -78,6 +78,14 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
 .note.bad, .err { color: var(--bad); }
 .err:empty { display: none; }
 .box { border: 1px dashed var(--dim); padding: 10px 2ch; letter-spacing: 0.05em; word-break: break-all; user-select: all; }
+/* Recovery code: hidden behind a blur until clicked. */
+.secret { position: relative; cursor: pointer; user-select: none; }
+.secret #rcode { filter: blur(6px); transition: filter .15s; }
+.secret::after { content: attr(data-hint); position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--fg); }
+.secret:hover #rcode, .secret:focus-visible #rcode { filter: blur(5px); }
+.box.shown { cursor: auto; user-select: all; }
+.box.shown::after { content: none; }
+.box.shown #rcode { filter: none; }
 .dev { display: flex; gap: 2ch; align-items: baseline; }
 .dev span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dev button { color: var(--bad); }
@@ -167,7 +175,8 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
   <pre class="rule" id="rule-done"></pre>
   <div class="note ok" id="done-lead"></div>
   <div class="stack" id="rc" hidden>
-    <div class="box" id="rcode"></div>
+    <div class="box secret" id="rcbox" tabindex="0" role="button"><span id="rcode"></span></div>
+    <div class="row"><button id="rc-show" data-t="rc_show"></button><button id="rc-copy" data-t="rc_copy"></button><button id="rc-dl" data-t="rc_dl"></button></div>
     <div class="dim" data-t="rc"></div>
   </div>
   <div class="stack" id="full" hidden>
@@ -179,7 +188,7 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
 </main>
 <script>
 "use strict";
-const T = { title:"sign in", lead:"your library on every device.", link_title:"add passkey", link_lead:"sign in as @{h} without a password from now on.", code:"code in glyph", signin:"sign in", create:"new account", passkey:"continue with passkey", createpk:"create passkey", recover:"sign in with recovery code", recover_q:"lost your passkey? use a recovery code", password:"password", repeat:"repeat password", or:"or", create_btn:"create account", passkey_alt:"create a passkey instead", pw_rules:"at least 10 characters. it is hashed on this device, the server never sees it.", pw_short:"the password needs at least 10 characters.", pw_mismatch:"the passwords do not match.", login_failed:"handle or password wrong.", fill:"enter handle and password.", nokdf:"could not load the password module. reload the page or use a passkey.", back_q:"back to passkey", handle:"handle", rules:"3-20 characters: a-z 0-9 _", rc_label:"recovery code", rc:"your recovery code. store it somewhere safe, it is shown only once.", full:"device limit reached. remove one device to finish:", back:"done. close this tab and go back to glyph.", linked:"passkey added. you can close this tab.", remove:"remove", free:"is free", taken:"is taken", invalid:"3-20 characters: a-z 0-9 _", reserved:"is reserved", expired:"this sign-in expired. start again in glyph.", nopk:"this browser cannot use passkeys. use a pairing code in glyph instead.", failed:"that did not work. try again.", cancelled:"cancelled." };
+const T = { title:"sign in", lead:"your library on every device.", link_title:"add passkey", link_lead:"sign in as @{h} without a password from now on.", code:"code in glyph", signin:"sign in", create:"new account", passkey:"continue with passkey", createpk:"create passkey", recover:"sign in with recovery code", recover_q:"lost your passkey? use a recovery code", password:"password", repeat:"repeat password", or:"or", create_btn:"create account", passkey_alt:"create a passkey instead", pw_rules:"at least 10 characters. it is hashed on this device, the server never sees it.", pw_short:"the password needs at least 10 characters.", pw_mismatch:"the passwords do not match.", login_failed:"handle or password wrong.", fill:"enter handle and password.", nokdf:"could not load the password module. reload the page or use a passkey.", back_q:"back to passkey", handle:"handle", rules:"3-20 characters: a-z 0-9 _", rc_label:"recovery code", rc:"your recovery code. store it somewhere safe, it is shown only once.", rc_reveal:"click to show", rc_show:"[show]", rc_hide:"[hide]", rc_copy:"[copy]", rc_copied:"[copied]", rc_dl:"[download .txt]", full:"device limit reached. remove one device to finish:", back:"done. close this tab and go back to glyph.", linked:"passkey added. you can close this tab.", remove:"remove", free:"is free", taken:"is taken", invalid:"3-20 characters: a-z 0-9 _", reserved:"is reserved", expired:"this sign-in expired. start again in glyph.", nopk:"this browser cannot use passkeys. use a pairing code in glyph instead.", failed:"that did not work. try again.", cancelled:"cancelled." };
 document.querySelectorAll("[data-t]").forEach(e => { e.textContent = T[e.dataset.t]; });
 const $ = id => document.getElementById(id);
 const loginId = location.pathname.split("/").filter(Boolean).pop();
@@ -333,8 +342,41 @@ function done(r) {
   if (r.linked) { $("done-lead").textContent = "ok " + T.linked; return; }
   pageSecret = r.page_secret;
   limit = r.device_limit;
-  if (r.recovery_code) { $("rc").hidden = false; $("rcode").textContent = r.recovery_code; }
+  if (r.recovery_code) recoveryCode(r.handle, r.recovery_code);
   devices(r.devices);
+}
+
+// The code stays blurred until clicked; copy and download work either way.
+function recoveryCode(handle, code) {
+  $("rc").hidden = false;
+  $("rcode").textContent = code;
+  const box = $("rcbox");
+  box.dataset.hint = T.rc_reveal;
+  const show = on => {
+    box.classList.toggle("shown", on);
+    box.classList.toggle("secret", !on);
+    $("rc-show").textContent = on ? T.rc_hide : T.rc_show;
+    // While blurred, screen readers get the hint instead of the code.
+    if (on) box.removeAttribute("aria-label"); else box.setAttribute("aria-label", T.rc_reveal);
+  };
+  show(false);
+  box.onclick = () => { if (!box.classList.contains("shown")) show(true); };
+  box.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(true); } };
+  $("rc-show").onclick = () => show(!box.classList.contains("shown"));
+  $("rc-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(code); $("rc-copy").textContent = T.rc_copied; }
+    catch { show(true); }
+  };
+  $("rc-dl").onclick = () => {
+    const text = "Glyph recovery code for @" + handle + "\n\n" + code + "\n\nSign in with it on the Glyph sign-in page if you lose your passkeys and password.\nA new code makes this one invalid.\n";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    a.download = "glyph-recovery-code-" + handle + ".txt";
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
 }
 
 function devices(list) {

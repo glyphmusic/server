@@ -126,6 +126,23 @@ fn base_args() -> Vec<String> {
         .collect()
 }
 
+/// Title, channel and length of one video (`--dump-json --skip-download`,
+/// nothing is downloaded). `Ok(None)` = the video is gone or private.
+pub async fn video_info(svc: &Services, video_id: &str) -> PResult<Option<(String, String, Option<u64>)>> {
+    let bin = svc.config.ytdlp_path.clone().ok_or(ProviderError::NotConfigured)?;
+    let mut args = base_args();
+    args.push("--dump-json".into());
+    args.push("--skip-download".into());
+    args.push("--".into());
+    args.push(format!("https://www.youtube.com/watch?v={video_id}"));
+    let entries = run(svc, &bin, &args, DETAIL_TIMEOUT_MS).await?;
+    Ok(entries.into_iter().find(|e| e.id == video_id && !e.title.is_empty() && e.live_status.as_deref() != Some("is_live")).map(|e| {
+        let channel = if e.channel.is_empty() { e.uploader } else { e.channel };
+        let ms = e.duration.filter(|s| *s > 0.0).map(|s| (s * 1000.0) as u64);
+        (e.title, channel, ms)
+    }))
+}
+
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
     let bin = svc.config.ytdlp_path.clone().ok_or(ProviderError::NotConfigured)?;
 

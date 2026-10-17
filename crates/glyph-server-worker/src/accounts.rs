@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use glyph_server_core::accounts::store::{
-    AccountStore, BlobStore, Device, Item, Login, Passkey, StoreError, StoreResult, User,
+    AccountStore, BlobStore, Device, Item, Login, Passkey, Profile, Share, StoreError, StoreResult, User,
 };
 use glyph_server_core::accounts::Entropy;
 use serde::de::DeserializeOwned;
@@ -280,6 +280,8 @@ impl AccountStore for D1Store {
             self.stmt("DELETE FROM devices WHERE user_id = ?1", &[id.clone()])?,
             self.stmt("DELETE FROM sync_items WHERE user_id = ?1", &[id.clone()])?,
             self.stmt("DELETE FROM logins WHERE user_id = ?1", &[id.clone()])?,
+            self.stmt("DELETE FROM shares WHERE owner_id = ?1", &[id.clone()])?,
+            self.stmt("DELETE FROM profiles WHERE user_id = ?1", &[id.clone()])?,
             self.stmt("DELETE FROM users WHERE id = ?1", &[id])?,
         ])
         .await
@@ -501,6 +503,70 @@ impl AccountStore for D1Store {
         ])
         .await
         .map(|_| ())
+    }
+
+    async fn put_share(&self, sh: &Share) -> StoreResult<()> {
+        self.run(
+            "INSERT OR REPLACE INTO shares (id, owner_id, code, name, songs, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            &[s(&sh.id), s(&sh.owner_id), s(&sh.code), s(&sh.name), n(sh.songs as u64), s(&sh.kind), n(sh.created_at)],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>> {
+        #[derive(Deserialize)]
+        struct Row {
+            public: u8,
+            show_recent: u8,
+            playlists: String,
+            avatar: Option<String>,
+            banner: Option<String>,
+            recent: Option<String>,
+            updated_at: u64,
+        }
+        let r = self
+            .first::<Row>("SELECT public, show_recent, playlists, avatar, banner, recent, updated_at FROM profiles WHERE user_id = ?1", &[s(user_id)])
+            .await?;
+        Ok(r.map(|r| Profile {
+            public: r.public != 0,
+            show_recent: r.show_recent != 0,
+            playlists: serde_json::from_str(&r.playlists).unwrap_or_default(),
+            avatar: r.avatar,
+            banner: r.banner,
+            recent: r.recent,
+            updated_at: r.updated_at,
+        }))
+    }
+
+    async fn put_profile(&self, user_id: &str, p: &Profile) -> StoreResult<()> {
+        let playlists = serde_json::to_string(&p.playlists).unwrap_or_else(|_| "[]".into());
+        self.run(
+            "INSERT OR REPLACE INTO profiles (user_id, public, show_recent, playlists, avatar, banner, recent, updated_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)",
+            &[s(user_id), n(p.public as u64), n(p.show_recent as u64), s(&playlists), opt(&p.avatar), opt(&p.banner), opt(&p.recent), n(p.updated_at)],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn share(&self, id: &str) -> StoreResult<Option<Share>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            owner_id: String,
+            code: String,
+            name: String,
+            songs: u32,
+            kind: String,
+            created_at: u64,
+        }
+        let r = self.first::<Row>("SELECT id, owner_id, code, name, songs, kind, created_at FROM shares WHERE id = ?1", &[s(id)]).await?;
+        Ok(r.map(|r| Share { id: r.id, owner_id: r.owner_id, code: r.code, name: r.name, songs: r.songs, kind: r.kind, created_at: r.created_at }))
+    }
+
+    async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool> {
+        Ok(self.run("DELETE FROM shares WHERE id = ?1 AND owner_id = ?2", &[s(id), s(user_id)]).await? > 0)
     }
 }
 

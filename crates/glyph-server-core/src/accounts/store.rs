@@ -89,6 +89,21 @@ pub struct Login {
     pub expires: u64,
 }
 
+/// A short playlist link (`/p/<id>`), owned by the account that made it and
+/// deleted with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Share {
+    pub id: String,
+    pub owner_id: String,
+    /// `glyph:playlist:` code.
+    pub code: String,
+    pub name: String,
+    pub songs: u32,
+    /// "playlist", or "album" for an artist's single / album (no author shown).
+    pub kind: String,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub kind: String,
@@ -99,6 +114,22 @@ pub struct Item {
     pub device_id: String,
     pub deleted: bool,
     pub rev: u64,
+}
+
+/// Profile settings of an account (see `accounts::profile`). Absent = default:
+/// private, no songs, nothing shown.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Profile {
+    pub public: bool,
+    pub show_recent: bool,
+    /// Ids of the playlists shown, in order.
+    pub playlists: Vec<String>,
+    /// sha256 of the picture / banner (blob `users/{id}/profile/{sha}`).
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
+    /// JSON array of the songs played last.
+    pub recent: Option<String>,
+    pub updated_at: u64,
 }
 
 /// Last writer wins: newer timestamp, ties broken by the larger device id.
@@ -157,6 +188,15 @@ pub trait AccountStore: MaybeSendSync {
     async fn items_since(&self, user_id: &str, since: u64, limit: u32) -> StoreResult<Vec<Item>>;
     /// Drop tombstones older than `before` (ms) and raise `purged_rev`.
     async fn purge_tombstones(&self, user_id: &str, before: u64) -> StoreResult<()>;
+
+    /// Insert or replace a short playlist link (by id).
+    async fn put_share(&self, share: &Share) -> StoreResult<()>;
+    async fn share(&self, id: &str) -> StoreResult<Option<Share>>;
+    /// `false` when `user_id` has no link `id`.
+    async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool>;
+    async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>>;
+    /// Insert or replace (`delete_user` removes it).
+    async fn put_profile(&self, user_id: &str, profile: &Profile) -> StoreResult<()>;
 }
 
 /// Binary objects (cover images).
@@ -178,6 +218,8 @@ struct Mem {
     logins: BTreeMap<String, Login>,
     devices: BTreeMap<String, Device>,
     items: BTreeMap<(String, String, String), Item>,
+    shares: BTreeMap<String, Share>,
+    profiles: BTreeMap<String, Profile>,
     default_limit: Option<u8>,
 }
 
@@ -271,6 +313,8 @@ impl AccountStore for MemStore {
         m.devices.retain(|_, d| d.user_id != user_id);
         m.items.retain(|(u, _, _), _| u != user_id);
         m.logins.retain(|_, l| l.user_id.as_deref() != Some(user_id));
+        m.shares.retain(|_, s| s.owner_id != user_id);
+        m.profiles.remove(user_id);
         Ok(())
     }
     async fn passkey(&self, cred_id: &str) -> StoreResult<Option<Passkey>> {
@@ -382,6 +426,32 @@ impl AccountStore for MemStore {
         });
         if let Some(u) = m.users.get_mut(user_id) {
             u.purged_rev = u.purged_rev.max(max);
+        }
+        Ok(())
+    }
+    async fn put_share(&self, share: &Share) -> StoreResult<()> {
+        self.m.lock().unwrap().shares.insert(share.id.clone(), share.clone());
+        Ok(())
+    }
+    async fn share(&self, id: &str) -> StoreResult<Option<Share>> {
+        Ok(self.m.lock().unwrap().shares.get(id).cloned())
+    }
+    async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool> {
+        let mut m = self.m.lock().unwrap();
+        if m.shares.get(id).is_some_and(|s| s.owner_id == user_id) {
+            m.shares.remove(id);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>> {
+        Ok(self.m.lock().unwrap().profiles.get(user_id).cloned())
+    }
+    async fn put_profile(&self, user_id: &str, profile: &Profile) -> StoreResult<()> {
+        let mut m = self.m.lock().unwrap();
+        if m.users.contains_key(user_id) {
+            m.profiles.insert(user_id.to_string(), profile.clone());
         }
         Ok(())
     }

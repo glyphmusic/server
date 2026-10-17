@@ -32,6 +32,9 @@ device limit and every server-side limit.
 | `GET /v1/audio/:provider/:id` | Streaming audio, byte ranges; edge-cached on Workers, direct on the binary |
 | `POST /v1/download` | Track -> explicitly permitted download reference, or null |
 | `GET /v1/download/:provider/:id` | Streaming proxy for permitted downloads |
+| `POST /v1/share` | Signed in: `{code, name?, songs?, kind?}` -> `{id, url}` short playlist link |
+| `GET /v1/share/:id` | `{code, name, songs, kind, author}`; `DELETE` (owner) removes it |
+| `GET /p/:id` | Landing page of a short link; links are deleted with their account |
 
 Types come from the shared `glyph-protocol` crate. Errors are `ApiError` JSON; rate limits
 answer `429` with `retry_after_s` and a `Retry-After` header. Clients send an anonymous

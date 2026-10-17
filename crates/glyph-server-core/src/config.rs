@@ -132,6 +132,9 @@ pub struct Config {
     pub audius_app_name: String,
     /// Argon2id PHC hash of the admin password. `None` = admin API disabled.
     pub admin_password_hash: Option<String>,
+    /// Origin of short playlist links (`https://glyph.my` -> `https://glyph.my/p/<id>`).
+    /// `None` = links point at the host the request came in on.
+    pub share_origin: Option<String>,
 }
 
 impl Config {
@@ -147,6 +150,7 @@ impl Config {
             import_max_pages: 5,
             audius_app_name: "glyph".to_string(),
             admin_password_hash: None,
+            share_origin: None,
         }
     }
 
