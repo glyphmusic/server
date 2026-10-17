@@ -101,6 +101,22 @@ pub struct Item {
     pub rev: u64,
 }
 
+/// Profile settings of an account (see `accounts::profile`). Absent = default:
+/// private, no songs, nothing shown.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Profile {
+    pub public: bool,
+    pub show_recent: bool,
+    /// Ids of the playlists shown, in order.
+    pub playlists: Vec<String>,
+    /// sha256 of the picture / banner (blob `users/{id}/profile/{sha}`).
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
+    /// JSON array of the songs played last.
+    pub recent: Option<String>,
+    pub updated_at: u64,
+}
+
 /// Last writer wins: newer timestamp, ties broken by the larger device id.
 pub fn wins(new: &Item, old: &Item) -> bool {
     (new.updated_at, new.device_id.as_str()) > (old.updated_at, old.device_id.as_str())
@@ -157,6 +173,10 @@ pub trait AccountStore: MaybeSendSync {
     async fn items_since(&self, user_id: &str, since: u64, limit: u32) -> StoreResult<Vec<Item>>;
     /// Drop tombstones older than `before` (ms) and raise `purged_rev`.
     async fn purge_tombstones(&self, user_id: &str, before: u64) -> StoreResult<()>;
+
+    async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>>;
+    /// Insert or replace (`delete_user` removes it).
+    async fn put_profile(&self, user_id: &str, profile: &Profile) -> StoreResult<()>;
 }
 
 /// Binary objects (cover images).
@@ -178,6 +198,7 @@ struct Mem {
     logins: BTreeMap<String, Login>,
     devices: BTreeMap<String, Device>,
     items: BTreeMap<(String, String, String), Item>,
+    profiles: BTreeMap<String, Profile>,
     default_limit: Option<u8>,
 }
 
@@ -271,6 +292,7 @@ impl AccountStore for MemStore {
         m.devices.retain(|_, d| d.user_id != user_id);
         m.items.retain(|(u, _, _), _| u != user_id);
         m.logins.retain(|_, l| l.user_id.as_deref() != Some(user_id));
+        m.profiles.remove(user_id);
         Ok(())
     }
     async fn passkey(&self, cred_id: &str) -> StoreResult<Option<Passkey>> {
@@ -382,6 +404,16 @@ impl AccountStore for MemStore {
         });
         if let Some(u) = m.users.get_mut(user_id) {
             u.purged_rev = u.purged_rev.max(max);
+        }
+        Ok(())
+    }
+    async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>> {
+        Ok(self.m.lock().unwrap().profiles.get(user_id).cloned())
+    }
+    async fn put_profile(&self, user_id: &str, profile: &Profile) -> StoreResult<()> {
+        let mut m = self.m.lock().unwrap();
+        if m.users.contains_key(user_id) {
+            m.profiles.insert(user_id.to_string(), profile.clone());
         }
         Ok(())
     }
