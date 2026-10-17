@@ -5,13 +5,12 @@ compatibility_date = "2025-01-01"
 # api.glyph.my: Cloudflare creates the DNS record and certificate on deploy.
 # workers.dev stays reachable for older app builds.
 workers_dev = true
-# glyph.my: the landing page (/), its screenshots (/shots/*) and short
-# playlist links (/p/*, SHARE_ORIGIN below). Needs a proxied DNS record for
+# glyph.my: the landing page (/) and short playlist links (/p/*,
+# SHARE_ORIGIN below). Needs a proxied DNS record for
 # glyph.my; every other path on glyph.my is left alone.
 routes = [
   { pattern = "api.glyph.my", custom_domain = true },
   { pattern = "glyph.my/", zone_name = "glyph.my" },
-  { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
 ]
 

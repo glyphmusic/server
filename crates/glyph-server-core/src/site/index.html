@@ -10,8 +10,6 @@
 <meta property="og:title" content="Glyph — every song, one quiet player">
 <meta property="og:description" content="A fast desktop music player for Windows, macOS and Linux.">
 <meta property="og:url" content="https://glyph.my/">
-<meta property="og:image" content="https://glyph.my/shots/og.jpg">
-<meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0a0a09">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,14 +32,6 @@ nav .links a:hover { color: var(--fg); }
 .hero .meta { margin-top: 18px; color: var(--dim); font-size: 12px; }
 
 section { padding: 40px 0; }
-/* A screenshot shows once its file loads; an empty slot hides its figure. */
-.shot { margin: 0; display: none; }
-.shot.real { display: block; }
-.shot img { display: block; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); box-shadow: 0 30px 80px -30px rgba(255, 95, 210, 0.18); }
-.shot figcaption { color: var(--dim); font-size: 12px; margin-top: 10px; text-align: center; }
-
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
-
 .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px 4ch; }
 .features h3 { font: inherit; margin: 0 0 6px; }
 .features p { margin: 0; color: var(--dim); }
@@ -54,7 +44,6 @@ footer { border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--d
 footer a { color: var(--dim); }
 
 @media (max-width: 860px) {
-  .pair { grid-template-columns: 1fr; }
   .features { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 560px) {
@@ -85,12 +74,6 @@ footer a { color: var(--dim); }
   <div class="meta">free · open source · windows, macos, linux</div>
 </header>
 
-<section>
-  <figure class="shot">
-    <img src="/shots/home.webp" alt="Glyph home screen with recommendations and recently played songs" width="1600" height="1000">
-  </figure>
-</section>
-
 <section id="features">
   <pre class="rule" data-rule="features"></pre>
   <div class="features" style="margin-top:24px">
@@ -100,19 +83,6 @@ footer a { color: var(--dim); }
     <div><h3>sound you control</h3><p>Crossfade, loudness normalisation, a 10-band equaliser and output device choice.</p></div>
     <div><h3>your library, everywhere</h3><p>An optional @handle account syncs likes, playlists and settings across your devices.</p></div>
     <div><h3>share in one link</h3><p>Send a playlist as a short glyph.my link; friends paste it into Glyph to add it.</p></div>
-  </div>
-</section>
-
-<section>
-  <div class="pair">
-    <figure class="shot">
-      <img src="/shots/player.webp" alt="Glyph now playing view with synced lyrics" width="1200" height="800">
-      <figcaption>now playing, with lyrics that keep time</figcaption>
-    </figure>
-    <figure class="shot">
-      <img src="/shots/search.webp" alt="Glyph search results from several sources" width="1200" height="800">
-      <figcaption>one search, every source</figcaption>
-    </figure>
   </div>
 </section>
 
@@ -132,12 +102,6 @@ footer a { color: var(--dim); }
 <script>
 /*NOTE*/
 glyphNote(document.getElementById("note"), Math.min(11, Math.max(7, innerWidth / 110)));
-
-// A figure shows once its screenshot loads.
-document.querySelectorAll(".shot img").forEach(img => {
-  const real = () => img.naturalWidth > 0 && img.closest(".shot").classList.add("real");
-  if (img.complete) real(); else img.addEventListener("load", real);
-});
 
 // "-- label ------" filling the column.
 document.querySelectorAll("[data-rule]").forEach(el => {

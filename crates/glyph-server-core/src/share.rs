@@ -177,7 +177,7 @@ fn page(status: u16, name: &str, songs: u32, link: &str) -> Response {
     };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="color-scheme" content="dark"><title>{head_title}</title>
-<meta property="og:title" content="{head_title}"><meta property="og:description" content="A playlist to open in Glyph, the desktop music player."><meta property="og:image" content="https://glyph.my/shots/og.jpg"><meta name="twitter:card" content="summary_large_image">
+<meta property="og:title" content="{head_title}"><meta property="og:description" content="A playlist to open in Glyph, the desktop music player.">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>{css}
 body{{padding:4vh max(16px,env(safe-area-inset-left,0px)) 48px}}main{{max-width:58ch;margin:0 auto;display:flex;flex-direction:column;gap:18px}}
