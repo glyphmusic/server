@@ -15,7 +15,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Shared wire types. For releases pin the tag of the main repo instead:
-#   glyph-protocol = { git = "https://github.com/glyphmusic/glyph", tag = "protocol-v1" }
+#   glyph-protocol = { git = "https://github.com/glyphmusic/desktop", tag = "protocol-v1" }
 glyph-protocol = { path = "../glyph/crates/glyph-protocol" }
 glyph-server-core = { path = "crates/glyph-server-core" }
 serde = { version = "1", features = ["derive"] }
