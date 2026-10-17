@@ -1,6 +1,6 @@
 # glyph-server
 
-Open-source metadata server of the [Glyph](https://github.com/glyphmusic/glyph) music app.
+Open-source metadata server of the [Glyph](https://github.com/glyphmusic/desktop) music app.
 It holds the API keys, merges search results from many sources, resolves each song to a
 playback source, and caches metadata. The Cloudflare Worker is the app's central
 API and streams/caches audio too. A private native companion runs yt-dlp when
