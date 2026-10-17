@@ -12,6 +12,14 @@ routes = [
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
 ]
 
+# Same as the dashboard (Settings > Observability): only invocation logs.
+[observability.logs]
+enabled = false
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+
 [build]
 command = "cargo install -q worker-build && worker-build --release"
 
