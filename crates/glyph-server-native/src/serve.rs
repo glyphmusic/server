@@ -2,7 +2,7 @@
 
 use crate::host::NativeHost;
 use crate::logbuf::LogBuffer;
-use crate::platform::{LruDiskCache, ReqwestClient, TokioRuntime};
+use crate::platform::{LruDiskCache, ReqwestClient, TokioCommands, TokioRuntime};
 use crate::settings::Settings;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
@@ -31,6 +31,10 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     let mut config = Config::new(s.secrets.clone());
     config.rate_limit_per_min = s.rate_limit_per_min;
     config.youtube_daily_budget_units = s.youtube_daily_budget_units;
+    // YouTube search runs through the local yt-dlp binary.
+    config.ytdlp_path = crate::platform::resolve_ytdlp(s.ytdlp_path.as_deref());
+    // Clients get /v1/audio/... instead of short-lived provider URLs.
+    config.proxy_audio = s.proxy_audio;
     config.import_max_pages = s.import_max_pages;
     config.admin_password_hash = s
         .admin_password_hash
@@ -41,6 +45,7 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
         cache: Arc::new(LruDiskCache::new(s.cache_entries, s.cache_dir.clone())),
         limiter: Arc::new(MemoryRateLimiter::new(rt.clone())),
         rt,
+        cmds: Arc::new(TokioCommands),
         config,
     };
     Server::new(services).with_host(Arc::new(NativeHost {
@@ -154,6 +159,8 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         HMethod::POST => Method::Post,
         HMethod::PUT => Method::Put,
         HMethod::OPTIONS => Method::Options,
+        HMethod::PATCH => Method::Patch,
+        HMethod::DELETE => Method::Delete,
         _ => Method::Other,
     };
     let target = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
@@ -169,6 +176,19 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         Ok(b) => b.to_vec(),
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
+
+    if path_only == "/internal/ytdlp" || path_only.starts_with("/internal/audio/") {
+        return companion(&st.server, &path_only, &headers, method, &body).await;
+    }
+    // Audio/cover streaming happens here, not in the core router (streamed bytes,
+    // byte ranges and provider-side redirects).
+    if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
+        return media(&st.server, &path_only, &headers, method, Some(ip)).await;
+    }
+    // A companion must not expose the ordinary unauthenticated search routes as a bypass.
+    if std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32) && path_only != "/v1/health" {
+        return plain(StatusCode::NOT_FOUND, "not found");
+    }
 
     let resp = st
         .server
@@ -191,6 +211,180 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     out.body(body).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"))
 }
 
+/// Largest audio payload we hand out (a long mix in M4A/AAC).
+const MAX_AUDIO_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Concurrency cap for audio transfers, so a few long tracks cannot exhaust
+/// the machine (yt-dlp runs here too).
+fn audio_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+}
+
+/// `(provider, id)` of a media path; `None` for anything that is not a
+/// well-formed `/v1/audio/<provider>/<id>` or `/v1/download/<provider>/<id>`.
+fn audio_target(path: &str) -> Option<(glyph_protocol::ProviderId, String)> {
+    let (prefix, id) = if let Some(rest) = path.strip_prefix("/v1/audio/") {
+        ("/v1/audio/", rest)
+    } else {
+        ("/v1/download/", path.strip_prefix("/v1/download/")?)
+    };
+    debug_assert!(path.starts_with(prefix));
+    let (provider, id) = id.split_once('/')?;
+    if !glyph_server_core::media::valid_id(id) {
+        return None;
+    }
+    let provider = serde_json::from_value::<glyph_protocol::ProviderId>(serde_json::Value::String(provider.into())).ok()?;
+    Some((provider, id.to_string()))
+}
+
+/// `/v1/audio/{provider}/{id}` and `/v1/download/{provider}/{id}` for our own
+/// clients: the provider URL is resolved here (yt-dlp for YouTube) and the
+/// bytes are streamed through, so nothing short-lived ever reaches the app.
+async fn media(server: &Server, path: &str, headers: &[(String, String)], method: Method, ip: Option<String>) -> Response {
+    use glyph_server_core::media;
+    if !matches!(method, Method::Get) {
+        return plain(StatusCode::METHOD_NOT_ALLOWED, "GET required");
+    }
+    let svc = server.services();
+    // Seeking makes many requests; audio gets the same limit with room to spare.
+    let key = format!("media:ip:{}", ip.as_deref().unwrap_or("unknown"));
+    if let glyph_server_core::RateDecision::Limited { retry_after_s } = svc
+        .limiter
+        .check(&key, svc.config.rate_limit_per_min.max(1).saturating_mul(20), 60)
+        .await
+    {
+        let mut out = plain(StatusCode::TOO_MANY_REQUESTS, "too many audio requests");
+        if let Ok(v) = HeaderValue::from_str(&retry_after_s.to_string()) {
+            out.headers_mut().insert("retry-after", v);
+        }
+        return out;
+    }
+    let is_download = path.starts_with("/v1/download/");
+    let Some((provider, id)) = audio_target(path) else {
+        return plain(StatusCode::BAD_REQUEST, "invalid audio path");
+    };
+    let url = if is_download {
+        match media::download_url(&svc, provider, &id).await {
+            Ok(Some(u)) => u,
+            _ => return plain(StatusCode::FORBIDDEN, "download not allowed for this track"),
+        }
+    } else {
+        match media::audio_url(&svc, provider, &id).await {
+            Ok(u) => u,
+            Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio source unavailable"),
+        }
+    };
+    let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
+    let Ok(permit) = audio_slots().clone().try_acquire_owned() else {
+        return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later");
+    };
+    fetch_upstream_audio(&url, range, Some(permit)).await
+}
+
+/// Streams one audio response from the provider. Byte ranges are forwarded
+/// upstream, so a seek only costs the requested bytes.
+async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+    // Fetch on the extraction host: YouTube signatures can be bound to its IP.
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() < 5 && attempt.url().scheme() == "https" && attempt.url().host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) { attempt.follow() } else { attempt.stop() }
+        })).build()
+    {
+        Ok(c) => c,
+        Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "audio client unavailable"),
+    };
+    let mut req = client.get(url).header("accept-encoding", "identity");
+    if let Some(r) = range.filter(|r| r.len() <= 64 && r.starts_with("bytes=")) {
+        req = req.header("range", r);
+    }
+    let resp = match req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            let status = match r.status().as_u16() {
+                401 | 403 | 404 => StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            return plain(status, "audio upstream denied the request");
+        }
+        Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio upstream unavailable"),
+    };
+    let total = resp.content_length();
+    if total.is_some_and(|n| n > MAX_AUDIO_BYTES) {
+        return plain(StatusCode::PAYLOAD_TOO_LARGE, "audio too large");
+    }
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .cloned()
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+    if !(content_type.to_str().is_ok_and(|c| c.starts_with("audio/") || c.starts_with("video/") || c.starts_with("application/octet-stream"))) {
+        return plain(StatusCode::BAD_GATEWAY, "upstream did not return audio");
+    }
+    let content_range = resp.headers().get("content-range").cloned();
+    let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let mut out = Response::builder()
+        .status(if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
+        .header("content-type", content_type)
+        .header("cache-control", "no-store")
+        .header("accept-ranges", "bytes");
+    if let Some(n) = total {
+        out = out.header("content-length", n);
+    }
+    if let Some(cr) = content_range {
+        out = out.header("content-range", cr);
+    }
+    let mut received = 0u64;
+    let stream = resp.bytes_stream().map(move |chunk| {
+        let _ = &permit;
+        let chunk = chunk.map_err(|_| std::io::Error::other("audio transfer failed"))?;
+        received += chunk.len() as u64;
+        if received > MAX_AUDIO_BYTES {
+            return Err(std::io::Error::other("audio too large"));
+        }
+        Ok(chunk)
+    });
+    out.body(Body::from_stream(stream)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "audio transfer failed"))
+}
+
+/// Optional, private companion for the Worker. No arbitrary URLs or tool arguments.
+async fn companion(server: &Server, path: &str, headers: &[(String, String)], method: Method, body: &[u8]) -> Response {
+    use glyph_server_core::media::{valid_command, CommandRequest, CommandResponse};
+    let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().filter(|t| t.len() >= 32);
+    let Some(token) = token else { return plain(StatusCode::NOT_FOUND, "not found") };
+    let expected = format!("Bearer {token}");
+    let supplied = headers.iter().find(|(k,_)| k == "authorization").map(|(_,v)| v.as_bytes()).unwrap_or_default();
+    let mut diff = expected.len() ^ supplied.len();
+    for (i,b) in expected.bytes().enumerate() { diff |= usize::from(b ^ supplied.get(i).copied().unwrap_or(0)); }
+    if diff != 0 { return plain(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let Ok(_permit) = slots.clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later") };
+    let svc = server.services();
+    if let Some(id) = path.strip_prefix("/internal/audio/") {
+        if method != Method::Get || !glyph_server_core::media::valid_video_id(id) { return plain(StatusCode::BAD_REQUEST, "invalid video request"); }
+        let url = match glyph_server_core::media::audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {
+            Ok(u) => u, Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio lookup failed"),
+        };
+        return fetch_upstream_audio(&url, None, Some(_permit)).await;
+    }
+    if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
+    let Ok(command) = serde_json::from_slice::<CommandRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid command") };
+    if !valid_command(&command.args) { return plain(StatusCode::BAD_REQUEST, "command denied"); }
+    let Some(bin) = svc.config.ytdlp_path.as_deref() else { return plain(StatusCode::SERVICE_UNAVAILABLE, "yt-dlp missing") };
+    match svc.cmds.run(bin, &command.args, 20_000).await {
+        Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
+            let Ok(stdout) = String::from_utf8(bytes) else { return plain(StatusCode::BAD_GATEWAY, "invalid output") };
+            let body = serde_json::to_vec(&CommandResponse { stdout }).unwrap();
+            Response::builder().header("content-type", "application/json").header("cache-control", "no-store").body(Body::from(body)).unwrap()
+        }
+        _ => plain(StatusCode::BAD_GATEWAY, "yt-dlp failed"),
+    }
+}
+
 fn plain(status: StatusCode, msg: &str) -> Response {
     Response::builder().status(status).body(Body::from(msg.to_string())).unwrap()
 }
@@ -205,6 +399,22 @@ mod tests {
             h.insert(HeaderName::try_from(*k).unwrap(), HeaderValue::try_from(*v).unwrap());
         }
         h
+    }
+
+    #[test]
+    fn media_paths_are_parsed_strictly() {
+        use glyph_protocol::ProviderId;
+        assert_eq!(audio_target("/v1/audio/youtube/abcdefghijk"), Some((ProviderId::YouTube, "abcdefghijk".into())));
+        assert_eq!(audio_target("/v1/download/jamendo/42"), Some((ProviderId::Jamendo, "42".into())));
+        for bad in [
+            "/v1/audio/youtube",
+            "/v1/audio/youtube/../../etc/passwd",
+            "/v1/audio/nosuchprovider/1",
+            "/v1/audio//1",
+            "/v1/audio/youtube/abc%2Fdef",
+        ] {
+            assert_eq!(audio_target(bad), None, "{bad}");
+        }
     }
 
     #[test]

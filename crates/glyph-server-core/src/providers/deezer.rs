@@ -15,6 +15,8 @@ pub(crate) struct DzTrack {
     pub isrc: Option<String>,
     pub artist: Option<DzArtist>,
     pub album: Option<DzAlbum>,
+    #[serde(default)]
+    pub explicit_lyrics: Option<bool>,
 }
 #[derive(Deserialize)]
 pub(crate) struct DzArtist {
@@ -37,6 +39,7 @@ pub(crate) fn to_candidate(t: DzTrack) -> Candidate {
     out.duration_ms = t.duration.map(|s| s * 1000);
     out.permalink = t.link;
     out.isrc = t.isrc.filter(|s| !s.is_empty());
+    out.explicit = t.explicit_lyrics == Some(true);
     if let Some(a) = t.album {
         out.album = a.title;
         out.cover_url = a.cover_medium;
@@ -46,6 +49,18 @@ pub(crate) fn to_candidate(t: DzTrack) -> Candidate {
         .filter(|p| !p.is_empty())
         .map(|url| PlaybackSource::Preview { provider: ProviderId::Deezer, url });
     candidate(out, pb)
+}
+
+/// Fetch signed previews at playback time, never from the search cache.
+pub async fn by_id(svc: &Services, id: &str) -> PResult<Candidate> {
+    if id.is_empty() || !id.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(ProviderError::Parse);
+    }
+    let t: DzTrack = fetch_json(svc, HttpRequest::get(format!("https://api.deezer.com/track/{id}"))).await?;
+    if t.id.to_string() != id {
+        return Err(ProviderError::Parse);
+    }
+    Ok(to_candidate(t))
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {

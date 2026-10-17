@@ -61,6 +61,11 @@ pub enum RemoteCmd {
         #[arg(long)]
         import_pages: Option<u32>,
     },
+    /// Accounts: device limits are set here, never by the app
+    Accounts {
+        #[command(subcommand)]
+        cmd: AccountsCmd,
+    },
     /// Recent server log lines
     Logs {
         /// Number of lines
@@ -92,6 +97,23 @@ pub enum KeysCmd {
     Unset { name: String },
     /// Test the stored keys of a source, e.g. `keys test youtube`
     Test { provider: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountsCmd {
+    /// Show or change the device limit for accounts without their own
+    DefaultLimit {
+        /// New default (1-100)
+        limit: Option<u8>,
+    },
+    /// Show an account: limit and devices
+    Show { handle: String },
+    /// Give one account its own device limit, or `default` to drop it
+    Limit {
+        handle: String,
+        /// Number (1-100) or `default`
+        limit: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -410,6 +432,25 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             println!("Pages per playlist import       {}", l.import_max_pages);
             Ok(())
         }
+        RemoteCmd::Accounts { cmd } => {
+            let c = Client::connect(a.server).await?;
+            match cmd {
+                AccountsCmd::DefaultLimit { limit } => {
+                    let d: AccountDefaults = match limit {
+                        Some(n) => c.put("account-defaults", &AccountDefaults { device_limit: n }).await?,
+                        None => c.get("account-defaults").await?,
+                    };
+                    println!("Devices per account (default)  {}", d.device_limit);
+                }
+                AccountsCmd::Show { handle } => print_account(&c.get(&format!("accounts/{}", handle_path(&handle))).await?),
+                AccountsCmd::Limit { handle, limit } => {
+                    let device_limit = parse_limit(&limit)?;
+                    let acc: AdminAccount = c.put(&format!("accounts/{}", handle_path(&handle)), &AccountLimitRequest { device_limit }).await?;
+                    print_account(&acc);
+                }
+            }
+            Ok(())
+        }
         RemoteCmd::Logs { lines, follow } => {
             let mut c = Client::connect(a.server.clone()).await?;
             let mut r: LogsResponse = c.get(&format!("logs?n={}", lines.clamp(1, 1000))).await?;
@@ -451,9 +492,44 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
     }
 }
 
+/// `@Name` -> `name`, safe inside a URL path.
+fn handle_path(h: &str) -> String {
+    h.trim().trim_start_matches('@').to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect()
+}
+
+fn parse_limit(v: &str) -> Result<Option<u8>, String> {
+    if v.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    v.parse::<u8>().ok().filter(|n| (1..=100).contains(n)).map(Some).ok_or_else(|| format!("`{v}`: use a number from 1 to 100 or `default`"))
+}
+
+fn print_account(a: &AdminAccount) {
+    let own = match a.device_limit_set {
+        Some(_) => "own limit",
+        None => "server default",
+    };
+    println!("@{}  ({})", a.handle, a.id);
+    println!("Device limit  {} ({own})", a.device_limit);
+    println!("Devices       {}", a.devices.len());
+    for d in &a.devices {
+        println!("  {:<28} {}", d.name, d.platform);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_arguments_are_checked() {
+        assert_eq!(handle_path(" @Kasto "), "kasto");
+        assert_eq!(handle_path("a/../b"), "a..b");
+        assert_eq!(parse_limit("Default").unwrap(), None);
+        assert_eq!(parse_limit("10").unwrap(), Some(10));
+        assert!(parse_limit("0").is_err());
+        assert!(parse_limit("101").is_err());
+    }
 
     #[test]
     fn urls_are_normalised_and_https_enforced() {

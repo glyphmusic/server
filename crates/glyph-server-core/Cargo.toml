@@ -18,3 +18,9 @@ base64.workspace = true
 sha2.workspace = true
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 hmac = "0.12"
+# Passkeys: ES256 and RS256 signature checks (pure Rust, builds for wasm32).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "0.9", default-features = false, features = ["sha2", "std"] }
+
+[dev-dependencies]
+rand = "0.8"

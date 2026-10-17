@@ -233,6 +233,7 @@ fn set_keys_persists_applies_and_validates() {
     // removing a key
     let (s, _, _) = call(&t, req(Method::Put, "/admin/v1/keys", r#"{"values":{"youtube_api_key":""}}"#, tok));
     assert_eq!(s, 200);
+    assert!(t.server.services().config.secrets.youtube_api_key.is_none());
     assert!(!t.server.services().config.provider_enabled(ProviderId::YouTube));
     // validation
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/keys", r#"{"values":{"nope":"x"}}"#, tok)).0, 400);
@@ -311,7 +312,9 @@ fn status_logs_and_routing() {
     let (_, v, _) = call(&t, req(Method::Get, "/admin/v1/status", "", tok));
     let st: StatusResponse = serde_json::from_value(v).unwrap();
     assert_eq!(st.platform, "native");
-    assert!(st.providers.iter().any(|p| p.id == ProviderId::YouTube && p.enabled && p.needs_key));
+    // YouTube has a key (for playlist import) but search needs yt-dlp, so it is off.
+    assert!(st.providers.iter().any(|p| p.id == ProviderId::YouTube && p.needs_key && !p.enabled));
+    assert!(st.providers.iter().any(|p| p.id == ProviderId::Jamendo && p.enabled));
     assert!(st.providers.iter().any(|p| p.id == ProviderId::Audius && !p.needs_key));
     let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/logs?n=5&after=41", "", tok));
     assert_eq!((s, v["next"].as_u64()), (200, Some(42)));

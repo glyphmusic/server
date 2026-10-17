@@ -43,6 +43,10 @@ enum R {
     Logs,
     UpdateCheck,
     UpdateApply,
+    AccountDefaultsGet,
+    AccountDefaultsPut,
+    AccountGet,
+    AccountPut,
 }
 
 fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
@@ -62,6 +66,10 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "logs" => (R::Logs, Get),
         "update/check" => (R::UpdateCheck, Post),
         "update/apply" => (R::UpdateApply, Post),
+        "account-defaults" if m == Put => (R::AccountDefaultsPut, Put),
+        "account-defaults" => (R::AccountDefaultsGet, Get),
+        s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
+        s if s.starts_with("accounts/") => (R::AccountGet, Get),
         _ => return Err(ApiErr::not_found("unknown admin endpoint")),
     };
     if m != want {
@@ -255,6 +263,16 @@ impl Server {
             }
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
+            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountGet | R::AccountPut => {
+                let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
+                let handle = sub.strip_prefix("accounts/").unwrap_or("");
+                match route {
+                    R::AccountDefaultsGet => Ok(Response::json(200, &acc.admin_defaults().await?)),
+                    R::AccountDefaultsPut => Ok(Response::json(200, &acc.admin_set_defaults(&parse_body::<AccountDefaults>(&req)?).await?)),
+                    R::AccountGet => Ok(Response::json(200, &acc.admin_account(handle).await?)),
+                    _ => Ok(Response::json(200, &acc.admin_set_limit(handle, parse_body::<AccountLimitRequest>(&req)?.device_limit).await?)),
+                }
+            }
             R::Login | R::Refresh => unreachable!(),
         }
     }

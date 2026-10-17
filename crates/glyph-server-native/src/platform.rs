@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use glyph_server_core::traits::CacheStats;
-use glyph_server_core::{Cache, HttpClient, HttpError, HttpRequest, HttpResponse, Method, Runtime};
+use glyph_server_core::{
+    Cache, CommandError, CommandRunner, HttpClient, HttpError, HttpRequest, HttpResponse, Method, Runtime,
+};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
 use std::num::NonZeroUsize;
@@ -57,6 +59,58 @@ impl HttpClient for ReqwestClient {
         let body = resp.bytes().await.map_err(fail)?.to_vec();
         Ok(HttpResponse { status, body })
     }
+}
+
+/// Spawns helper programs (yt-dlp) and captures their stdout. stderr is
+/// drained into a sink so a chatty tool cannot fill its pipe buffer.
+pub struct TokioCommands;
+
+#[async_trait]
+impl CommandRunner for TokioCommands {
+    async fn run(&self, program: &str, args: &[String], timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
+        use tokio::io::AsyncReadExt;
+        let mut child = tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| CommandError::Unavailable)?;
+        let stdout = child.stdout.take().ok_or(CommandError::Failed)?;
+        let wait = async {
+            let mut out = Vec::new();
+            stdout.take(4 * 1024 * 1024 + 1).read_to_end(&mut out).await.map_err(|_| CommandError::Failed)?;
+            if out.len() > 4 * 1024 * 1024 { return Err(CommandError::Failed); }
+            let status = child.wait().await.map_err(|_| CommandError::Failed)?;
+            if status.success() { Ok(out) } else { Err(CommandError::Failed) }
+        };
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), wait).await {
+            Err(_) => Err(CommandError::Timeout),
+            Ok(result) => result,
+        }
+    }
+}
+
+/// Candidate names for yt-dlp, in the order they are tried.
+const YTDLP_NAMES: [&str; 4] = ["yt-dlp", "yt-dlp.exe", "yt_dlp", "youtube-dl"];
+
+/// Which yt-dlp to run: the configured path if it works, else the first
+/// candidate that answers `--version`. `None` = not installed.
+pub fn resolve_ytdlp(configured: Option<&str>) -> Option<String> {
+    let mut names: Vec<String> = configured.filter(|p| !p.trim().is_empty()).map(|p| p.to_string()).into_iter().collect();
+    names.extend(YTDLP_NAMES.iter().map(|s| s.to_string()));
+    names.into_iter().find(|n| ytdlp_version(n).is_some())
+}
+
+/// The installed yt-dlp version, e.g. `2025.08.11`.
+pub fn ytdlp_version(bin: &str) -> Option<String> {
+    let out = std::process::Command::new(bin).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
 }
 
 /// In-memory LRU with TTL and an optional on-disk layer (one file per key:

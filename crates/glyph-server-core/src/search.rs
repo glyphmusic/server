@@ -48,7 +48,8 @@ pub async fn search_provider(svc: &Services, id: ProviderId, q: &str) -> Result<
     if let Some(hit) = cache::get_json::<Vec<Candidate>>(&*svc.cache, &ckey).await {
         return Ok(hit);
     }
-    let res = match with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::search(svc, id, q)).await {
+    let timeout = if id == ProviderId::YouTube { svc.config.provider_timeout_ms.max(22_000) } else { svc.config.provider_timeout_ms };
+    let res = match with_timeout(&*svc.rt, timeout, providers::search(svc, id, q)).await {
         Some(r) => r,
         None => Err(ProviderError::Timeout),
     };
@@ -108,7 +109,7 @@ mod tests {
     fn setup() -> Harness {
         let mut s = all_secrets();
         s.soundcloud_client_id = None; // not configured -> not queried
-        let h = harness(s);
+        let h = harness_with_ytdlp(s);
         h.http.on(
             "audius.co/v1/tracks/search",
             200,
@@ -121,7 +122,8 @@ mod tests {
         );
         h.http.on("jamendo.com", 500, "boom");
         h.http.on("advancedsearch.php", 200, r#"{"response":{"docs":[]}}"#);
-        h.http.on("youtube/v3/search", 403, "{}");
+        // yt-dlp is configured but the binary is gone.
+        *h.cmds.missing.lock().unwrap() = Some("ytsearch".into());
         h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
         h.http.on("v1/search", 200, r#"{"tracks":{"items":[]}}"#);
         h
@@ -150,7 +152,7 @@ mod tests {
             })
             .collect();
         assert!(errors.iter().any(|(p, _)| *p == ProviderId::Jamendo));
-        assert!(errors.iter().any(|(p, m)| *p == ProviderId::YouTube && m.contains("quota")));
+        assert!(errors.iter().any(|(p, m)| *p == ProviderId::YouTube && m.contains("not configured")));
         // Audius and Deezer return the same song: one merged track, ids joined.
         let all: Vec<_> = events
             .iter()

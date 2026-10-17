@@ -119,6 +119,40 @@ pub struct Limits {
     pub import_max_pages: u32,
 }
 
+/// `GET/PUT /admin/v1/account-defaults`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountDefaults {
+    /// Devices per account unless an account has its own limit.
+    pub device_limit: u8,
+}
+
+/// `PUT /admin/v1/accounts/{handle}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountLimitRequest {
+    /// `None` = back to the server default.
+    pub device_limit: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminDevice {
+    pub name: String,
+    pub platform: String,
+    pub last_seen: u64,
+}
+
+/// `GET /admin/v1/accounts/{handle}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminAccount {
+    pub id: String,
+    pub handle: String,
+    pub created_at: u64,
+    /// Limit in force.
+    pub device_limit: u8,
+    /// Own limit; `None` = server default.
+    pub device_limit_set: Option<u8>,
+    pub devices: Vec<AdminDevice>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogsResponse {
     pub lines: Vec<String>,

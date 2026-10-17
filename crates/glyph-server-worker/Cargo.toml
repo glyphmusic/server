@@ -14,7 +14,12 @@ crate-type = ["cdylib", "rlib"]
 # an empty shell so `cargo test --workspace` keeps working everywhere.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 glyph-server-core.workspace = true
-worker = "0.8"
+glyph-protocol.workspace = true
+serde_json.workspace = true
+worker = { version = "0.8", features = ["d1"] }
 async-trait.workspace = true
 futures.workspace = true
 console_error_panic_hook = "0.1"
+serde.workspace = true
+# Entropy for account tokens: crypto.getRandomValues via the JS backend.
+getrandom = { version = "0.2", features = ["js"] }

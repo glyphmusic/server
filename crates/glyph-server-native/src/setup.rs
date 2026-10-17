@@ -77,9 +77,9 @@ pub struct ProviderHelp {
 pub const PROVIDER_HELP: [ProviderHelp; 5] = [
     ProviderHelp {
         id: ProviderId::YouTube,
-        what: "A free Google API key with \"YouTube Data API v3\" enabled (10,000 quota units per day).",
+        what: "Optional, only for importing YouTube playlists. Searching YouTube needs no key, it uses yt-dlp.",
         url: "https://console.cloud.google.com/apis/library/youtube.googleapis.com",
-        fields: &[("youtube_api_key", "YouTube API key")],
+        fields: &[("youtube_api_key", "YouTube API key (playlist import only)")],
     },
     ProviderHelp {
         id: ProviderId::Jamendo,

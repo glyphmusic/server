@@ -98,6 +98,7 @@ pub(crate) fn new_track(id: impl Into<String>, source: ProviderId, title: &str, 
         isrc: None,
         permalink: None,
         external_ids: BTreeMap::new(),
+        explicit: false,
     }
 }
 
@@ -144,12 +145,8 @@ pub fn is_full_source(id: ProviderId) -> bool {
 }
 
 /// Cache TTL for search results of a provider (seconds).
-pub fn search_ttl(id: ProviderId) -> u64 {
-    match id {
-        // Search costs 100 of 10,000 daily units: cache for 6 hours.
-        ProviderId::YouTube => 6 * 3600,
-        _ => 15 * 60,
-    }
+pub fn search_ttl(_id: ProviderId) -> u64 {
+    15 * 60
 }
 
 /// Provider-sent JSON sometimes uses numbers or strings for the same field.

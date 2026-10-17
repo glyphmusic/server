@@ -50,6 +50,8 @@ pub enum Method {
     Get,
     Post,
     Options,
+    Patch,
+    Delete,
     Other,
 }
 
@@ -153,12 +155,43 @@ pub trait Runtime: MaybeSendSync {
     async fn sleep(&self, ms: u64);
 }
 
+/// Why a helper program could not be run. Display strings are safe to send
+/// to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandError {
+    /// The platform has no process support (Workers) or the binary is missing.
+    Unavailable,
+    Timeout,
+    /// The program ran and failed (non-zero exit or unreadable output).
+    Failed,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait CommandRunner: MaybeSendSync {
+    /// Run `program` with `args`, capture stdout and give up after `timeout_ms`.
+    async fn run(&self, program: &str, args: &[String], timeout_ms: u64) -> Result<Vec<u8>, CommandError>;
+}
+
+/// Used where no process can be spawned (Cloudflare Workers).
+pub struct NoCommands;
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl CommandRunner for NoCommands {
+    async fn run(&self, _program: &str, _args: &[String], _timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
+        Err(CommandError::Unavailable)
+    }
+}
+
 /// Everything a request handler needs.
 pub struct Services {
     pub http: Arc<dyn HttpClient>,
     pub cache: Arc<dyn Cache>,
     pub limiter: Arc<dyn RateLimiter>,
     pub rt: Arc<dyn Runtime>,
+    /// Helper programs (yt-dlp); `NoCommands` where there are none.
+    pub cmds: Arc<dyn CommandRunner>,
     pub config: Config,
 }
 

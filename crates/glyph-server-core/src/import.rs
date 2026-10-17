@@ -12,6 +12,8 @@ use serde::Deserialize;
 pub enum Target {
     Spotify(String),
     Deezer(String),
+    DeezerUser(String),
+    LastFm(String),
     YouTube(String),
 }
 
@@ -32,9 +34,14 @@ pub fn parse_url(raw: &str) -> Option<Target> {
     let segs: Vec<&str> = u.path_segments()?.collect();
     let after = |name: &str| segs.iter().position(|s| *s == name).and_then(|i| segs.get(i + 1)).copied();
     match host.as_str() {
-        "open.spotify.com" => after("playlist").filter(|i| valid_id(i)).map(|i| Target::Spotify(i.into())),
-        "deezer.com" => after("playlist").filter(|i| i.chars().all(|c| c.is_ascii_digit()) && !i.is_empty()).map(|i| Target::Deezer(i.into())),
-        "youtube.com" | "m.youtube.com" | "music.youtube.com" => u
+        "open.spotify.com" | "play.spotify.com" => after("playlist").filter(|i| valid_id(i)).map(|i| Target::Spotify(i.into())),
+        "deezer.com" | "deezer.page.link" => {
+            let numeric = |i: &&str| !i.is_empty() && i.len() <= 64 && i.bytes().all(|c| c.is_ascii_digit());
+            after("playlist").filter(numeric).map(|i| Target::Deezer(i.into()))
+                .or_else(|| after("profile").or_else(|| after("user")).filter(numeric).map(|i| Target::DeezerUser(i.into())))
+        }
+        "last.fm" | "lastfm.de" | "lastfm.com" => after("user").filter(|i| valid_id(i)).map(|i| Target::LastFm(i.into())),
+        "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" => u
             .query_pairs()
             .find(|(k, _)| k == "list")
             .map(|(_, v)| v.into_owned())
@@ -61,8 +68,47 @@ pub async fn import(svc: &Services, url: &str) -> Result<ImportResponse, ApiErr>
     match target {
         Target::Spotify(id) => spotify_playlist(svc, &id).await.map_err(map_err),
         Target::Deezer(id) => deezer_playlist(svc, &id).await.map_err(map_err),
+        Target::DeezerUser(id) => deezer_favorites(svc, &id).await.map_err(map_err),
+        Target::LastFm(user) => lastfm_loved(svc, &user).await.map_err(map_err),
         Target::YouTube(id) => youtube_playlist(svc, &id).await.map_err(map_err),
     }
+}
+
+async fn deezer_favorites(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {
+    #[derive(Deserialize)]
+    struct Page { data: Vec<providers::deezer::DzTrack>, next: Option<String> }
+    let mut tracks = Vec::new();
+    for page in 0..svc.config.import_max_pages {
+        let offset = (page * 100).to_string();
+        let url = build_url(&format!("https://api.deezer.com/user/{id}/tracks"), &[("limit", "100"), ("index", &offset)]);
+        let page: Page = fetch_json(svc, HttpRequest::get(url)).await?;
+        tracks.extend(page.data.into_iter().map(|t| providers::deezer::to_candidate(t).track));
+        if page.next.is_none() { break; }
+    }
+    Ok(ImportResponse { name: format!("Deezer favorites ({id})"), source: ProviderId::Deezer, tracks })
+}
+
+async fn lastfm_loved(svc: &Services, user: &str) -> Result<ImportResponse, ProviderError> {
+    let key = svc.config.secrets.lastfm_api_key.as_deref().ok_or(ProviderError::NotConfigured)?;
+    let mut tracks = Vec::new();
+    for page in 1..=svc.config.import_max_pages {
+        let page_s = page.to_string();
+        let url = build_url("https://ws.audioscrobbler.com/2.0/", &[("method","user.getlovedtracks"),("api_key",key),("format","json"),("user",user),("limit","200"),("page",&page_s)]);
+        let v: serde_json::Value = fetch_json(svc, HttpRequest::get(url)).await?;
+        if v["error"].is_number() { return Err(ProviderError::Parse); }
+        let list = &v["lovedtracks"]["track"];
+        let items = list.as_array().cloned().unwrap_or_else(|| if list.is_object() { vec![list.clone()] } else { vec![] });
+        for item in items {
+            let Some(title) = item["name"].as_str() else { continue };
+            let artist = item["artist"]["name"].as_str().or_else(|| item["artist"].as_str()).unwrap_or("");
+            let mut t = new_track(format!("{artist}|{title}"), ProviderId::LastFm, title, artist);
+            t.permalink = item["url"].as_str().map(str::to_string);
+            tracks.push(t);
+        }
+        let total = v["lovedtracks"]["@attr"]["totalPages"].as_str().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+        if page >= total { break; }
+    }
+    Ok(ImportResponse { name: format!("{user} (Last.fm loved)"), source: ProviderId::LastFm, tracks })
 }
 
 async fn spotify_playlist(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {

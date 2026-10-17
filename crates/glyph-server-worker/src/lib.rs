@@ -3,8 +3,11 @@
 //! Bindings (see wrangler.toml): KV namespace `GLYPH_KV`, secrets
 //! `YOUTUBE_API_KEY`, `JAMENDO_CLIENT_ID`, `SOUNDCLOUD_CLIENT_ID`,
 //! `SOUNDCLOUD_CLIENT_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`,
-//! `LASTFM_API_KEY`. Compiled for wasm32 only.
+//! `LASTFM_API_KEY`. Optional: D1 `GLYPH_DB` + var `PUBLIC_ORIGIN` enable
+//! accounts and sync, R2 `GLYPH_COVERS` the cover cache. Compiled for wasm32 only.
 #![cfg(target_arch = "wasm32")]
+mod accounts;
+mod media;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -12,8 +15,8 @@ use glyph_server_core::admin::host::AdminHost;
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
 use glyph_server_core::ratelimit::CacheRateLimiter;
 use glyph_server_core::{
-    Body, Cache, Config, HttpClient, HttpError, HttpRequest, HttpResponse, Method, Runtime, Secrets,
-    Server, Services,
+    Body, Cache, Config, HttpClient, HttpError, HttpRequest, HttpResponse, Method, NoCommands, Runtime,
+    Secrets, Server, Services,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,6 +161,15 @@ fn build_server(env: &Env) -> Server {
         lastfm_api_key: secret(env, "LASTFM_API_KEY"),
     };
     let mut config = Config::new(secrets);
+    config.proxy_audio = true;
+    let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), secret(env, "YTDLP_SERVICE_TOKEN")) {
+        (Some(url), Some(token)) if url.starts_with("https://") && token.len() >= 32 => {
+            config.ytdlp_path = Some("remote".into());
+            // Remote extraction includes the network round trip and metadata lookup.
+            Arc::new(RemoteCommands { url, token })
+        }
+        _ => Arc::new(NoCommands),
+    };
     // Admin API is only enabled when this secret holds an Argon2id hash
     // (`glyph-server hash-password`, or `glyph-server cloudflare setup`).
     config.admin_password_hash = secret(env, "ADMIN_PASSWORD_HASH")
@@ -170,7 +182,46 @@ fn build_server(env: &Env) -> Server {
     }
     // Rate-limit counters live in the (free, unmetered) Cache API, not in KV.
     let limiter = Arc::new(CacheRateLimiter::new(api, rt.clone()));
-    Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, config }).with_host(Arc::new(WorkerHost))
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost));
+    // Accounts need the D1 database and the public origin (passkeys are bound to it).
+    match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
+        (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
+            store: Arc::new(accounts::D1Store { db }),
+            blobs: env.bucket("GLYPH_COVERS").ok().map(|bucket| Arc::new(accounts::R2Blobs { bucket }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
+            entropy: Arc::new(accounts::WebCrypto),
+            origin: origin.trim_end_matches('/').to_string(),
+            extra_origins: secret(env, "ACCOUNT_EXTRA_ORIGINS").map(|v| v.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect()).unwrap_or_default(),
+            rp_id: secret(env, "ACCOUNT_RP_ID"),
+        }),
+        _ => server,
+    }
+}
+
+struct RemoteCommands { url: String, token: String }
+#[async_trait(?Send)]
+impl glyph_server_core::CommandRunner for RemoteCommands {
+    async fn run(&self, _program: &str, args: &[String], _timeout_ms: u64) -> std::result::Result<Vec<u8>, glyph_server_core::CommandError> {
+        use glyph_server_core::{media::{CommandRequest, CommandResponse, valid_command}, CommandError};
+        if !valid_command(args) { return Err(CommandError::Failed); }
+        let body = serde_json::to_vec(&CommandRequest { args: args.to_vec() }).map_err(|_| CommandError::Failed)?;
+        let req = HttpRequest {
+            method: Method::Post,
+            url: format!("{}/internal/ytdlp", self.url.trim_end_matches('/')),
+            headers: vec![("authorization".into(), format!("Bearer {}", self.token)), ("content-type".into(), "application/json".into())],
+            body: Some(body),
+        };
+        let headers = Headers::new();
+        for (k,v) in &req.headers { headers.set(k,v).map_err(|_| CommandError::Failed)?; }
+        let mut init = RequestInit::new();
+        init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
+            .with_body(Some(worker::js_sys::Uint8Array::from(req.body.as_deref().unwrap_or_default()).into()));
+        let request = worker::Request::new_with_init(&req.url, &init).map_err(|_| CommandError::Failed)?;
+        let mut resp = Fetch::Request(request).send().await.map_err(|_| CommandError::Failed)?;
+        if resp.status_code() != 200 { return Err(CommandError::Failed); }
+        let bytes = resp.bytes().await.map_err(|_| CommandError::Failed)?;
+        let reply: CommandResponse = serde_json::from_slice(&bytes).map_err(|_| CommandError::Failed)?;
+        Ok(reply.stdout.into_bytes())
+    }
 }
 
 /// Secrets, limits and updates are managed with wrangler / Cloudflare, not at runtime.
@@ -188,12 +239,14 @@ fn to_core_method(m: worker::Method) -> Method {
         worker::Method::Post => Method::Post,
         worker::Method::Put => Method::Put,
         worker::Method::Options => Method::Options,
+        worker::Method::Patch => Method::Patch,
+        worker::Method::Delete => Method::Delete,
         _ => Method::Other,
     }
 }
 
 #[event(fetch)]
-async fn fetch(mut req: worker::Request, env: Env, _ctx: Context) -> Result<worker::Response> {
+async fn fetch(mut req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
     console_error_panic_hook::set_once();
     let url = req.url()?;
     let target = match url.query() {
@@ -203,13 +256,28 @@ async fn fetch(mut req: worker::Request, env: Env, _ctx: Context) -> Result<work
     let headers: Vec<(String, String)> = req.headers().entries().collect();
     let ip = req.headers().get("cf-connecting-ip").ok().flatten();
     let method = to_core_method(req.method());
-    let body = if matches!(method, Method::Post | Method::Put) { req.bytes().await.unwrap_or_default() } else { Vec::new() };
+    let mut body = Vec::new();
+    if matches!(method, Method::Post | Method::Put | Method::Patch | Method::Delete) {
+        let max = glyph_server_core::server::max_body_bytes(url.path());
+        if req.headers().get("content-length")?.and_then(|s| s.parse::<usize>().ok()).is_some_and(|n| n > max) {
+            return worker::Response::error("request body too large", 413);
+        }
+        let mut stream = req.stream()?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body.len() + chunk.len() > max { return worker::Response::error("request body too large", 413); }
+            body.extend_from_slice(&chunk);
+        }
+    }
 
     let server = build_server(&env);
     // Deployed Workers are HTTPS-only; `wrangler dev` serves http://localhost.
     let secure = url.scheme() == "https";
     let local = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));
     let request = glyph_server_core::Request::new(method, &target, headers, body, ip).with_transport(secure, local);
+    if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
+        return media::handle(&req, &request, &server, &ctx, &env).await;
+    }
     let resp = server.handle(request).await;
 
     let out = match resp.body {

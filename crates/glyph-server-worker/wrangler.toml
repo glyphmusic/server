@@ -2,6 +2,11 @@ name = "glyph-server"
 main = "build/worker/shim.mjs"
 compatibility_date = "2025-01-01"
 
+# api.glyph.my: Cloudflare creates the DNS record and certificate on deploy.
+# workers.dev stays reachable for older app builds.
+workers_dev = true
+routes = [{ pattern = "api.glyph.my", custom_domain = true }]
+
 [build]
 command = "cargo install -q worker-build && worker-build --release"
 
@@ -12,8 +17,25 @@ command = "cargo install -q worker-build && worker-build --release"
 binding = "GLYPH_KV"
 id = "2ad9460e110d401a8375359fa1393134"
 
+# Accounts & sync (see docs/ACCOUNTS.md in the app repo). Schema changes:
+#   npx wrangler d1 migrations apply glyph --remote
+[[d1_databases]]
+binding = "GLYPH_DB"
+database_name = "glyph"
+database_id = "a25fcd70-4ff2-4a66-9e89-7b7f72cf9099"
+migrations_dir = "migrations"
+
+# Cover cache (R2).
+[[r2_buckets]]
+binding = "GLYPH_COVERS"
+bucket_name = "glyph-covers"
+
 [vars]
 RATE_LIMIT_PER_MIN = "60"
+# Passkeys are bound to ACCOUNT_RP_ID (the origin's host or a parent of it);
+# changing it later invalidates every passkey.
+PUBLIC_ORIGIN = "https://api.glyph.my"
+ACCOUNT_RP_ID = "glyph.my"
 YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 
 # Secrets (never put keys in this file). Set each one you have with
@@ -26,4 +48,7 @@ YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 #   SPOTIFY_CLIENT_ID
 #   SPOTIFY_CLIENT_SECRET
 #   LASTFM_API_KEY
+# Optional native yt-dlp companion (Worker stays the app's only server):
+#   YTDLP_SERVICE_URL   HTTPS base URL, no trailing /internal path
+#   YTDLP_SERVICE_TOKEN Shared random secret, at least 32 characters
 # For `wrangler dev`, put the same names in crates/glyph-server-worker/.dev.vars

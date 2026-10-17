@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<title>Glyph Account</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<!-- Argon2id in the browser, so the password never leaves this device. -->
+<script src="https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/argon2.umd.min.js" integrity="sha384-6mJke07CAj4K6ugAGS0QPHLljuO28/vFpEliPzBQS50ap5NYTFLfJCsgTZs8CvUB" crossorigin="anonymous"></script>
+<style>
+/* Layout: one narrow terminal column, left-aligned, text-drawn frames. */
+:root {
+  --bg: #0c0c0b;
+  --fg: #dedbd2;
+  --dim: #77746b;
+  --line: #34322d;
+  --ok: #93c27f;
+  --bad: #e0675c;
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--fg); }
+body {
+  margin: 0;
+  font: 14px/1.6 var(--mono);
+  font-variant-ligatures: none;
+  padding-block: 8vh 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 58ch; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+pre { margin: 0; font: inherit; }
+.logo { color: var(--dim); font-size: 12px; line-height: 1.15; }
+.rule { color: var(--line); overflow: hidden; white-space: nowrap; }
+.rule b { color: var(--fg); font-weight: 600; }
+.dim { color: var(--dim); }
+.row { display: flex; gap: 2ch; flex-wrap: wrap; align-items: baseline; }
+.code { letter-spacing: 0.15em; font-weight: 600; }
+.tabs { display: flex; gap: 2ch; }
+.tabs button { padding: 0 1ch; }
+button {
+  font: inherit; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer;
+}
+button:hover, button:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+button.on { background: var(--fg); color: var(--bg); }
+button:disabled { color: var(--dim); background: none; cursor: default; }
+.act {
+  width: 100%; display: flex; justify-content: space-between; gap: 2ch;
+  border: 1px solid var(--fg); padding: 9px 2ch; text-align: left;
+}
+.act::after { content: "->"; }
+.act:disabled { border-color: var(--line); }
+.act.alt { border-color: var(--line); }
+.act.alt:hover, .act.alt:focus-visible { border-color: var(--fg); }
+.or { display: flex; align-items: center; gap: 1ch; color: var(--dim); }
+.or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.quiet { align-self: flex-start; color: var(--dim); }
+.quiet:hover, .quiet:focus-visible { background: none; color: var(--fg); text-decoration: underline; }
+.tabs { border-bottom: 1px solid var(--line); gap: 0; }
+.tabs button { padding: 2px 2ch 4px; }
+.tabs button + button { border-left: 1px solid var(--line); }
+.code-line { display: flex; justify-content: space-between; gap: 2ch; border: 1px dashed var(--line); padding: 7px 2ch; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { color: var(--dim); }
+.input { display: flex; align-items: center; border: 1px solid var(--line); padding: 6px 1ch; }
+.input:focus-within { border-color: var(--dim); }
+.input span { color: var(--dim); }
+.input input {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--fg); font: inherit;
+}
+.note { color: var(--dim); }
+.note.ok { color: var(--ok); }
+.note.bad, .err { color: var(--bad); }
+.err:empty { display: none; }
+.box { border: 1px dashed var(--dim); padding: 10px 2ch; letter-spacing: 0.05em; word-break: break-all; user-select: all; }
+.dev { display: flex; gap: 2ch; align-items: baseline; }
+.dev span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev button { color: var(--bad); }
+.dev button:hover { background: var(--bad); color: var(--bg); }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+[hidden] { display: none !important; }
+@media (max-width: 420px) { .logo { font-size: 9px; } }
+</style>
+</head>
+<body>
+<main>
+<pre class="logo" aria-label="Glyph">       _             _
+  __ _| |_   _ _ __ | |__
+ / _` | | | | | '_ \| '_ \
+| (_| | | |_| | |_) | | | |
+ \__, |_|\__, | .__/|_| |_|
+ |___/   |___/|_|</pre>
+
+<section class="stack" id="start">
+  <div>
+    <pre class="rule" id="rule-start"></pre>
+    <div class="dim" id="lead" data-t="lead"></div>
+  </div>
+  <div class="code-line" id="codebox" hidden><span class="dim" data-t="code"></span><span class="code" id="ucode"></span></div>
+
+  <div class="tabs" id="seg">
+    <button id="t-in" class="on" data-t="signin"></button>
+    <button id="t-new" data-t="create"></button>
+  </div>
+
+  <form class="stack" id="p-in" autocomplete="on">
+    <div class="field">
+      <label for="in-handle" data-t="handle"></label>
+      <div class="input"><span>@</span><input id="in-handle" name="username" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+    </div>
+    <div class="field">
+      <label for="in-pw" data-t="password"></label>
+      <div class="input"><input id="in-pw" name="password" type="password" autocomplete="current-password"></div>
+    </div>
+    <button class="act" id="go-pw" type="submit" data-t="signin"></button>
+    <div class="or" data-t="or"></div>
+    <button class="act alt" id="go-in" type="button" data-t="passkey"></button>
+    <button class="quiet" id="t-rec" type="button" data-t="recover_q"></button>
+  </form>
+
+  <form class="stack" id="p-new" hidden autocomplete="on">
+    <div class="field">
+      <label for="handle" data-t="handle"></label>
+      <div class="input"><span>@</span><input id="handle" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="20"></div>
+      <div class="note" id="handle-hint" data-t="rules"></div>
+    </div>
+    <div class="field">
+      <label for="new-pw" data-t="password"></label>
+      <div class="input"><input id="new-pw" name="new-password" type="password" autocomplete="new-password"></div>
+    </div>
+    <div class="field">
+      <label for="new-pw2" data-t="repeat"></label>
+      <div class="input"><input id="new-pw2" type="password" autocomplete="new-password"></div>
+      <div class="note" data-t="pw_rules"></div>
+    </div>
+    <button class="act" id="go-pw-new" type="submit" data-t="create_btn"></button>
+    <div class="or" data-t="or"></div>
+    <button class="act alt" id="go-new" type="button" disabled data-t="passkey_alt"></button>
+  </form>
+
+  <div class="stack" id="p-link" hidden>
+    <button class="act" id="go-link" data-t="createpk"></button>
+  </div>
+
+  <div class="stack" id="p-rec" hidden>
+    <div class="field">
+      <label for="r-handle" data-t="handle"></label>
+      <div class="input"><span>@</span><input id="r-handle" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+    </div>
+    <div class="field">
+      <label for="r-code" data-t="rc_label"></label>
+      <div class="input"><input id="r-code" placeholder="glyph-rc-" autocomplete="off" spellcheck="false"></div>
+    </div>
+    <button class="act" id="go-rec" data-t="recover"></button>
+    <button class="quiet" id="t-back" data-t="back_q"></button>
+  </div>
+
+  <div class="err" id="err"></div>
+</section>
+
+<section class="stack" id="done" hidden>
+  <pre class="rule" id="rule-done"></pre>
+  <div class="note ok" id="done-lead"></div>
+  <div class="stack" id="rc" hidden>
+    <div class="box" id="rcode"></div>
+    <div class="dim" data-t="rc"></div>
+  </div>
+  <div class="stack" id="full" hidden>
+    <div class="note bad" data-t="full"></div>
+    <div class="stack" id="devs"></div>
+  </div>
+  <div class="err" id="err2"></div>
+</section>
+</main>
+<script>
+"use strict";
+const T = { title:"sign in", lead:"your library on every device.", link_title:"add passkey", link_lead:"sign in as @{h} without a password from now on.", code:"code in glyph", signin:"sign in", create:"new account", passkey:"continue with passkey", createpk:"create passkey", recover:"sign in with recovery code", recover_q:"lost your passkey? use a recovery code", password:"password", repeat:"repeat password", or:"or", create_btn:"create account", passkey_alt:"create a passkey instead", pw_rules:"at least 10 characters. it is hashed on this device, the server never sees it.", pw_short:"the password needs at least 10 characters.", pw_mismatch:"the passwords do not match.", login_failed:"handle or password wrong.", fill:"enter handle and password.", nokdf:"could not load the password module. reload the page or use a passkey.", back_q:"back to passkey", handle:"handle", rules:"3-20 characters: a-z 0-9 _", rc_label:"recovery code", rc:"your recovery code. store it somewhere safe, it is shown only once.", full:"device limit reached. remove one device to finish:", back:"done. close this tab and go back to glyph.", linked:"passkey added. you can close this tab.", remove:"remove", free:"is free", taken:"is taken", invalid:"3-20 characters: a-z 0-9 _", reserved:"is reserved", expired:"this sign-in expired. start again in glyph.", nopk:"this browser cannot use passkeys. use a pairing code in glyph instead.", failed:"that did not work. try again.", cancelled:"cancelled." };
+document.querySelectorAll("[data-t]").forEach(e => { e.textContent = T[e.dataset.t]; });
+const $ = id => document.getElementById(id);
+const loginId = location.pathname.split("/").filter(Boolean).pop();
+let pageSecret = null, limit = 5;
+
+// "-- title -------------" filling the column.
+function rule(id, label) {
+  const el = $(id);
+  el.innerHTML = "";
+  const b = document.createElement("b");
+  b.textContent = label;
+  el.append("-- ", b, " " + "-".repeat(80));
+}
+rule("rule-start", T.title);
+
+const b2a = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const a2b = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0)).buffer;
+async function api(path, body, method) {
+  const r = await fetch(path, { method: method || "POST", headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.message || r.status); e.code = j.code; throw e; }
+  return j;
+}
+function fail(e, where) {
+  const el = $(where || "err");
+  if (e && e.name === "NotAllowedError") { el.textContent = "!! " + T.cancelled; return; }
+  if (e && T[e.code] && !e.code.startsWith("handle_")) { el.textContent = "!! " + T[e.code]; return; }
+  el.textContent = "!! " + (e && e.code === "login_expired" ? T.expired
+    : (e && e.code && e.code.startsWith("handle_")) ? ("@ " + (T[e.code.slice(7)] || T.failed)) : T.failed);
+}
+// Same spinner as the app: | / - \
+async function busy(btn, fn) {
+  const label = btn.textContent, frames = "|/-\\";
+  let i = 0;
+  btn.disabled = true;
+  const tick = setInterval(() => { btn.textContent = label + "  " + frames[i++ % 4]; }, 110);
+  $("err").textContent = "";
+  try { await fn(); } catch (e) { fail(e); } finally { clearInterval(tick); btn.disabled = false; btn.textContent = label; }
+}
+function show(panel) {
+  ["in", "new", "rec", "link"].forEach(k => { $("p-" + k).hidden = k !== panel; });
+  $("t-in").classList.toggle("on", panel === "in" || panel === "rec");
+  $("t-new").classList.toggle("on", panel === "new");
+  $("err").textContent = "";
+}
+$("t-in").onclick = () => show("in");
+$("t-new").onclick = () => show("new");
+$("t-rec").onclick = () => show("rec");
+$("t-back").onclick = () => show("in");
+if (!window.PublicKeyCredential) { $("err").textContent = "!! " + T.nopk; }
+
+api("/v1/account/login/info", { login_id: loginId }).then(info => {
+  if (info.link) {
+    rule("rule-start", T.link_title);
+    $("lead").textContent = T.link_lead.replace("{h}", info.handle || "");
+    $("seg").hidden = true;
+    show("link");
+  } else if (info.user_code) {
+    $("ucode").textContent = info.user_code;
+    $("codebox").hidden = false;
+  }
+}).catch(e => fail(e));
+
+let checkTimer;
+$("handle").oninput = () => {
+  clearTimeout(checkTimer);
+  const h = $("handle").value.trim().replace(/^@/, "").toLowerCase();
+  $("go-new").disabled = true;
+  $("handle-hint").className = "note";
+  $("handle-hint").textContent = T.rules;
+  if (!h) return;
+  checkTimer = setTimeout(async () => {
+    try {
+      const r = await api("/v1/account/handle/" + encodeURIComponent(h), null, "GET");
+      $("handle-hint").textContent = (r.available ? "ok " : "!! ") + "@" + r.handle + " " + (r.available ? T.free : T[r.reason] || T.taken);
+      $("handle-hint").className = "note " + (r.available ? "ok" : "bad");
+      $("go-new").disabled = !r.available;
+    } catch (e) { fail(e); }
+  }, 300);
+};
+
+async function create() {
+  const o = await api("/v1/account/passkey/register/options", { login_id: loginId, handle: $("handle").value });
+  const pk = o.publicKey;
+  pk.challenge = a2b(pk.challenge);
+  pk.user.id = a2b(pk.user.id);
+  const c = await navigator.credentials.create({ publicKey: pk });
+  return api("/v1/account/passkey/register/verify", {
+    login_id: loginId,
+    client_data_json: b2a(c.response.clientDataJSON),
+    attestation_object: b2a(c.response.attestationObject)
+  });
+}
+$("go-new").onclick = () => busy($("go-new"), async () => done(await create()));
+
+// Password: key = Argon2id(password, salt), same parameters as every Glyph app.
+const err = code => { const e = new Error(code); e.code = code; return e; };
+async function derive(pw, salt) {
+  if (!window.hashwasm) throw err("nokdf");
+  return hashwasm.argon2id({ password: pw, salt, parallelism: 1, iterations: 2, memorySize: 19456, hashLength: 32, outputType: "binary" });
+}
+$("p-in").onsubmit = ev => {
+  ev.preventDefault();
+  busy($("go-pw"), async () => {
+    const handle = $("in-handle").value.trim(), pw = $("in-pw").value;
+    if (!handle || !pw) throw err("fill");
+    let salt;
+    try { salt = (await api("/v1/account/password/salt/" + encodeURIComponent(handle.replace(/^@/, "")), null, "GET")).salt; }
+    catch (e) { throw e.code === "no_password" ? err("login_failed") : e; }
+    const key = await derive(pw, new Uint8Array(a2b(salt)));
+    done(await api("/v1/account/login/password", { login_id: loginId, handle, key: b2a(key) }));
+  });
+};
+$("p-new").onsubmit = ev => {
+  ev.preventDefault();
+  busy($("go-pw-new"), async () => {
+    const handle = $("handle").value.trim(), pw = $("new-pw").value;
+    if (!handle || !pw) throw err("fill");
+    if ([...pw].length < 10) throw err("pw_short");
+    if (pw !== $("new-pw2").value) throw err("pw_mismatch");
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await derive(pw, salt);
+    done(await api("/v1/account/login/password_register", { login_id: loginId, handle, salt: b2a(salt), key: b2a(key) }));
+  });
+};
+$("go-link").onclick = () => busy($("go-link"), async () => done(await create()));
+
+$("go-in").onclick = () => busy($("go-in"), async () => {
+  const o = await api("/v1/account/passkey/login/options", { login_id: loginId });
+  const pk = o.publicKey;
+  pk.challenge = a2b(pk.challenge);
+  const c = await navigator.credentials.get({ publicKey: pk });
+  done(await api("/v1/account/passkey/login/verify", {
+    login_id: loginId,
+    id: c.id,
+    client_data_json: b2a(c.response.clientDataJSON),
+    authenticator_data: b2a(c.response.authenticatorData),
+    signature: b2a(c.response.signature),
+    user_handle: c.response.userHandle ? b2a(c.response.userHandle) : null
+  }));
+});
+
+$("go-rec").onclick = () => busy($("go-rec"), async () => {
+  done(await api("/v1/account/recover", { login_id: loginId, handle: $("r-handle").value, recovery_code: $("r-code").value }));
+});
+
+function done(r) {
+  $("start").hidden = true;
+  $("done").hidden = false;
+  rule("rule-done", "@" + r.handle);
+  if (r.linked) { $("done-lead").textContent = "ok " + T.linked; return; }
+  pageSecret = r.page_secret;
+  limit = r.device_limit;
+  if (r.recovery_code) { $("rc").hidden = false; $("rcode").textContent = r.recovery_code; }
+  devices(r.devices);
+}
+
+function devices(list) {
+  const full = list.length >= limit;
+  $("full").hidden = !full;
+  $("done-lead").textContent = full ? "" : "ok " + T.back;
+  $("done-lead").hidden = full;
+  const box = $("devs");
+  box.textContent = "";
+  if (!full) return;
+  list.forEach(d => {
+    const row = document.createElement("div");
+    row.className = "dev";
+    const name = document.createElement("span");
+    name.textContent = d.name + "  ·  " + d.platform;
+    const btn = document.createElement("button");
+    btn.textContent = T.remove;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try { devices((await api("/v1/account/login/remove_device", { login_id: loginId, page_secret: pageSecret, device_id: d.id })).devices); }
+      catch (e) { btn.disabled = false; fail(e, "err2"); }
+    };
+    row.append(name, btn);
+    box.append(row);
+  });
+}
+</script>
+</body>
+</html>

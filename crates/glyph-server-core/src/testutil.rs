@@ -71,8 +71,48 @@ impl HttpClient for MockHttp {
     }
 }
 
+/// Helper programs (yt-dlp). Rules are matched against the joined arguments;
+/// the first hit wins, unmatched calls behave like a program printing `{}`.
+#[derive(Default)]
+pub struct MockCommands {
+    pub rules: Mutex<Vec<(String, String)>>,
+    pub calls: Mutex<Vec<String>>,
+    /// Argument substring for which the program is reported as missing.
+    pub missing: Mutex<Option<String>>,
+}
+
+impl MockCommands {
+    pub fn on(&self, needle: &str, stdout: &str) -> &Self {
+        self.rules.lock().unwrap().push((needle.into(), stdout.into()));
+        self
+    }
+
+    pub fn call_count(&self, needle: &str) -> usize {
+        self.calls.lock().unwrap().iter().filter(|c| c.contains(needle)).count()
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for MockCommands {
+    async fn run(&self, program: &str, args: &[String], _timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
+        let joined = args.join(" ");
+        self.calls.lock().unwrap().push(format!("{program} {joined}"));
+        if self.missing.lock().unwrap().as_deref().is_some_and(|m| joined.contains(m)) {
+            return Err(CommandError::Unavailable);
+        }
+        let rules = self.rules.lock().unwrap();
+        for (needle, out) in rules.iter() {
+            if joined.contains(needle.as_str()) {
+                return Ok(out.clone().into_bytes());
+            }
+        }
+        Ok(b"{}".to_vec())
+    }
+}
+
 pub struct Harness {
     pub http: Arc<MockHttp>,
+    pub cmds: Arc<MockCommands>,
     pub rt: Arc<MockRuntime>,
     pub svc: Arc<Services>,
 }
@@ -91,6 +131,7 @@ pub fn all_secrets() -> Secrets {
 
 pub fn harness(secrets: Secrets) -> Harness {
     let http = Arc::new(MockHttp::default());
+    let cmds = Arc::new(MockCommands::default());
     let rt = Arc::new(MockRuntime::default());
     let cache: Arc<dyn Cache> = Arc::new(MemoryCache::new(rt.clone(), 1000));
     let svc = Arc::new(Services {
@@ -98,9 +139,26 @@ pub fn harness(secrets: Secrets) -> Harness {
         cache,
         limiter: Arc::new(MemoryRateLimiter::new(rt.clone())),
         rt: rt.clone(),
+        cmds: cmds.clone(),
         config: Config::new(secrets),
     });
-    Harness { http, rt, svc }
+    Harness { http, cmds, rt, svc }
+}
+
+/// Like [`harness`], but with yt-dlp available (YouTube search on).
+pub fn harness_with_ytdlp(secrets: Secrets) -> Harness {
+    let h = harness(secrets);
+    let mut config = h.svc.config.clone();
+    config.ytdlp_path = Some("yt-dlp".into());
+    let svc = Arc::new(Services {
+        http: h.svc.http.clone(),
+        cache: h.svc.cache.clone(),
+        limiter: h.svc.limiter.clone(),
+        rt: h.svc.rt.clone(),
+        cmds: h.svc.cmds.clone(),
+        config,
+    });
+    Harness { http: h.http, cmds: h.cmds, rt: h.rt, svc }
 }
 
 pub fn track(id: &str, source: glyph_protocol::ProviderId, title: &str, artist: &str, secs: u64) -> glyph_protocol::Track {
@@ -115,5 +173,6 @@ pub fn track(id: &str, source: glyph_protocol::ProviderId, title: &str, artist: 
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
+        explicit: false,
     }
 }

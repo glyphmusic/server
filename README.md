@@ -2,15 +2,20 @@
 
 Open-source metadata server of the [Glyph](https://github.com/glyphmusic/glyph) music app.
 It holds the API keys, merges search results from many sources, resolves each song to a
-legal full-playback source, and caches everything. It never proxies audio: responses
-contain only metadata, IDs and official stream/embed references.
+playback source, and caches metadata. The Cloudflare Worker is the app's central
+API and streams/caches audio too. A private native companion runs yt-dlp when
+YouTube search/audio is enabled; the app only talks to the Worker.
 
 Two ways to run the same code (`glyph-server-core`):
 
 | Target | Crate | Where |
 |---|---|---|
-| Cloudflare Worker | `glyph-server-worker` | Cloudflare free plan is enough |
+| Cloudflare Worker | `glyph-server-worker` | Central API, audio proxy and edge cache |
 | Standalone binary | `glyph-server-native` | Linux, macOS, Windows, Docker |
+
+**Run your own:** [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) walks through
+the Cloudflare setup, your own domain, accounts and sync, the admin CLI, the
+device limit and every server-side limit.
 
 ## API (v1)
 
@@ -22,6 +27,11 @@ Two ways to run the same code (`glyph-server-core`):
 | `GET /v1/lyrics?title=&artist=&album=&duration=` | LRCLIB; `duration` in seconds |
 | `GET /v1/similar?artist=&title=` | Last.fm `track.getSimilar` |
 | `POST /v1/import/spotify` | `{url}` of a public Spotify, Deezer or YouTube playlist |
+| `POST /v1/cover` | Track -> cover URL (provider metadata lookup stays on the server) |
+| `GET /v1/upstream?url=` | Worker-only allowlisted cover/artist metadata and image proxy |
+| `GET /v1/audio/:provider/:id` | Streaming audio, byte ranges; edge-cached on Workers, direct on the binary |
+| `POST /v1/download` | Track -> explicitly permitted download reference, or null |
+| `GET /v1/download/:provider/:id` | Streaming proxy for permitted downloads |
 
 Types come from the shared `glyph-protocol` crate. Errors are `ApiError` JSON; rate limits
 answer `429` with `retry_after_s` and a `Retry-After` header. Clients send an anonymous
@@ -32,14 +42,22 @@ provider returns the same song later, the updated track (with more `external_ids
 again; clients replace it by (`source`, `id`).
 
 Resolver embed ids: YouTube = video id, SoundCloud = numeric track id. Audius/Jamendo/Archive
-return direct official stream URLs; Deezer returns the official 30 s preview.
+return stream references; Deezer returns the official 30 s preview. With `proxy_audio`
+(on by default, always on Workers) every stream/preview reference points to
+`/v1/audio/...`: the server resolves the provider URL itself — yt-dlp for YouTube —
+and streams the bytes with byte-range support, so the app never sees a short-lived
+provider URL and can seek normally. SoundCloud keeps its official embed.
+Deezer preview signatures are refreshed from the track API on every resolve,
+including cached mappings; cached search previews are never used for playback.
+Preview resolution is bounded by `provider_timeout_ms`.
 
 ## Providers and keys
 
 | Provider | Needs | Secret name(s) |
 |---|---|---|
 | Audius, Internet Archive, Deezer, LRCLIB | nothing | - |
-| YouTube Data API v3 | API key | `YOUTUBE_API_KEY` |
+| YouTube search/audio | native yt-dlp or the Worker's private companion | `YTDLP_SERVICE_URL`, `YTDLP_SERVICE_TOKEN` (Worker); `YTDLP_PATH` (native) |
+| YouTube playlist import | API key | `YOUTUBE_API_KEY` |
 | Jamendo | client id | `JAMENDO_CLIENT_ID` |
 | SoundCloud | client credentials | `SOUNDCLOUD_CLIENT_ID`, `SOUNDCLOUD_CLIENT_SECRET` |
 | Spotify (metadata only) | client credentials | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` |
@@ -51,10 +69,18 @@ is skipped for 10 minutes.
 
 ### Quotas
 
-* **YouTube: 10,000 units/day.** One search costs 100 units (+1 for durations). Results are
-  cached for 6 hours and the server stops calling YouTube after `YOUTUBE_DAILY_BUDGET_UNITS`
-  (default 9000) units per day. Prefer other sources first (default resolver order is
-  Audius, Jamendo, SoundCloud, YouTube) so YouTube is rarely hit.
+* **YouTube search uses yt-dlp, no key and no quota.** The server runs
+  `yt-dlp --dump-json` locally, so nothing is downloaded: only ids, titles,
+  channels, durations and thumbnails are read. Worker audio uses the private
+  companion and is streamed through the Worker. Install yt-dlp (`pip install -U yt-dlp`, a package
+  manager, or a release binary from https://github.com/yt-dlp/yt-dlp); point
+  `ytdlp_path` in `server.toml` at it if it is not in `PATH`. Without yt-dlp
+  YouTube is simply not offered. Cloudflare Workers use the companion because
+  the Worker runtime cannot spawn processes.
+* **YouTube Data API v3 (playlist import): 10,000 units/day.** The server stops
+  importing after `YOUTUBE_DAILY_BUDGET_UNITS` (default 9000) units per day.
+  Prefer other sources first (default resolver order is Audius, Jamendo,
+  SoundCloud, YouTube).
 * Spotify may restrict apps in development mode and some playlist endpoints; check Spotify's
   developer policy before enabling the import for the public.
 
@@ -73,6 +99,47 @@ request (the playlist import is capped at `import_max_pages` = 5 pages for that 
 1,000 KV writes/day. To stay inside the KV limit only long-lived entries (resolver mappings,
 lyrics, 1 h or more) are written to KV; everything else, rate-limit counters included, uses
 the free Cache API, which is per data center. Rate limits are therefore approximate.
+
+### YouTube companion for the Worker
+
+1. On a host with process support, install `glyph-server`, current yt-dlp and a
+   supported JavaScript runtime. See the [yt-dlp installation instructions](https://github.com/yt-dlp/yt-dlp#installation).
+2. Generate a random secret of at least 32 characters. Set `YTDLP_SERVICE_TOKEN`
+   on that host, and `YTDLP_PATH` if the executable is not in PATH.
+3. Run `glyph-server --bind 127.0.0.1:8787` behind an HTTPS reverse proxy/tunnel
+   that forwards `/internal/*`. With the token set, the binary acts as a companion:
+   ordinary public API routes are disabled except `/v1/health`.
+4. Set the Worker's secrets with `wrangler secret put YTDLP_SERVICE_URL` and
+   `wrangler secret put YTDLP_SERVICE_TOKEN`. Use the HTTPS base URL of the
+   companion and the same secret. Deploy the Worker after configuring both.
+
+The app keeps the Worker's URL in `server_url`. It never receives the companion
+secret. The helper accepts only Glyph's fixed YouTube metadata/URL operations,
+validates IDs, limits extraction to 20 seconds and allows four concurrent jobs.
+It fetches audio on the extraction host (signed URLs may depend on that host's IP)
+and forwards bytes to the Worker. No paid service or account is provisioned by
+these code changes.
+
+The Worker serves audio as it arrives and writes a full copy to the Cloudflare
+Cache API in parallel. Completed objects support range requests; cold range
+requests are sliced while the full object fills the cache. Cache keys use the
+provider/track ID rather than an expiring signed URL. Objects are limited to
+32 MiB, with a one-hour edge-cache TTL; caches are per data center and best effort,
+not durable offline storage. Failed/partial responses are not cached. Unknown
+length streams are bounded but not cached. Background fills can be interrupted
+by Cloudflare's request-lifecycle limits. Audio is never written to Workers KV.
+
+Media requests have a separate per-IP budget of 20 times `RATE_LIMIT_PER_MIN`,
+so cover loads and range requests do not consume the metadata budget. The Cache
+API rate limiter remains approximate. The proxy only follows HTTPS redirects to
+known provider hosts and never forwards browser cookies or authorization headers.
+The companion secret is sent only to its configured HTTPS endpoint, without redirects.
+
+With a server configured, the app sends search, resolve, lyrics, similar tracks,
+imports, cover/artist lookups and download lookups through it. Provider failures
+do not silently send requests directly. Explicit `server_url = "off"` retains
+direct mode; existing local files/caches can still be read offline. SoundCloud's
+official embed and application updates remain separate from the audio proxy.
 
 ## Option B: native binary (Linux, macOS, Windows)
 
@@ -102,11 +169,20 @@ cargo test --workspace
 cargo check -p glyph-server-worker --target wasm32-unknown-unknown
 ```
 
+Worker streaming integration tests (local workerd, mocked providers):
+
+```
+cd crates/glyph-server-worker
+worker-build --dev --no-opt
+npm ci
+npm test
+```
+
 `glyph-protocol` is a path dependency on `../glyph` for now; switch it in the workspace
 `Cargo.toml` to `git = "https://github.com/glyphmusic/glyph", tag = "protocol-v1"` for releases.
 
-Hard rules: official APIs only, no scraping, no audio through the server, keys only from
-secrets/env.
+Provider metadata uses official APIs; YouTube extraction uses the separately
+configured yt-dlp helper. Provider keys and companion tokens stay in secrets/env.
 
 ## License
 

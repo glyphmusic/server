@@ -1,70 +1,63 @@
-//! YouTube Data API v3 (official). `search.list` costs 100 quota units, so
-//! results are cached for hours and a daily budget guard stops calls early.
-//! Playback is only ever the official IFrame embed (`embed_id` = video id).
+//! YouTube search via the `yt-dlp` binary (no API key, no quota). We ask it
+//! for a flat search first (fast, ids + titles + channels), then one follow-up
+//! call for the durations. Playback is only ever the official IFrame embed
+//! (`embed_id` = video id), so nothing is downloaded.
 
 use super::*;
-use crate::cache;
-use crate::traits::HttpRequest;
+use crate::traits::{with_timeout, CommandError};
 
-const SEARCH_COST: u64 = 101; // search.list (100) + videos.list (1)
+/// Results per search, like the old `search.list?maxResults=10`.
+const MAX_RESULTS: usize = 10;
+/// A flat search is fast; the detail call extracts ten pages.
+const FLAT_TIMEOUT_MS: u64 = 8_000;
+const DETAIL_TIMEOUT_MS: u64 = 12_000;
 
+/// One `--dump-json` line, as lenient as the tool's output gets.
 #[derive(Deserialize)]
-struct SearchResp {
+struct Entry {
     #[serde(default)]
-    items: Vec<SearchItem>,
-}
-#[derive(Deserialize)]
-struct SearchItem {
-    id: VideoId,
-    snippet: Snippet,
-}
-#[derive(Deserialize)]
-struct VideoId {
-    #[serde(rename = "videoId")]
-    video_id: Option<String>,
-}
-#[derive(Deserialize)]
-struct Snippet {
+    id: String,
+    #[serde(default)]
     title: String,
-    #[serde(rename = "channelTitle", default)]
-    channel_title: String,
-    thumbnails: Option<Thumbs>,
+    #[serde(default)]
+    channel: String,
+    #[serde(default)]
+    uploader: String,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    /// Full dump lists every size; flat search usually has none.
+    #[serde(default)]
+    thumbnails: Option<Vec<Thumb>>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    availability: Option<String>,
+    #[serde(default)]
+    live_status: Option<String>,
 }
-#[derive(Deserialize)]
-struct Thumbs {
-    high: Option<Thumb>,
-    medium: Option<Thumb>,
-}
+
 #[derive(Deserialize)]
 struct Thumb {
     url: String,
-}
-#[derive(Deserialize)]
-struct VideosResp {
     #[serde(default)]
-    items: Vec<VideoItem>,
+    width: Option<u64>,
 }
-#[derive(Deserialize)]
-struct VideoItem {
-    id: String,
-    #[serde(rename = "contentDetails")]
-    content_details: Option<Details>,
-    status: Option<Status>,
-}
-#[derive(Deserialize)]
-struct Details {
-    duration: String,
-}
-#[derive(Deserialize)]
-struct Status {
-    embeddable: Option<bool>,
+
+/// The biggest preview we are given, or `None`.
+fn best_thumb(e: &Entry) -> Option<String> {
+    if let Some(t) = e.thumbnails.as_ref().filter(|v| !v.is_empty()) {
+        if let Some(big) = t.iter().max_by_key(|t| t.width.unwrap_or(0)) {
+            return Some(big.url.clone());
+        }
+    }
+    e.thumbnail.clone().filter(|u| !u.is_empty())
 }
 
 pub fn playback(video_id: &str) -> PlaybackSource {
     PlaybackSource::Embed { provider: ProviderId::YouTube, embed_id: video_id.to_string() }
 }
 
-/// `PT1H2M3S` -> milliseconds.
+/// `PT1H2M3S` -> milliseconds (used by the playlist importer).
 pub fn parse_iso8601_duration(s: &str) -> Option<u64> {
     let rest = s.strip_prefix('P')?;
     let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
@@ -100,64 +93,93 @@ pub fn parse_iso8601_duration(s: &str) -> Option<u64> {
     Some(total * 1000)
 }
 
-fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
+fn map_err(e: CommandError) -> ProviderError {
+    match e {
+        CommandError::Unavailable => ProviderError::NotConfigured,
+        CommandError::Timeout => ProviderError::Timeout,
+        CommandError::Failed => ProviderError::Network,
+    }
 }
 
-fn day(svc: &Services) -> u64 {
-    svc.rt.now_ms() / 86_400_000
+/// Run yt-dlp and parse its newline-delimited JSON.
+async fn run(svc: &Services, bin: &str, args: &[String], timeout_ms: u64) -> PResult<Vec<Entry>> {
+    let out = with_timeout(&*svc.rt, timeout_ms, svc.cmds.run(bin, args, timeout_ms))
+        .await
+        .ok_or(ProviderError::Timeout)?
+        .map_err(map_err)?;
+    let mut entries = Vec::new();
+    for line in String::from_utf8_lossy(&out).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(e) = serde_json::from_str::<Entry>(line) {
+            entries.push(e);
+        }
+    }
+    Ok(entries)
+}
+
+fn base_args() -> Vec<String> {
+    ["--ignore-config", "--no-warnings", "--no-playlist-reverse"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
-    let key = svc.config.secrets.youtube_api_key.as_deref().ok_or(ProviderError::NotConfigured)?;
-    let quota_key = format!("quota:youtube:{}", day(svc));
-    let spent: u64 = cache::get_json(&*svc.cache, &quota_key).await.unwrap_or(0);
-    if spent + SEARCH_COST > svc.config.youtube_daily_budget_units {
-        return Err(ProviderError::Quota);
+    let bin = svc.config.ytdlp_path.clone().ok_or(ProviderError::NotConfigured)?;
+
+    let mut args = base_args();
+    args.push("--dump-json".into());
+    args.push("--flat-playlist".into());
+    args.push(format!("ytsearch{MAX_RESULTS}:{q}"));
+    let flat = run(svc, &bin, &args, FLAT_TIMEOUT_MS).await?;
+
+    let mut ids: Vec<String> = Vec::new();
+    for e in &flat {
+        if !e.id.is_empty() && !e.id.contains("://") && !ids.contains(&e.id) {
+            ids.push(e.id.clone());
+        }
     }
 
-    let url = build_url(
-        "https://www.googleapis.com/youtube/v3/search",
-        &[
-            ("part", "snippet"),
-            ("type", "video"),
-            ("videoCategoryId", "10"),
-            ("maxResults", "10"),
-            ("q", q),
-            ("key", key),
-        ],
-    );
-    let resp = fetch_json::<SearchResp>(svc, HttpRequest::get(url)).await;
-    // 403 from the Data API is (almost always) quotaExceeded.
-    let resp = match resp {
-        Err(ProviderError::Http(403)) => return Err(ProviderError::Quota),
-        other => other?,
-    };
-    cache::put_json(&*svc.cache, &quota_key, &(spent + SEARCH_COST), 2 * 86_400).await;
-
-    let ids: Vec<String> = resp.items.iter().filter_map(|i| i.id.video_id.clone()).collect();
-    if ids.is_empty() {
-        return Ok(vec![]);
+    // Durations are missing in flat mode; one call for all ids at once.
+    let mut detail: Vec<Entry> = Vec::new();
+    if !ids.is_empty() {
+        let mut args = base_args();
+        args.push("--dump-json".into());
+        args.push("--skip-download".into());
+        args.push("--".into());
+        args.extend(ids.iter().map(|id| format!("https://www.youtube.com/watch?v={id}")));
+        // Metadata is a nice-to-have: keep the hits when it fails.
+        detail = run(svc, &bin, &args, DETAIL_TIMEOUT_MS).await.unwrap_or_default();
     }
-    let joined = ids.join(",");
-    let vurl = build_url(
-        "https://www.googleapis.com/youtube/v3/videos",
-        &[("part", "contentDetails,status"), ("id", &joined), ("key", key)],
-    );
-    let videos: VideosResp = fetch_json(svc, HttpRequest::get(vurl)).await?;
 
     let mut out = Vec::new();
-    for item in resp.items {
-        let Some(vid) = item.id.video_id else { continue };
-        let Some(v) = videos.items.iter().find(|v| v.id == vid) else { continue };
-        if v.status.as_ref().and_then(|s| s.embeddable) == Some(false) {
-            continue; // cannot be played in the embed widget
+    for e in &flat {
+        if e.id.is_empty() || e.title.is_empty() || !ids.contains(&e.id) {
+            continue;
         }
-        let channel = unescape(&item.snippet.channel_title);
+        let live = e.live_status.as_deref().is_some_and(|s| s != "not_live");
+        if live || e.availability.as_deref() == Some("private") {
+            continue;
+        }
+        // Prefer the full metadata; fall back to the flat entry.
+        let full = detail.iter().find(|d| d.id == e.id);
+        fn non_empty(s: &str) -> Option<&str> {
+    (!s.is_empty()).then_some(s)
+}
+        let channel = full
+            .and_then(|d| non_empty(&d.channel))
+            .or_else(|| non_empty(&e.channel))
+            .or_else(|| non_empty(&e.uploader))
+            .unwrap_or_default();
         let is_topic = channel.ends_with(" - Topic");
-        let artist = channel.trim_end_matches(" - Topic").to_string();
-        let raw_title = unescape(&item.snippet.title);
-        let mut title = raw_title.clone();
+        let artist = channel.trim_end_matches(" - Topic").trim().to_string();
+        if artist.is_empty() {
+            continue;
+        }
+        let raw_title = full.map(|d| d.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(&e.title);
+        let mut title = raw_title.to_string();
         // "Artist - Title" -> "Title" when the prefix is the channel/artist.
         if let Some((a, rest)) = raw_title.split_once(" - ") {
             if crate::merge::artists_match(a, &artist) {
@@ -172,11 +194,15 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         if low.contains("official audio") {
             bonus += 0.10;
         }
-        let mut t = new_track(&vid, ProviderId::YouTube, &title, &artist);
-        t.duration_ms = v.content_details.as_ref().and_then(|d| parse_iso8601_duration(&d.duration));
-        t.cover_url = item.snippet.thumbnails.and_then(|t| t.high.or(t.medium)).map(|t| t.url);
-        t.permalink = Some(format!("https://www.youtube.com/watch?v={vid}"));
-        out.push(Candidate { track: t, bonus, playback: Some(playback(&vid)) });
+        let mut t = new_track(&e.id, ProviderId::YouTube, &title, &artist);
+        t.duration_ms = full
+            .and_then(|d| d.duration)
+            .or(e.duration)
+            .filter(|s| *s > 0.0)
+            .map(|s| (s * 1000.0) as u64);
+        t.cover_url = full.and_then(best_thumb).or_else(|| best_thumb(e));
+        t.permalink = Some(format!("https://www.youtube.com/watch?v={}", e.id));
+        out.push(Candidate { track: t, bonus, playback: Some(playback(&e.id)) });
     }
     Ok(out)
 }
@@ -197,42 +223,52 @@ mod tests {
     }
 
     #[test]
-    fn search_uses_music_category_and_filters_non_embeddable() {
-        let h = harness(all_secrets());
-        h.http.on(
-            "youtube/v3/search",
-            200,
-            r#"{"items":[
-              {"id":{"videoId":"a1"},"snippet":{"title":"Daft Punk - Get Lucky (Official Audio)","channelTitle":"Daft Punk - Topic"}},
-              {"id":{"videoId":"b2"},"snippet":{"title":"Blocked","channelTitle":"X"}}]}"#,
+    fn search_uses_ytdlp_and_drops_livestreams() {
+        let h = harness_with_ytdlp(all_secrets());
+        h.cmds.on(
+            "ytsearch10:",
+            concat!(
+                r#"{"id":"a1","title":"Daft Punk - Get Lucky (Official Audio)","channel":"Daft Punk - Topic"}"#,
+                "\n",
+                r#"{"id":"b2","title":"Live Set","channel":"Some Band","live_status":"is_live"}"#,
+                "\n",
+                r#"{"id":"c3","title":"Blocked","channel":"X","availability":"private"}"#,
+                "\n",
+                r#"{"id":"d4","title":"No Artist","channel":""}"#,
+            ),
         );
-        h.http.on(
-            "youtube/v3/videos",
-            200,
-            r#"{"items":[{"id":"a1","contentDetails":{"duration":"PT6M9S"},"status":{"embeddable":true}},
-                         {"id":"b2","contentDetails":{"duration":"PT1M"},"status":{"embeddable":false}}]}"#,
+        h.cmds.on(
+            "a1",
+            r#"{"id":"a1","title":"Daft Punk - Get Lucky (Official Audio)","channel":"Daft Punk - Topic","duration":369.0,"thumbnails":[{"url":"https://i.ytimg.com/small.jpg","width":120},{"url":"https://i.ytimg.com/big.jpg","width":480}]}"#,
         );
         let r = block_on(search(&h.svc, "get lucky")).unwrap();
         assert_eq!(r.len(), 1);
+        assert_eq!(r[0].track.id, "a1");
         assert_eq!(r[0].track.artist, "Daft Punk");
         assert_eq!(r[0].track.title, "Get Lucky (Official Audio)");
         assert_eq!(r[0].track.duration_ms, Some(369_000));
+        assert_eq!(r[0].track.cover_url.as_deref(), Some("https://i.ytimg.com/big.jpg"));
         assert!(r[0].bonus > 0.2);
-        let calls = h.http.calls.lock().unwrap().clone();
-        assert!(calls[0].contains("videoCategoryId=10"));
+        assert_eq!(r[0].playback, Some(playback("a1")));
+        // No API key was used, and the durations came from yt-dlp.
+        assert_eq!(h.http.call_count("googleapis.com"), 0);
+        assert_eq!(h.cmds.call_count("ytsearch10:get lucky"), 1);
     }
 
     #[test]
-    fn daily_budget_guard() {
-        let mut s = all_secrets();
-        s.youtube_api_key = Some("K".into());
-        let h = harness(s);
-        h.http.on("youtube/v3/search", 200, r#"{"items":[]}"#);
-        for _ in 0..200 {
-            let _ = block_on(search(&h.svc, "q"));
-        }
-        // Budget (9000) / 101 per search => at most 89 upstream searches.
-        assert!(h.http.call_count("youtube/v3/search") <= 90);
-        assert_eq!(block_on(search(&h.svc, "q")).unwrap_err(), ProviderError::Quota);
+    fn results_survive_a_failing_detail_call() {
+        let h = harness_with_ytdlp(all_secrets());
+        h.cmds.on("ytsearch10:", r#"{"id":"a1","title":"Song","channel":"Artist","duration":200.0}"#);
+        *h.cmds.missing.lock().unwrap() = Some("--skip-download".into());
+        let r = block_on(search(&h.svc, "song")).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].track.duration_ms, Some(200_000));
+    }
+
+    #[test]
+    fn a_missing_binary_is_reported_as_not_configured() {
+        let h = harness_with_ytdlp(all_secrets());
+        *h.cmds.missing.lock().unwrap() = Some("ytsearch".into());
+        assert_eq!(block_on(search(&h.svc, "x")).unwrap_err(), ProviderError::NotConfigured);
     }
 }

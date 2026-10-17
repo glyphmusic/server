@@ -69,6 +69,28 @@ pub async fn run(s: &Settings) -> bool {
         }
     }
 
+    println!("\nyt-dlp (YouTube search and audio)");
+    match crate::platform::resolve_ytdlp(s.ytdlp_path.as_deref()) {
+        Some(bin) => match crate::platform::ytdlp_version(&bin) {
+            Some(v) => r.ok(format!("{bin} {v} ({})", if s.proxy_audio { "search + audio" } else { "search only" })),
+            None => r.warn(format!("found {bin} but it did not answer --version"), "reinstall yt-dlp (https://github.com/yt-dlp/yt-dlp)"),
+        },
+        None => r.warn(
+            match &s.ytdlp_path {
+                Some(p) => format!("{p} does not work, so YouTube search is off"),
+                None => "not installed, so YouTube search is off".to_string(),
+            },
+            "install yt-dlp (https://github.com/yt-dlp/yt-dlp) or set ytdlp_path in server.toml",
+        ),
+    }
+
+    println!("\nAudio");
+    if s.proxy_audio {
+        r.ok("audio is streamed through this server (/v1/audio/...)");
+    } else {
+        r.warn("proxy_audio is off: clients fetch provider URLs directly", "set proxy_audio = true in server.toml (needed for YouTube, yt-dlp runs here)");
+    }
+
     println!("\nAdmin API (remote management)");
     match &s.admin_password_hash {
         None => r.warn("off (no admin password)", "run `glyph-server setup` to set one, then use `glyph-server remote`"),

@@ -26,6 +26,10 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.10"
 
+# RSA key generation in the passkey tests is very slow unoptimized.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
 [profile.release]
 opt-level = "s"
 lto = true

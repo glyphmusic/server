@@ -4,11 +4,13 @@ bind = "0.0.0.0:8787"
 cache_entries = 10000
 trust_proxy = false              # true behind a reverse proxy (reads X-Forwarded-For)
 rate_limit_per_min = 60
-youtube_daily_budget_units = 9000
+youtube_daily_budget_units = 9000   # playlist import only; search uses yt-dlp
+# ytdlp_path = "/usr/bin/yt-dlp"    # YouTube search + audio; found in PATH when unset
+proxy_audio = true                   # clients get /v1/audio/... instead of provider URLs
 update_repo = "glyphmusic/glyph-server"
 
 [keys]
-# youtube_api_key = ""
+# youtube_api_key = ""              # only needed to import YouTube playlists
 # jamendo_client_id = ""
 # soundcloud_client_id = ""
 # soundcloud_client_secret = ""

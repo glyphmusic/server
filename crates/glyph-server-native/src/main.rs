@@ -29,7 +29,9 @@ Manage a running server (here or anywhere):
   glyph-server remote login https://glyph.example.com
   glyph-server remote status
   glyph-server remote keys set youtube_api_key
-  glyph-server remote logs --follow";
+  glyph-server remote logs --follow
+  glyph-server remote accounts default-limit 5
+  glyph-server remote accounts limit somehandle 10";
 
 #[derive(Parser)]
 #[command(name = "glyph-server", version, about = "Metadata server of the Glyph music app", after_help = EXAMPLES)]

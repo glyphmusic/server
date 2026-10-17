@@ -27,6 +27,12 @@ pub struct FileConfig {
     pub rate_limit_per_min: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub youtube_daily_budget_units: Option<u64>,
+    /// yt-dlp executable for YouTube search (default: found in `PATH`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ytdlp_path: Option<String>,
+    /// Serve audio through `/v1/audio/...` instead of handing out provider URLs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_audio: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_max_pages: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +145,10 @@ pub struct Settings {
     pub trust_proxy: bool,
     pub rate_limit_per_min: u32,
     pub youtube_daily_budget_units: u64,
+    /// Configured yt-dlp path, if any (the working one is resolved at startup).
+    pub ytdlp_path: Option<String>,
+    /// Whether `/v1/resolve` hands out `/v1/audio/...` URLs (default true).
+    pub proxy_audio: bool,
     pub import_max_pages: u32,
     pub update_repo: String,
     pub admin_password_hash: Option<String>,
@@ -282,6 +292,8 @@ impl Settings {
             trust_proxy: env("GLYPH_TRUST_PROXY").map(|v| v == "1" || v == "true").or(file.trust_proxy).unwrap_or(false),
             rate_limit_per_min: env("GLYPH_RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()).or(file.rate_limit_per_min).unwrap_or(60),
             youtube_daily_budget_units: env("YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()).or(file.youtube_daily_budget_units).unwrap_or(9000),
+            ytdlp_path: env("YTDLP_PATH").or(file.ytdlp_path),
+            proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/glyph-server".into()),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),

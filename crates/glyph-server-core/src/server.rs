@@ -21,6 +21,11 @@ use std::sync::{Arc, RwLock};
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Largest request body accepted for `path` (sync pushes and cover uploads are bigger).
+pub fn max_body_bytes(path: &str) -> usize {
+    crate::accounts::max_body_bytes(path).unwrap_or(MAX_BODY_BYTES)
+}
+
 #[derive(Debug, Clone)]
 pub struct Request {
     pub method: Method,
@@ -121,6 +126,9 @@ enum Route {
     Lyrics,
     Similar,
     Import,
+    Cover,
+    Download,
+    YouTubeHint,
 }
 
 fn route(path: &str) -> Option<(Route, Method)> {
@@ -131,6 +139,9 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/lyrics" => (Route::Lyrics, Method::Get),
         "/v1/similar" => (Route::Similar, Method::Get),
         "/v1/import/spotify" => (Route::Import, Method::Post),
+        "/v1/cover" => (Route::Cover, Method::Post),
+        "/v1/download" => (Route::Download, Method::Post),
+        "/v1/youtube/hint" => (Route::YouTubeHint, Method::Post),
         _ => return None,
     })
 }
@@ -140,6 +151,8 @@ pub struct Server {
     /// Current services; replaced (not mutated) when admin changes the config.
     svc: Arc<RwLock<Arc<Services>>>,
     pub(crate) host: Arc<dyn AdminHost>,
+    /// Accounts and sync; `None` = those routes are 404.
+    pub(crate) accounts: Option<Arc<crate::accounts::Accounts>>,
 }
 
 impl Server {
@@ -148,11 +161,16 @@ impl Server {
     }
 
     pub fn from_arc(svc: Arc<Services>) -> Self {
-        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost) }
+        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost), accounts: None }
     }
 
     pub fn with_host(mut self, host: Arc<dyn AdminHost>) -> Self {
         self.host = host;
+        self
+    }
+
+    pub fn with_accounts(mut self, accounts: crate::accounts::Accounts) -> Self {
+        self.accounts = Some(Arc::new(accounts));
         self
     }
 
@@ -172,6 +190,7 @@ impl Server {
             cache: old.cache.clone(),
             limiter: old.limiter.clone(),
             rt: old.rt.clone(),
+            cmds: old.cmds.clone(),
             config,
         });
     }
@@ -180,6 +199,9 @@ impl Server {
         let svc = self.services();
         if req.path.starts_with("/admin/v1") {
             return self.handle_admin(&svc, req).await;
+        }
+        if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
+            return acc.handle(&svc, req).await;
         }
         let Some((route, method)) = route(&req.path) else {
             return Response::error(ApiErr::not_found("unknown endpoint"));
@@ -197,7 +219,8 @@ impl Server {
                 return Response::error(e);
             }
         }
-        match dispatch(&svc, route, req).await {
+        let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.blobs.is_some()));
+        match dispatch(&svc, route, req, features).await {
             Ok(r) => r,
             Err(e) => Response::error(e),
         }
@@ -205,7 +228,7 @@ impl Server {
 }
 
 /// Per install id (`limit`/min) and per IP (4x, since NATs share one).
-pub(crate) async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(), ApiErr> {
+pub async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(), ApiErr> {
     {
         let limit = svc.config.rate_limit_per_min.max(1);
         let mut checks: Vec<(String, u32)> = Vec::new();
@@ -227,7 +250,7 @@ pub(crate) async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(),
     }
 }
 
-async fn dispatch(svc: &Arc<Services>, route: Route, req: Request) -> Result<Response, ApiErr> {
+async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
     {
         match route {
             Route::Health => Ok(Response::json(
@@ -236,6 +259,8 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request) -> Result<Res
                     server_version: svc.config.server_version.clone(),
                     protocol_version: PROTOCOL_VERSION,
                     providers: svc.config.enabled_providers(),
+                    accounts,
+                    covers,
                 },
             )),
             Route::Search => {
@@ -252,7 +277,55 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request) -> Result<Res
                 if r.track.title.trim().is_empty() || r.track.artist.trim().is_empty() {
                     return Err(ApiErr::bad_request("track.title and track.artist are required"));
                 }
-                Ok(Response::json(200, &resolver::resolve(svc, r).await))
+                let wanted = r.track.clone();
+                let mut resolved = resolver::resolve(svc, r).await;
+                if svc.config.proxy_audio { crate::media::proxy_playback(&mut resolved); }
+                // Not part of the cached answer: hints change independently.
+                resolved.youtube_hint = crate::hints::lookup(svc, &wanted).await;
+                Ok(Response::json(200, &resolved))
+            }
+            Route::YouTubeHint => {
+                let r: glyph_protocol::YouTubeHintRequest = parse_body(&req)?;
+                let voter = req
+                    .header(INSTALL_ID_HEADER)
+                    .filter(|id| !id.is_empty() && id.len() <= 64)
+                    .map(|id| format!("id:{id}"))
+                    .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
+                    .ok_or_else(|| ApiErr::bad_request("missing install id"))?;
+                Ok(Response::json(200, &crate::hints::report(svc, &voter, r).await?))
+            }
+            Route::Cover => {
+                let track: glyph_protocol::Track = parse_body(&req)?;
+                let mut cover = track.cover_url.filter(|u| !u.is_empty());
+                if cover.is_none() {
+                    if let Some(isrc) = track.isrc.as_deref() {
+                        cover = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc)).await
+                            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url);
+                    }
+                    if cover.is_none() {
+                        let query = format!("{} {}", track.artist, track.title);
+                        cover = crate::search::search_provider(svc, ProviderId::Deezer, &query).await.ok()
+                            .and_then(|hits| hits.into_iter().find(|c| crate::merge::artists_match(&track.artist, &c.track.artist) && crate::merge::normalize_title(&track.title) == crate::merge::normalize_title(&c.track.title)))
+                            .and_then(|c| c.track.cover_url);
+                    }
+                }
+                Ok(Response::json(200, &serde_json::json!({ "url": cover })))
+            }
+            Route::Download => {
+                let track: glyph_protocol::Track = parse_body(&req)?;
+                let resolved = resolver::resolve(svc, ResolveRequest { track: track.clone(), priority: vec![] }).await;
+                for provider in [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive] {
+                    for t in std::iter::once(&track).chain(resolved.matched.iter()) {
+                        let id = if t.source == provider { Some(&t.id) } else { t.external_ids.get(&provider) };
+                        if let Some(id) = id {
+                            if let Some(Ok(Some(url))) = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, crate::media::download_url(svc, provider, id)).await {
+                                let url = if svc.config.proxy_audio { crate::media::audio_path(provider, id).replace("/v1/audio/", "/v1/download/") } else { url };
+                                return Ok(Response::json(200, &serde_json::json!({"provider":provider,"url":url})));
+                            }
+                        }
+                    }
+                }
+                Ok(Response::json(200, &serde_json::Value::Null))
             }
             Route::Lyrics => lyrics(svc, &req).await,
             Route::Similar => {
@@ -353,10 +426,16 @@ mod tests {
         assert!(hr.providers.contains(&ProviderId::Audius));
         assert!(!hr.providers.contains(&ProviderId::YouTube));
 
+        // A key alone is not enough any more: YouTube search runs through yt-dlp.
         let h = harness(all_secrets());
         let r = block_on(server(&h).handle(get("/v1/health/")));
         let hr: HealthResponse = serde_json::from_slice(r.bytes().unwrap()).unwrap();
-        assert!(hr.providers.contains(&ProviderId::YouTube) && hr.providers.contains(&ProviderId::LastFm));
+        assert!(!hr.providers.contains(&ProviderId::YouTube) && hr.providers.contains(&ProviderId::LastFm));
+
+        let h = harness_with_ytdlp(all_secrets());
+        let r = block_on(server(&h).handle(get("/v1/health")));
+        let hr: HealthResponse = serde_json::from_slice(r.bytes().unwrap()).unwrap();
+        assert!(hr.providers.contains(&ProviderId::YouTube));
         let dump = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert!(!dump.contains("YT_SECRET_KEY"));
     }

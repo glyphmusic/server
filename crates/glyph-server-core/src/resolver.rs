@@ -10,7 +10,7 @@ use crate::cache::{self, DAY, HOUR};
 use crate::merge::{self, artists_match, durations_match, merge_into, normalize_title, plain_words, word_similarity};
 use crate::providers::{self, deezer, Candidate};
 use crate::search::{is_skipped, search_provider};
-use crate::traits::Services;
+use crate::traits::{with_timeout, Services};
 use glyph_protocol::{PlaybackSource, ProviderId, ResolveRequest, ResolveResponse, Track};
 
 pub const DEFAULT_PRIORITY: [ProviderId; 4] =
@@ -130,8 +130,22 @@ async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Tr
 }
 
 async fn try_preview(svc: &Services, want: &Track) -> Option<(Track, PlaybackSource, f32)> {
-    if is_skipped(svc, ProviderId::Deezer).await {
+    if !svc.config.provider_enabled(ProviderId::Deezer) || is_skipped(svc, ProviderId::Deezer).await {
         return None;
+    }
+    let known = if want.source == ProviderId::Deezer {
+        Some(&want.id)
+    } else {
+        want.external_ids.get(&ProviderId::Deezer)
+    };
+    if let Some(id) = known {
+        if let Ok(c) = deezer::by_id(svc, id).await {
+            if let Some(pb) = c.playback {
+                let mut m = c.track;
+                merge_into(&mut m, want);
+                return Some((m, pb, 1.0));
+            }
+        }
     }
     if let Some(isrc) = want.isrc.as_deref() {
         if let Ok(Some(c)) = deezer::by_isrc(svc, isrc).await {
@@ -148,7 +162,8 @@ async fn try_preview(svc: &Services, want: &Track) -> Option<(Track, PlaybackSou
     let (cand, s) = best(want, &with_preview)?;
     let mut m = cand.track.clone();
     merge_into(&mut m, want);
-    Some((m, cand.playback.clone()?, s))
+    let fresh = deezer::by_id(svc, &cand.track.id).await.ok()?;
+    Some((m, fresh.playback?, s))
 }
 
 pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
@@ -156,7 +171,20 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let prio = effective_priority(&req.priority);
     let key = cache_key(want, &prio);
     if let Some(hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
-        return hit;
+        if matches!(hit.source, Some(PlaybackSource::Preview { provider: ProviderId::Deezer, .. })) {
+            // Even old persistent cache entries may contain expired signatures.
+            if let Some(matched) = hit.matched.as_ref() {
+                if let Some(Ok(c)) = with_timeout(
+                    &*svc.rt, svc.config.provider_timeout_ms, deezer::by_id(svc, &matched.id),
+                ).await {
+                    if let Some(source) = c.playback {
+                        return ResolveResponse { source: Some(source), ..hit };
+                    }
+                }
+            }
+        } else {
+            return hit;
+        }
     }
 
     let mut found = None;
@@ -167,11 +195,11 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         }
     }
     if found.is_none() {
-        found = try_preview(svc, want).await;
+        found = with_timeout(&*svc.rt, svc.config.provider_timeout_ms, try_preview(svc, want)).await.flatten();
     }
     let (resp, ttl) = match found {
-        Some((m, pb, c)) => (ResolveResponse { matched: Some(m), source: Some(pb), confidence: c }, 30 * DAY),
-        None => (ResolveResponse { matched: None, source: None, confidence: 0.0 }, HOUR),
+        Some((m, pb, c)) => (ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None }, 30 * DAY),
+        None => (ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None }, HOUR),
     };
     cache::put_json(&*svc.cache, &key, &resp, ttl).await;
     resp
@@ -219,7 +247,7 @@ mod tests {
     }
 
     fn setup() -> Harness {
-        let h = harness(all_secrets());
+        let h = harness_with_ytdlp(all_secrets());
         h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
         h
     }
@@ -232,7 +260,7 @@ mod tests {
             200,
             r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#,
         );
-        h.http.on("youtube/v3", 200, r#"{"items":[]}"#);
+        h.cmds.on("ytsearch", "{}");
         let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
         let m = r.matched.unwrap();
         assert_eq!((m.source, m.id.as_str()), (Audius, "au1"));
@@ -240,7 +268,7 @@ mod tests {
         assert_eq!(m.isrc.as_deref(), Some("GBDUW1300001"));
         assert!(matches!(r.source, Some(PlaybackSource::Stream { provider: Audius, .. })));
         assert!(r.confidence > 0.9);
-        assert_eq!(h.http.call_count("youtube"), 0);
+        assert_eq!(h.cmds.call_count("ytsearch"), 0);
     }
 
     #[test]
@@ -250,36 +278,30 @@ mod tests {
         h.http.on("jamendo.com", 200, r#"{"results":[]}"#);
         h.http.on("api.soundcloud.com/tracks", 200, "[]");
         h.http.on("oauth/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
-        h.http.on(
-            "youtube/v3/search",
-            200,
-            r#"{"items":[
-              {"id":{"videoId":"live"},"snippet":{"title":"Daft Punk - Get Lucky (Live)","channelTitle":"Daft Punk"}},
-              {"id":{"videoId":"topic"},"snippet":{"title":"Get Lucky","channelTitle":"Daft Punk - Topic"}}]}"#,
-        );
-        h.http.on(
-            "youtube/v3/videos",
-            200,
-            r#"{"items":[{"id":"live","contentDetails":{"duration":"PT9M"},"status":{"embeddable":true}},
-                         {"id":"topic","contentDetails":{"duration":"PT6M10S"},"status":{"embeddable":true}}]}"#,
+        h.cmds.on(
+            "ytsearch",
+            concat!(
+                r#"{"id":"live","title":"Daft Punk - Get Lucky (Live at Home)","channel":"Daft Punk","duration":9.0}"#,
+                "\n",
+                r#"{"id":"topic","title":"Get Lucky","channel":"Daft Punk - Topic","duration":370.0}"#,
+            ),
         );
         let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
         match r.source {
             Some(PlaybackSource::Embed { provider: YouTube, ref embed_id }) => assert_eq!(embed_id, "topic"),
             ref o => panic!("{o:?}"),
         }
-        let calls = h.http.calls.lock().unwrap().len();
+        let calls = h.cmds.call_count("ytsearch");
         let r2 = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
         assert_eq!(r2, r);
-        assert_eq!(h.http.calls.lock().unwrap().len(), calls, "second resolve must hit the cache");
+        assert_eq!(h.cmds.call_count("ytsearch"), calls, "second resolve must hit the cache");
     }
 
     #[test]
     fn respects_custom_priority() {
         let h = setup();
         h.http.on("audius.co/v1/tracks/search", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
-        h.http.on("youtube/v3/search", 200, r#"{"items":[{"id":{"videoId":"yt1"},"snippet":{"title":"Get Lucky","channelTitle":"Daft Punk"}}]}"#);
-        h.http.on("youtube/v3/videos", 200, r#"{"items":[{"id":"yt1","contentDetails":{"duration":"PT6M9S"},"status":{"embeddable":true}}]}"#);
+        h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk","duration":369.0}"#);
         let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube, Audius] }));
         assert_eq!(r.matched.unwrap().source, YouTube);
     }
@@ -296,12 +318,49 @@ mod tests {
     }
 
     #[test]
+    fn cached_preview_refreshes_signature() {
+        let h = setup();
+        let mut track = want();
+        track.source = Deezer;
+        track.id = "1".into();
+        let stale = ResolveResponse {
+            matched: Some(track.clone()),
+            source: Some(PlaybackSource::Preview { provider: Deezer, url: "https://cdn/expired.mp3".into() }),
+            confidence: 1.0,
+            youtube_hint: None,
+        };
+        block_on(cache::put_json(&*h.svc.cache, &cache_key(&track, &DEFAULT_PRIORITY), &stale, 30 * DAY));
+        h.http.on("api.deezer.com/track/1", 200,
+            r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/fresh.mp3"}"#);
+        let first = block_on(resolve(&h.svc, ResolveRequest { track: track.clone(), priority: vec![] }));
+        assert!(matches!(first.source, Some(PlaybackSource::Preview { url, .. }) if url == "https://cdn/fresh.mp3"));
+        h.http.rules.lock().unwrap().iter_mut().find(|r| r.0 == "api.deezer.com/track/1").unwrap().2 =
+            r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/newer.mp3"}"#.into();
+        let second = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![] }));
+        assert!(matches!(second.source, Some(PlaybackSource::Preview { url, .. }) if url == "https://cdn/newer.mp3"));
+        assert_eq!(h.http.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn preview_search_refreshes_search_url() {
+        let h = setup();
+        h.http.on("api.deezer.com/search", 200,
+            r#"{"data":[{"id":1,"title":"Get Lucky","duration":369,"preview":"https://cdn/stale.mp3","artist":{"name":"Daft Punk"}}]}"#);
+        h.http.on("api.deezer.com/track/1", 200,
+            r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/fresh.mp3"}"#);
+        let mut track = want();
+        track.isrc = None;
+        let result = block_on(try_preview(&h.svc, &track)).unwrap();
+        assert!(matches!(result.1, PlaybackSource::Preview { url, .. } if url == "https://cdn/fresh.mp3"));
+    }
+
+    #[test]
     fn preview_fallback_then_nothing() {
         let h = setup();
         h.http.on("audius.co", 200, r#"{"data":[]}"#);
         h.http.on("jamendo.com", 200, r#"{"results":[]}"#);
         h.http.on("api.soundcloud.com/tracks", 200, "[]");
-        h.http.on("youtube/v3/search", 200, r#"{"items":[]}"#);
+        h.cmds.on("ytsearch", "{}");
         h.http.on("track/isrc:GBDUW1300001", 200,
             r#"{"id":1,"title":"Get Lucky","duration":369,"preview":"https://cdn/prev.mp3","artist":{"name":"Daft Punk"}}"#);
         let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));

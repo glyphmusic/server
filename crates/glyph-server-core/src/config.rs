@@ -114,13 +114,19 @@ impl Secrets {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The host implements the streaming /v1/audio endpoint.
+    pub proxy_audio: bool,
     pub secrets: Secrets,
     pub server_version: String,
     /// Requests per minute per install id (per IP the limit is 4x, for NAT).
     pub rate_limit_per_min: u32,
     pub provider_timeout_ms: u64,
-    /// Stop calling YouTube once this many quota units were spent today.
+    /// Stop calling YouTube once this many quota units were spent today
+    /// (playlist import only; search goes through yt-dlp).
     pub youtube_daily_budget_units: u64,
+    /// yt-dlp executable used for YouTube search. `None` = yt-dlp is not
+    /// available on this platform (Cloudflare Workers), so search is off.
+    pub ytdlp_path: Option<String>,
     /// Max pages fetched per playlist import (Workers free plan: 50 subrequests).
     pub import_max_pages: u32,
     pub audius_app_name: String,
@@ -131,11 +137,13 @@ pub struct Config {
 impl Config {
     pub fn new(secrets: Secrets) -> Self {
         Self {
+            proxy_audio: false,
             secrets: secrets.normalized(),
             server_version: crate::SERVER_VERSION.to_string(),
             rate_limit_per_min: 60,
             provider_timeout_ms: 4000,
             youtube_daily_budget_units: 9000,
+            ytdlp_path: None,
             import_max_pages: 5,
             audius_app_name: "glyph".to_string(),
             admin_password_hash: None,
@@ -150,7 +158,8 @@ impl Config {
             ProviderId::SoundCloud => {
                 s.soundcloud_client_id.is_some() && s.soundcloud_client_secret.is_some()
             }
-            ProviderId::YouTube => s.youtube_api_key.is_some(),
+            // Search needs yt-dlp; the API key alone only enables playlist import.
+            ProviderId::YouTube => self.ytdlp_path.is_some(),
             ProviderId::Spotify => s.spotify_client_id.is_some() && s.spotify_client_secret.is_some(),
             ProviderId::LastFm => s.lastfm_api_key.is_some(),
             // MusicBrainz is not served by this server.
