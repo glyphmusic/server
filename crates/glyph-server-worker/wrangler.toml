@@ -10,7 +10,7 @@ command = "cargo install -q worker-build && worker-build --release"
 # and paste the printed id below.
 [[kv_namespaces]]
 binding = "GLYPH_KV"
-id = "b49fe2283b104661a43407dd1bf96816"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 [vars]
 RATE_LIMIT_PER_MIN = "60"
