@@ -594,3 +594,38 @@ fn operator_sets_default_and_per_account_device_limits() {
     assert_eq!((a.device_limit, a.device_limit_set), (2, None));
     assert!(block_on(acc.admin_set_limit("nobody", Some(3))).is_err());
 }
+
+#[test]
+fn share_links_need_an_account_and_die_with_it() {
+    let t = setup();
+    let code = "glyph:playlist:q1YqU7Iy1FHKU7JSCshJrMzJLC5RMFTSUSpRsoquBpFKESHOQH4i";
+    let body = serde_json::json!({"code": code, "name": "Road <trip>", "songs": 2});
+    let (s, _) = call(&t, Method::Post, "/v1/share", body.clone(), None);
+    assert_eq!(s, 401);
+    let (s1, _, _) = sign_up(&t, "gisela");
+    let (s, v) = call(&t, Method::Post, "/v1/share", body.clone(), Some(&s1.access_token));
+    assert_eq!(s, 200, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    assert_eq!(v["url"], format!("{ORIGIN}/p/{id}"));
+    // Sharing the same playlist again keeps the link.
+    assert_eq!(call(&t, Method::Post, "/v1/share", body, Some(&s1.access_token)).1["id"], id.as_str());
+
+    let (s, v) = call(&t, Method::Get, &format!("/v1/share/{id}"), serde_json::Value::Null, None);
+    assert_eq!((s, v["code"].as_str(), v["author"].as_str()), (200, Some(code), Some("gisela")));
+    let page = block_on(t.s.handle(Request::new(Method::Get, &format!("/p/{id}"), vec![], vec![], None)));
+    assert_eq!(page.status, 200);
+    assert!(String::from_utf8_lossy(page.bytes().unwrap()).contains("@gisela"));
+
+    // Albums carry no author.
+    let (_, v) = call(&t, Method::Post, "/v1/share", serde_json::json!({"code": "glyph:playlist:abc", "kind": "album"}), Some(&s1.access_token));
+    let album = v["id"].as_str().unwrap().to_string();
+    assert!(call(&t, Method::Get, &format!("/v1/share/{album}"), serde_json::Value::Null, None).1["author"].is_null());
+
+    let (s, _) = call(&t, Method::Delete, "/v1/account", serde_json::json!({"confirm_handle": "gisela"}), Some(&s1.access_token));
+    assert_eq!(s, 200);
+    for gone in [&id, &album] {
+        assert_eq!(call(&t, Method::Get, &format!("/v1/share/{gone}"), serde_json::Value::Null, None).0, 404);
+    }
+    let page = block_on(t.s.handle(Request::new(Method::Get, &format!("/p/{id}"), vec![], vec![], None)));
+    assert_eq!(page.status, 404);
+}
