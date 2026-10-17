@@ -27,7 +27,7 @@ jobs:
           path: glyph-server
       - uses: actions/checkout@v4
         with:
-          repository: glyphmusic/glyph
+          repository: glyphmusic/desktop
           path: glyph
       - uses: dtolnay/rust-toolchain@stable
         with:
