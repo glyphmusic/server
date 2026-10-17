@@ -30,4 +30,5 @@ sha2 = "0.10"
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = true
+# Symbols must stay: wasm-bindgen (Worker build) needs the externref table exports.
+strip = "debuginfo"

@@ -8,6 +8,7 @@
 //! Rules enforced here: only metadata, IDs and official stream URLs leave the
 //! server, never audio; provider keys never appear in responses or errors.
 
+pub mod admin;
 pub mod cache;
 pub mod config;
 pub mod error;

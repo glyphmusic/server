@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 glyph-server-core.workspace = true
+glyph-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
@@ -20,7 +21,7 @@ async-trait.workspace = true
 sha2.workspace = true
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
 lru = "0.12"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
@@ -31,6 +32,24 @@ flate2 = "1"
 self-replace = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
+dirs = "6"
+getrandom = "0.3"
+rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
+tokio-util = "0.7"
+axum-server = "0.8"
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"

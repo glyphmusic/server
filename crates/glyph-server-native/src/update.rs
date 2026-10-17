@@ -2,6 +2,7 @@
 //! Asset: `glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz`, plus a
 //! `.sha256` file. The archive must contain the `glyph-server[.exe]` binary.
 
+use glyph_server_core::admin::types::{UpdateApplyResponse, UpdateInfo};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -59,18 +60,32 @@ async fn latest(repo: &str) -> Result<Release, String> {
     serde_json::from_slice(&b).map_err(|e| e.to_string())
 }
 
-/// Prints whether a newer release exists. Returns the newer version, if any.
-pub async fn check(repo: &str) -> Result<Option<Version>, String> {
+/// Compare the running version with the latest GitHub release.
+pub async fn check_info(repo: &str) -> Result<UpdateInfo, String> {
     let rel = latest(repo).await?;
     let remote = parse_version(&rel.tag_name).ok_or_else(|| format!("unparsable tag `{}`", rel.tag_name))?;
     let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-    if remote > current {
-        println!("update available: {current} -> {remote} ({repo})\nrun `glyph-server self-update` to install it");
-        Ok(Some(remote))
-    } else {
-        println!("glyph-server {current} is up to date");
-        Ok(None)
+    let available = remote > current;
+    Ok(UpdateInfo {
+        current: current.to_string(),
+        latest: Some(remote.to_string()),
+        update_available: available,
+        message: if available {
+            format!("update available: {current} -> {remote} ({repo})")
+        } else {
+            format!("glyph-server {current} is up to date")
+        },
+    })
+}
+
+/// CLI: print whether a newer release exists.
+pub async fn check(repo: &str) -> Result<Option<Version>, String> {
+    let info = check_info(repo).await?;
+    println!("{}", info.message);
+    if info.update_available {
+        println!("run `glyph-server self-update` to install it");
     }
+    Ok(info.latest.filter(|_| info.update_available).and_then(|v| Version::parse(&v).ok()))
 }
 
 async fn download(url: &str) -> Result<Vec<u8>, String> {
@@ -106,24 +121,26 @@ pub fn extract_binary(archive: &[u8], is_zip: bool) -> Result<Vec<u8>, String> {
     Err(format!("`{BIN}` not found in the archive"))
 }
 
-pub async fn self_update(repo: &str) -> Result<(), String> {
+/// Download, verify (SHA-256) and install the latest release over the running binary.
+pub async fn apply(repo: &str) -> Result<UpdateApplyResponse, String> {
     let rel = latest(repo).await?;
     let remote = parse_version(&rel.tag_name).ok_or_else(|| format!("unparsable tag `{}`", rel.tag_name))?;
     let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     if remote <= current {
-        println!("glyph-server {current} is already the latest version");
-        return Ok(());
+        return Ok(UpdateApplyResponse {
+            message: format!("glyph-server {current} is already the latest version"),
+            restart_required: false,
+        });
     }
     let name = archive_name(&remote, TARGET);
     let find = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
     let url = find(&name).ok_or_else(|| format!("release {remote} has no asset `{name}` for this platform"))?;
-    let sum_url = find(&format!("{name}.sha256")).ok_or_else(|| format!("release {remote} has no `{name}.sha256`; refusing to install unverified code"))?;
+    let sum_url = find(&format!("{name}.sha256"))
+        .ok_or_else(|| format!("release {remote} has no `{name}.sha256`; refusing to install unverified code"))?;
 
-    println!("downloading {name} ...");
     let archive = download(&url).await?;
     let expected = parse_sha256(&String::from_utf8_lossy(&download(&sum_url).await?)).ok_or("malformed .sha256 file")?;
-    let actual = sha256_hex(&archive);
-    if actual != expected {
+    if sha256_hex(&archive) != expected {
         return Err("SHA-256 mismatch; aborting update".into());
     }
     let bin = extract_binary(&archive, name.ends_with(".zip"))?;
@@ -140,7 +157,14 @@ pub async fn self_update(repo: &str) -> Result<(), String> {
     let res = self_replace::self_replace(&staged).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&staged);
     res?;
-    println!("updated {current} -> {remote}; restart the server to use the new version");
+    Ok(UpdateApplyResponse {
+        message: format!("updated {current} -> {remote}; restart the server (or the service) to use the new version"),
+        restart_required: true,
+    })
+}
+
+pub async fn self_update(repo: &str) -> Result<(), String> {
+    println!("{}", apply(repo).await?.message);
     Ok(())
 }
 

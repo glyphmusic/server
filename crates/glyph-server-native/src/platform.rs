@@ -1,11 +1,13 @@
 //! Native implementations of the core traits.
 
 use async_trait::async_trait;
+use glyph_server_core::traits::CacheStats;
 use glyph_server_core::{Cache, HttpClient, HttpError, HttpRequest, HttpResponse, Method, Runtime};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +65,14 @@ pub struct LruDiskCache {
     mem: Mutex<LruCache<String, (u64, Vec<u8>)>>,
     dir: Option<PathBuf>,
     rt: TokioRuntime,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+/// Admin bookkeeping (lockouts, revoked sessions) and rate-limit counters stay
+/// in memory only and survive `cache clear`.
+fn is_volatile_key(key: &str) -> bool {
+    key.starts_with("admin:") || key.starts_with("rl:")
 }
 
 impl LruDiskCache {
@@ -74,6 +84,8 @@ impl LruDiskCache {
             mem: Mutex::new(LruCache::new(NonZeroUsize::new(entries.max(16)).unwrap())),
             dir,
             rt: TokioRuntime,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -85,9 +97,8 @@ impl LruDiskCache {
     }
 }
 
-#[async_trait]
-impl Cache for LruDiskCache {
-    async fn get(&self, key: &str) -> Option<Vec<u8>> {
+impl LruDiskCache {
+    async fn lookup(&self, key: &str) -> Option<Vec<u8>> {
         let now = self.rt.now_ms();
         {
             let mut m = self.mem.lock().unwrap();
@@ -112,18 +123,71 @@ impl Cache for LruDiskCache {
         self.mem.lock().unwrap().put(key.to_string(), (exp, v.clone()));
         Some(v)
     }
+}
+
+#[async_trait]
+impl Cache for LruDiskCache {
+    async fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let r = self.lookup(key).await;
+        if !is_volatile_key(key) {
+            let c = if r.is_some() { &self.hits } else { &self.misses };
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+        r
+    }
+
+    async fn stats(&self) -> Option<CacheStats> {
+        let disk_entries = self.dir.as_ref().map(|d| std::fs::read_dir(d).map(|r| r.count() as u64).unwrap_or(0));
+        Some(CacheStats {
+            entries: self.mem.lock().unwrap().len() as u64,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            disk_entries,
+        })
+    }
+
+    async fn clear(&self) -> bool {
+        self.mem.lock().unwrap().clear_except_volatile();
+        if let Some(d) = &self.dir {
+            if let Ok(rd) = std::fs::read_dir(d) {
+                for e in rd.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        true
+    }
 
     async fn put(&self, key: &str, value: Vec<u8>, ttl_s: u64) {
         let exp = self.rt.now_ms() + ttl_s * 1000;
         if let Some(p) = self.path(key) {
             // Only persist entries worth keeping across restarts.
-            if ttl_s >= 3600 {
+            if ttl_s >= 3600 && !is_volatile_key(key) {
                 let mut raw = exp.to_be_bytes().to_vec();
                 raw.extend_from_slice(&value);
                 let _ = tokio::fs::write(&p, raw).await;
             }
         }
         self.mem.lock().unwrap().put(key.to_string(), (exp, value));
+    }
+}
+
+
+trait ClearExt {
+    fn clear_except_volatile(&mut self);
+}
+
+impl ClearExt for LruCache<String, (u64, Vec<u8>)> {
+    fn clear_except_volatile(&mut self) {
+        let keep: Vec<(String, (u64, Vec<u8>))> = self
+            .iter()
+            .filter(|(k, _)| is_volatile_key(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.clear();
+        for (k, v) in keep {
+            self.put(k, v);
+        }
     }
 }
 

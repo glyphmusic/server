@@ -46,6 +46,7 @@ pub(crate) fn boxed_stream<T>(s: impl futures::Stream<Item = T> + 'static) -> Bo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
+    Put,
     Get,
     Post,
     Options,
@@ -114,6 +115,22 @@ pub trait HttpClient: MaybeSendSync {
 pub trait Cache: MaybeSendSync {
     async fn get(&self, key: &str) -> Option<Vec<u8>>;
     async fn put(&self, key: &str, value: Vec<u8>, ttl_s: u64);
+    /// Optional statistics (native only).
+    async fn stats(&self) -> Option<CacheStats> {
+        None
+    }
+    /// Drop cached data (admin keys such as lockouts survive). False = unsupported.
+    async fn clear(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CacheStats {
+    pub entries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub disk_entries: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

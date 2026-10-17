@@ -1,0 +1,472 @@
+//! `glyph-server remote …`: manage a running server (on this machine or
+//! anywhere) through its admin API with the admin password.
+//!
+//! `remote login` exchanges the password for a token pair; only the refresh
+//! token is kept, in the OS keychain (Windows Credential Manager, macOS
+//! Keychain, Secret Service on Linux). Where no keychain exists it falls back
+//! to a file readable only by the current user. The password itself is never
+//! stored. Each command gets a fresh 15-minute access token.
+
+use clap::{Args, Subcommand};
+use glyph_server_core::admin::types::*;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::io::IsTerminal;
+use std::path::PathBuf;
+
+const KEYRING_SERVICE: &str = "glyph-server-remote";
+
+#[derive(Debug, Args)]
+pub struct RemoteArgs {
+    /// Server to talk to (default: the one from the last `remote login`)
+    #[arg(long, global = true)]
+    pub server: Option<String>,
+    #[command(subcommand)]
+    pub cmd: RemoteCmd,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteCmd {
+    /// Log in with the admin password (asked for, or --password-stdin)
+    Login {
+        /// Server URL, e.g. https://glyph.example.com or http://127.0.0.1:8787
+        url: String,
+        /// Read the password from standard input (scripts)
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Forget the stored login for this server
+    Logout,
+    /// Version, uptime, sources and limits
+    Status,
+    /// Show, set or test API keys
+    Keys {
+        #[command(subcommand)]
+        cmd: Option<KeysCmd>,
+    },
+    /// Cache statistics or clear the cache
+    Cache {
+        #[command(subcommand)]
+        cmd: Option<CacheCmd>,
+    },
+    /// Show or change rate limits
+    Limits {
+        /// Requests per minute per client
+        #[arg(long)]
+        rate: Option<u32>,
+        /// YouTube API units per day
+        #[arg(long)]
+        youtube_budget: Option<u64>,
+        /// Max pages per playlist import
+        #[arg(long)]
+        import_pages: Option<u32>,
+    },
+    /// Recent server log lines
+    Logs {
+        /// Number of lines
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: usize,
+        /// Keep printing new lines
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Check for or install a server update
+    Update {
+        /// Install it (the server restarts itself if it can)
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCmd {
+    /// List keys (masked)
+    List,
+    /// Set a key, e.g. `keys set youtube_api_key` (the value is asked for hidden)
+    Set {
+        name: String,
+        /// Value (avoid: it ends up in your shell history)
+        value: Option<String>,
+    },
+    /// Remove a key
+    Unset { name: String },
+    /// Test the stored keys of a source, e.g. `keys test youtube`
+    Test { provider: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCmd {
+    Stats,
+    Clear,
+}
+
+// ------------------------------------------------------------------ storage
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Profile {
+    /// Server of the last login.
+    default: Option<String>,
+    /// Refresh tokens that could not go into a keychain (url -> token).
+    #[serde(default)]
+    fallback_tokens: BTreeMap<String, String>,
+}
+
+fn profile_path() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("glyph-server").join("remote.toml")
+}
+
+fn load_profile() -> Profile {
+    std::fs::read_to_string(profile_path()).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_profile(p: &Profile) -> Result<(), String> {
+    let path = profile_path();
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let text = toml::to_string(p).map_err(|e| e.to_string())?;
+    crate::settings::write_private(&path, &text).map(|_| ())
+}
+
+fn store_token(url: &str, token: &str) -> Result<(), String> {
+    match keyring::Entry::new(KEYRING_SERVICE, url).and_then(|e| e.set_password(token)) {
+        Ok(()) => {
+            let mut p = load_profile();
+            p.fallback_tokens.remove(url);
+            p.default = Some(url.to_string());
+            save_profile(&p)
+        }
+        Err(e) => {
+            eprintln!("note: no system keychain available ({e}); keeping the login in {}", profile_path().display());
+            let mut p = load_profile();
+            p.fallback_tokens.insert(url.to_string(), token.to_string());
+            p.default = Some(url.to_string());
+            save_profile(&p)
+        }
+    }
+}
+
+fn read_token(url: &str) -> Option<String> {
+    keyring::Entry::new(KEYRING_SERVICE, url)
+        .and_then(|e| e.get_password())
+        .ok()
+        .or_else(|| load_profile().fallback_tokens.get(url).cloned())
+}
+
+fn forget_token(url: &str) {
+    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, url) {
+        let _ = e.delete_credential();
+    }
+    let mut p = load_profile();
+    p.fallback_tokens.remove(url);
+    if p.default.as_deref() == Some(url) {
+        p.default = None;
+    }
+    let _ = save_profile(&p);
+}
+
+/// `https://x/`, `x:8787` -> canonical base URL without trailing slash.
+pub fn normalize_url(u: &str) -> Result<String, String> {
+    let u = u.trim().trim_end_matches('/');
+    let with_scheme = if u.contains("://") { u.to_string() } else if is_local(u) { format!("http://{u}") } else { format!("https://{u}") };
+    let parsed = url::Url::parse(&with_scheme).map_err(|_| format!("`{u}` is not a valid server address"))?;
+    if parsed.scheme() == "http" && !is_local(parsed.host_str().unwrap_or("")) {
+        return Err("the admin API only works over HTTPS (plain http is allowed for localhost only)".into());
+    }
+    Ok(with_scheme)
+}
+
+fn is_local(host: &str) -> bool {
+    let h = host.split(':').next().unwrap_or(host);
+    matches!(h, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+// ------------------------------------------------------------------ http
+
+struct Client {
+    http: reqwest::Client,
+    base: String,
+    access: String,
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("glyph-server-remote/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("http client")
+}
+
+async fn error_of(r: reqwest::Response) -> String {
+    let status = r.status().as_u16();
+    let body = r.text().await.unwrap_or_default();
+    let msg = serde_json::from_str::<glyph_protocol::ApiError>(&body).map(|e| e.message).unwrap_or(body);
+    match status {
+        401 => format!("not logged in or the login expired ({msg}). Run `glyph-server remote login <url>`."),
+        404 => "this server has no admin API (set an admin password with `glyph-server setup`)".into(),
+        429 => format!("too many attempts: {msg}"),
+        _ => format!("HTTP {status}: {msg}"),
+    }
+}
+
+impl Client {
+    async fn connect(server: Option<String>) -> Result<Self, String> {
+        let base = match server {
+            Some(s) => normalize_url(&s)?,
+            None => load_profile().default.ok_or("no server yet. Run `glyph-server remote login <url>` first.")?,
+        };
+        let refresh = read_token(&base).ok_or_else(|| format!("not logged in to {base}. Run `glyph-server remote login {base}`."))?;
+        let http = client();
+        let r = http
+            .post(format!("{base}/admin/v1/refresh"))
+            .json(&RefreshRequest { refresh_token: refresh })
+            .send()
+            .await
+            .map_err(|e| format!("cannot reach {base}: {}", e.without_url()))?;
+        if !r.status().is_success() {
+            return Err(error_of(r).await);
+        }
+        let pair: TokenPair = r.json().await.map_err(|e| e.to_string())?;
+        // Rotated refresh token: keep the new one.
+        store_token(&base, &pair.refresh_token)?;
+        Ok(Self { http, base, access: pair.access_token })
+    }
+
+    async fn send<T: for<'de> Deserialize<'de>>(&self, req: reqwest::RequestBuilder) -> Result<T, String> {
+        let r = req.bearer_auth(&self.access).send().await.map_err(|e| format!("cannot reach {}: {}", self.base, e.without_url()))?;
+        if !r.status().is_success() {
+            return Err(error_of(r).await);
+        }
+        r.json().await.map_err(|e| e.to_string())
+    }
+
+    async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
+        self.send(self.http.get(format!("{}/admin/v1/{path}", self.base))).await
+    }
+
+    async fn post<B: Serialize, T: for<'de> Deserialize<'de>>(&self, path: &str, body: &B) -> Result<T, String> {
+        self.send(self.http.post(format!("{}/admin/v1/{path}", self.base)).json(body)).await
+    }
+
+    async fn put<B: Serialize, T: for<'de> Deserialize<'de>>(&self, path: &str, body: &B) -> Result<T, String> {
+        self.send(self.http.put(format!("{}/admin/v1/{path}", self.base)).json(body)).await
+    }
+}
+
+fn ask_secret(prompt: &str) -> Result<String, String> {
+    if std::io::stdin().is_terminal() {
+        dialoguer::Password::new().with_prompt(prompt).interact().map_err(|e| e.to_string())
+    } else {
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s).map_err(|e| e.to_string())?;
+        Ok(s.trim_end_matches(['\r', '\n']).to_string())
+    }
+}
+
+fn uptime(s: u64) -> String {
+    match s {
+        s if s >= 86_400 => format!("{}d {}h", s / 86_400, s / 3600 % 24),
+        s if s >= 3600 => format!("{}h {}m", s / 3600, s / 60 % 60),
+        s => format!("{}m {}s", s / 60, s % 60),
+    }
+}
+
+// ------------------------------------------------------------------ commands
+
+pub async fn run(a: RemoteArgs) -> Result<(), String> {
+    match a.cmd {
+        RemoteCmd::Login { url, password_stdin } => {
+            let base = normalize_url(&url)?;
+            let password = if password_stdin {
+                let mut s = String::new();
+                std::io::stdin().read_line(&mut s).map_err(|e| e.to_string())?;
+                s.trim_end_matches(['\r', '\n']).to_string()
+            } else {
+                ask_secret(&format!("Admin password for {base}"))?
+            };
+            let r = client()
+                .post(format!("{base}/admin/v1/login"))
+                .json(&LoginRequest { password })
+                .send()
+                .await
+                .map_err(|e| format!("cannot reach {base}: {}", e.without_url()))?;
+            if !r.status().is_success() {
+                let status = r.status().as_u16();
+                let msg = error_of(r).await;
+                return Err(if status == 401 { "wrong password".into() } else { msg });
+            }
+            let pair: TokenPair = r.json().await.map_err(|e| e.to_string())?;
+            store_token(&base, &pair.refresh_token)?;
+            println!("Logged in to {base}. The login stays valid for 30 days of inactivity.");
+            println!("Try: glyph-server remote status");
+            Ok(())
+        }
+        RemoteCmd::Logout => {
+            let base = match a.server {
+                Some(s) => normalize_url(&s)?,
+                None => load_profile().default.ok_or("not logged in anywhere")?,
+            };
+            if let Ok(c) = Client::connect(Some(base.clone())).await {
+                let _: Result<serde_json::Value, _> = c.post("logout", &serde_json::json!({})).await;
+            }
+            forget_token(&base);
+            println!("Logged out of {base}.");
+            Ok(())
+        }
+        RemoteCmd::Status => {
+            let c = Client::connect(a.server).await?;
+            let s: StatusResponse = c.get("status").await?;
+            println!("Server     {}", c.base);
+            println!("Version    {} (protocol v{}, {})", s.server_version, s.protocol_version, s.platform);
+            if let Some(u) = s.uptime_s {
+                println!("Uptime     {}", uptime(u));
+            }
+            println!(
+                "Limits     {} req/min per client · YouTube {} units/day · {} import pages",
+                s.limits.rate_limit_per_min, s.limits.youtube_daily_budget_units, s.limits.import_max_pages
+            );
+            println!("\nSources");
+            for p in s.providers {
+                let state = match (p.enabled, p.skipped) {
+                    (true, true) => "paused (error or quota, retries in a few minutes)",
+                    (true, false) => "on",
+                    (false, _) if p.needs_key => "off (no key: glyph-server remote keys set …)",
+                    (false, _) => "off",
+                };
+                println!("  {:<18} {state}", p.name);
+            }
+            Ok(())
+        }
+        RemoteCmd::Keys { cmd } => {
+            let c = Client::connect(a.server).await?;
+            match cmd.unwrap_or(KeysCmd::List) {
+                KeysCmd::List => {
+                    let k: KeysResponse = c.get("keys").await?;
+                    for k in k.keys {
+                        println!("  {:<26} {}", k.name, if k.set { k.masked.unwrap_or_else(|| "set".into()) } else { "-".into() });
+                    }
+                    println!("\nSet one with: glyph-server remote keys set <NAME>");
+                }
+                KeysCmd::Set { name, value } => {
+                    let name = name.to_lowercase();
+                    let value = match value {
+                        Some(v) => v,
+                        None => ask_secret(&format!("Value for {name}"))?,
+                    };
+                    let r: SetKeysResponse = c.put("keys", &SetKeysRequest { values: BTreeMap::from([(name.clone(), value)]) }).await?;
+                    for w in &r.warnings {
+                        println!("warning: {w}");
+                    }
+                    println!("Saved {name}. It is active right away.");
+                }
+                KeysCmd::Unset { name } => {
+                    let name = name.to_lowercase();
+                    let _: SetKeysResponse = c.put("keys", &SetKeysRequest { values: BTreeMap::from([(name.clone(), String::new())]) }).await?;
+                    println!("Removed {name}.");
+                }
+                KeysCmd::Test { provider } => {
+                    let id = crate::setup::parse_provider(&provider).ok_or_else(|| format!("unknown source `{provider}` (e.g. youtube, jamendo, spotify, soundcloud, lastfm)"))?;
+                    let r: TestResult = c.post("keys/test", &TestKeysRequest { provider: id, values: None }).await?;
+                    println!("{}: {} {}", id.display_name(), if r.ok { "OK" } else { "FAILED" }, r.message);
+                }
+            }
+            Ok(())
+        }
+        RemoteCmd::Cache { cmd } => {
+            let c = Client::connect(a.server).await?;
+            match cmd.unwrap_or(CacheCmd::Stats) {
+                CacheCmd::Stats => {
+                    let r: CacheStatsResponse = c.get("cache/stats").await?;
+                    match r.stats {
+                        Some(s) => println!("{}", serde_json::to_string_pretty(&s).unwrap_or_default()),
+                        None => println!("this server does not report cache statistics"),
+                    }
+                }
+                CacheCmd::Clear => {
+                    let r: CacheClearResponse = c.post("cache/clear", &serde_json::json!({})).await?;
+                    println!("{}", if r.cleared { "Cache cleared." } else { "This server cannot clear its cache." });
+                }
+            }
+            Ok(())
+        }
+        RemoteCmd::Limits { rate, youtube_budget, import_pages } => {
+            let c = Client::connect(a.server).await?;
+            let mut l: Limits = c.get("limits").await?;
+            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() {
+                if let Some(v) = rate {
+                    l.rate_limit_per_min = v;
+                }
+                if let Some(v) = youtube_budget {
+                    l.youtube_daily_budget_units = v;
+                }
+                if let Some(v) = import_pages {
+                    l.import_max_pages = v;
+                }
+                l = c.put("limits", &l).await?;
+                println!("Saved.");
+            }
+            println!("Requests per minute per client  {}", l.rate_limit_per_min);
+            println!("YouTube units per day           {}", l.youtube_daily_budget_units);
+            println!("Pages per playlist import       {}", l.import_max_pages);
+            Ok(())
+        }
+        RemoteCmd::Logs { lines, follow } => {
+            let mut c = Client::connect(a.server.clone()).await?;
+            let mut r: LogsResponse = c.get(&format!("logs?n={}", lines.clamp(1, 1000))).await?;
+            for l in &r.lines {
+                println!("{l}");
+            }
+            let mut renewed = std::time::Instant::now();
+            while follow {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Access tokens last 15 minutes.
+                if renewed.elapsed() > std::time::Duration::from_secs(600) {
+                    c = Client::connect(a.server.clone()).await?;
+                    renewed = std::time::Instant::now();
+                }
+                r = c.get(&format!("logs?n=1000&after={}", r.next)).await?;
+                for l in &r.lines {
+                    println!("{l}");
+                }
+            }
+            Ok(())
+        }
+        RemoteCmd::Update { apply } => {
+            let c = Client::connect(a.server).await?;
+            if apply {
+                let r: UpdateApplyResponse = c.post("update/apply", &serde_json::json!({})).await?;
+                println!("{}", r.message);
+                if r.restart_required {
+                    println!("Restart the server to finish (a service restarts it automatically).");
+                }
+            } else {
+                let r: UpdateInfo = c.post("update/check", &serde_json::json!({})).await?;
+                println!("{}", r.message);
+                if r.update_available {
+                    println!("Install it with: glyph-server remote update --apply");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_are_normalised_and_https_enforced() {
+        assert_eq!(normalize_url("glyph.example.com/").unwrap(), "https://glyph.example.com");
+        assert_eq!(normalize_url("127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
+        assert_eq!(normalize_url("http://localhost:8787").unwrap(), "http://localhost:8787");
+        assert!(normalize_url("http://glyph.example.com").is_err());
+    }
+
+    #[test]
+    fn uptime_is_readable() {
+        assert_eq!(uptime(59), "0m 59s");
+        assert_eq!(uptime(3700), "1h 1m");
+        assert_eq!(uptime(90_000), "1d 1h");
+    }
+}

@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use glyph_server_core::admin::host::AdminHost;
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
 use glyph_server_core::ratelimit::CacheRateLimiter;
 use glyph_server_core::{
@@ -157,6 +158,10 @@ fn build_server(env: &Env) -> Server {
         lastfm_api_key: secret(env, "LASTFM_API_KEY"),
     };
     let mut config = Config::new(secrets);
+    // Admin API is only enabled when this secret holds an Argon2id hash
+    // (`glyph-server hash-password`, or `glyph-server cloudflare setup`).
+    config.admin_password_hash = secret(env, "ADMIN_PASSWORD_HASH")
+        .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
     if let Some(n) = secret(env, "RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()) {
         config.rate_limit_per_min = n;
     }
@@ -165,13 +170,23 @@ fn build_server(env: &Env) -> Server {
     }
     // Rate-limit counters live in the (free, unmetered) Cache API, not in KV.
     let limiter = Arc::new(CacheRateLimiter::new(api, rt.clone()));
-    Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, config })
+    Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, config }).with_host(Arc::new(WorkerHost))
+}
+
+/// Secrets, limits and updates are managed with wrangler / Cloudflare, not at runtime.
+struct WorkerHost;
+
+impl AdminHost for WorkerHost {
+    fn platform(&self) -> &'static str {
+        "worker"
+    }
 }
 
 fn to_core_method(m: worker::Method) -> Method {
     match m {
         worker::Method::Get | worker::Method::Head => Method::Get,
         worker::Method::Post => Method::Post,
+        worker::Method::Put => Method::Put,
         worker::Method::Options => Method::Options,
         _ => Method::Other,
     }
@@ -188,10 +203,14 @@ async fn fetch(mut req: worker::Request, env: Env, _ctx: Context) -> Result<work
     let headers: Vec<(String, String)> = req.headers().entries().collect();
     let ip = req.headers().get("cf-connecting-ip").ok().flatten();
     let method = to_core_method(req.method());
-    let body = if method == Method::Post { req.bytes().await.unwrap_or_default() } else { Vec::new() };
+    let body = if matches!(method, Method::Post | Method::Put) { req.bytes().await.unwrap_or_default() } else { Vec::new() };
 
     let server = build_server(&env);
-    let resp = server.handle(glyph_server_core::Request::new(method, &target, headers, body, ip)).await;
+    // Deployed Workers are HTTPS-only; `wrangler dev` serves http://localhost.
+    let secure = url.scheme() == "https";
+    let local = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));
+    let request = glyph_server_core::Request::new(method, &target, headers, body, ip).with_transport(secure, local);
+    let resp = server.handle(request).await;
 
     let out = match resp.body {
         Body::Bytes(b) => worker::Response::from_bytes(b)?,

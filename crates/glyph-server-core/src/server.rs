@@ -1,7 +1,9 @@
 //! Request routing. Host adapters (Worker, axum) convert their native request
 //! into [`Request`], call [`Server::handle`], and stream the [`Response`] back.
 
+use crate::admin::host::{AdminHost, NoHost};
 use crate::cache::{self, DAY, HOUR};
+use crate::config::Config;
 use crate::error::ApiErr;
 use crate::merge::plain_words;
 use crate::params::Query;
@@ -15,7 +17,7 @@ use glyph_protocol::{
     INSTALL_ID_HEADER, PROTOCOL_VERSION,
 };
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
@@ -29,9 +31,20 @@ pub struct Request {
     pub body: Vec<u8>,
     /// Peer address (or a trusted proxy header) as determined by the host.
     pub client_ip: Option<String>,
+    /// The connection reached us over HTTPS (directly or via a trusted proxy).
+    pub secure: bool,
+    /// The caller is on this machine (loopback, no proxy headers).
+    pub local: bool,
 }
 
 impl Request {
+    /// Mark transport properties decided by the host adapter.
+    pub fn with_transport(mut self, secure: bool, local: bool) -> Self {
+        self.secure = secure;
+        self.local = local;
+        self
+    }
+
     /// Build from a request target like `/v1/search?q=abc`.
     pub fn new(method: Method, target: &str, headers: Vec<(String, String)>, body: Vec<u8>, client_ip: Option<String>) -> Self {
         let (path, q) = target.split_once('?').unwrap_or((target, ""));
@@ -42,6 +55,8 @@ impl Request {
             headers: headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect(),
             body,
             client_ip,
+            secure: false,
+            local: false,
         }
     }
 
@@ -63,7 +78,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn json<T: Serialize>(status: u16, value: &T) -> Self {
+    pub(crate) fn json<T: Serialize>(status: u16, value: &T) -> Self {
         let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
         Self {
             status,
@@ -122,19 +137,50 @@ fn route(path: &str) -> Option<(Route, Method)> {
 
 #[derive(Clone)]
 pub struct Server {
-    svc: Arc<Services>,
+    /// Current services; replaced (not mutated) when admin changes the config.
+    svc: Arc<RwLock<Arc<Services>>>,
+    pub(crate) host: Arc<dyn AdminHost>,
 }
 
 impl Server {
     pub fn new(svc: Services) -> Self {
-        Self { svc: Arc::new(svc) }
+        Self::from_arc(Arc::new(svc))
     }
 
-    pub fn services(&self) -> &Arc<Services> {
-        &self.svc
+    pub fn from_arc(svc: Arc<Services>) -> Self {
+        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost) }
+    }
+
+    pub fn with_host(mut self, host: Arc<dyn AdminHost>) -> Self {
+        self.host = host;
+        self
+    }
+
+    /// Snapshot of the current services.
+    pub fn services(&self) -> Arc<Services> {
+        self.svc.read().unwrap().clone()
+    }
+
+    /// Swap in a modified config (other services are shared).
+    pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
+        let mut guard = self.svc.write().unwrap();
+        let old = guard.clone();
+        let mut config = old.config.clone();
+        f(&mut config);
+        *guard = Arc::new(Services {
+            http: old.http.clone(),
+            cache: old.cache.clone(),
+            limiter: old.limiter.clone(),
+            rt: old.rt.clone(),
+            config,
+        });
     }
 
     pub async fn handle(&self, req: Request) -> Response {
+        let svc = self.services();
+        if req.path.starts_with("/admin/v1") {
+            return self.handle_admin(&svc, req).await;
+        }
         let Some((route, method)) = route(&req.path) else {
             return Response::error(ApiErr::not_found("unknown endpoint"));
         };
@@ -147,19 +193,21 @@ impl Server {
             return r;
         }
         if route != Route::Health {
-            if let Err(e) = self.rate_limit(&req).await {
+            if let Err(e) = rate_limit(&svc, &req).await {
                 return Response::error(e);
             }
         }
-        match self.dispatch(route, req).await {
+        match dispatch(&svc, route, req).await {
             Ok(r) => r,
             Err(e) => Response::error(e),
         }
     }
+}
 
-    /// Per install id (`limit`/min) and per IP (4x, since NATs share one).
-    async fn rate_limit(&self, req: &Request) -> Result<(), ApiErr> {
-        let limit = self.svc.config.rate_limit_per_min.max(1);
+/// Per install id (`limit`/min) and per IP (4x, since NATs share one).
+pub(crate) async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(), ApiErr> {
+    {
+        let limit = svc.config.rate_limit_per_min.max(1);
         let mut checks: Vec<(String, u32)> = Vec::new();
         if let Some(id) = req.header(INSTALL_ID_HEADER) {
             let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -171,15 +219,16 @@ impl Server {
         let ip_limit = if checks.is_empty() { limit } else { limit.saturating_mul(4) };
         checks.push((format!("ip:{ip}"), ip_limit));
         for (key, lim) in checks {
-            if let RateDecision::Limited { retry_after_s } = self.svc.limiter.check(&key, lim, 60).await {
+            if let RateDecision::Limited { retry_after_s } = svc.limiter.check(&key, lim, 60).await {
                 return Err(ApiErr::rate_limited(retry_after_s));
             }
         }
         Ok(())
     }
+}
 
-    async fn dispatch(&self, route: Route, req: Request) -> Result<Response, ApiErr> {
-        let svc = &self.svc;
+async fn dispatch(svc: &Arc<Services>, route: Route, req: Request) -> Result<Response, ApiErr> {
+    {
         match route {
             Route::Health => Ok(Response::json(
                 200,
@@ -205,7 +254,7 @@ impl Server {
                 }
                 Ok(Response::json(200, &resolver::resolve(svc, r).await))
             }
-            Route::Lyrics => self.lyrics(&req).await,
+            Route::Lyrics => lyrics(svc, &req).await,
             Route::Similar => {
                 let artist = req.query.required("artist")?;
                 let title = req.query.required("title")?;
@@ -230,9 +279,10 @@ impl Server {
             }
         }
     }
+}
 
-    async fn lyrics(&self, req: &Request) -> Result<Response, ApiErr> {
-        let svc = &self.svc;
+async fn lyrics(svc: &Arc<Services>, req: &Request) -> Result<Response, ApiErr> {
+    {
         let title = req.query.required("title")?;
         let artist = req.query.required("artist")?;
         let album = req.query.optional("album")?;
@@ -255,7 +305,7 @@ impl Server {
     }
 }
 
-fn parse_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, ApiErr> {
+pub(crate) fn parse_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, ApiErr> {
     if req.body.len() > MAX_BODY_BYTES {
         return Err(ApiErr::new(413, "payload_too_large", "request body too large"));
     }
@@ -286,7 +336,7 @@ mod tests {
     }
 
     fn server(h: &Harness) -> Server {
-        Server { svc: h.svc.clone() }
+        Server::from_arc(h.svc.clone())
     }
 
     fn json_of(r: &Response) -> serde_json::Value {

@@ -27,7 +27,69 @@ impl std::fmt::Debug for Secrets {
     }
 }
 
+/// Key names accepted by the admin API / `server.toml` / Worker secrets
+/// (the latter in upper case), with the provider each belongs to.
+pub const KEY_NAMES: [(&str, ProviderId); 7] = [
+    ("youtube_api_key", ProviderId::YouTube),
+    ("jamendo_client_id", ProviderId::Jamendo),
+    ("soundcloud_client_id", ProviderId::SoundCloud),
+    ("soundcloud_client_secret", ProviderId::SoundCloud),
+    ("spotify_client_id", ProviderId::Spotify),
+    ("spotify_client_secret", ProviderId::Spotify),
+    ("lastfm_api_key", ProviderId::LastFm),
+];
+
+/// Show only the last 4 characters, and only for keys long enough that this
+/// reveals little; shorter values are fully hidden.
+pub fn mask_secret(s: &str) -> String {
+    let n = s.chars().count();
+    if n >= 12 {
+        let tail: String = s.chars().skip(n - 4).collect();
+        format!("****{tail}")
+    } else {
+        "****".to_string()
+    }
+}
+
 impl Secrets {
+    fn slot(&mut self, name: &str) -> Option<&mut Option<String>> {
+        Some(match name {
+            "youtube_api_key" => &mut self.youtube_api_key,
+            "jamendo_client_id" => &mut self.jamendo_client_id,
+            "soundcloud_client_id" => &mut self.soundcloud_client_id,
+            "soundcloud_client_secret" => &mut self.soundcloud_client_secret,
+            "spotify_client_id" => &mut self.spotify_client_id,
+            "spotify_client_secret" => &mut self.spotify_client_secret,
+            "lastfm_api_key" => &mut self.lastfm_api_key,
+            _ => return None,
+        })
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "youtube_api_key" => self.youtube_api_key.as_deref(),
+            "jamendo_client_id" => self.jamendo_client_id.as_deref(),
+            "soundcloud_client_id" => self.soundcloud_client_id.as_deref(),
+            "soundcloud_client_secret" => self.soundcloud_client_secret.as_deref(),
+            "spotify_client_id" => self.spotify_client_id.as_deref(),
+            "spotify_client_secret" => self.spotify_client_secret.as_deref(),
+            "lastfm_api_key" => self.lastfm_api_key.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Set (or with `None`/empty clear) a key by name; false for unknown names.
+    pub fn set(&mut self, name: &str, value: Option<String>) -> bool {
+        let v = value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        match self.slot(name) {
+            Some(s) => {
+                *s = v;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Treat empty / whitespace-only values as unset and trim the rest.
     pub fn normalized(mut self) -> Self {
         for f in [
@@ -62,6 +124,8 @@ pub struct Config {
     /// Max pages fetched per playlist import (Workers free plan: 50 subrequests).
     pub import_max_pages: u32,
     pub audius_app_name: String,
+    /// Argon2id PHC hash of the admin password. `None` = admin API disabled.
+    pub admin_password_hash: Option<String>,
 }
 
 impl Config {
@@ -74,6 +138,7 @@ impl Config {
             youtube_daily_budget_units: 9000,
             import_max_pages: 5,
             audius_app_name: "glyph".to_string(),
+            admin_password_hash: None,
         }
     }
 
@@ -104,5 +169,35 @@ impl Config {
             .into_iter()
             .filter(|p| self.provider_enabled(*p))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masking_shows_at_most_last_four() {
+        assert_eq!(mask_secret("AIzaSyD-abcdefghijklmnop1234"), "****1234");
+        assert_eq!(mask_secret("short"), "****");
+        assert_eq!(mask_secret("elevenchars"), "****");
+        assert_eq!(mask_secret("twelve_chars"), "****hars");
+        assert_eq!(mask_secret(""), "****");
+        // never longer than 8 chars, regardless of input
+        assert!(mask_secret(&"x".repeat(500)).len() == 8);
+    }
+
+    #[test]
+    fn secrets_get_set_by_name() {
+        let mut s = Secrets::default();
+        assert!(s.set("youtube_api_key", Some("  k  ".into())));
+        assert_eq!(s.get("youtube_api_key"), Some("k"));
+        assert!(s.set("youtube_api_key", Some("".into())));
+        assert_eq!(s.get("youtube_api_key"), None);
+        assert!(!s.set("nope", Some("x".into())));
+        for (n, _) in KEY_NAMES {
+            assert!(s.set(n, Some("v".into())), "{n}");
+            assert_eq!(s.get(n), Some("v"));
+        }
     }
 }
