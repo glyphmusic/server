@@ -4,3 +4,4 @@
 server.toml
 .wrangler/
 node_modules/
+.wrangler-home/
