@@ -1,0 +1,37 @@
+/* Shared by the landing page and the /p/ playlist page: the same terminal
+   look as the account page, with the app's pink as the one accent. */
+:root {
+  --bg: #0a0a09;
+  --panel: #121211;
+  --panel-2: #1a1a18;
+  --fg: #dedbd2;
+  --dim: #77746b;
+  --line: #2c2a26;
+  --pink: #ff5fd2;
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--fg); }
+body {
+  margin: 0;
+  font: 14px/1.6 var(--mono);
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+}
+pre { margin: 0; font: inherit; }
+a { color: inherit; }
+.dim { color: var(--dim); }
+.pink { color: var(--pink); }
+.rule { color: var(--line); overflow: hidden; white-space: nowrap; }
+.rule b { color: var(--fg); font-weight: 600; }
+.act {
+  display: inline-flex; justify-content: space-between; gap: 3ch; align-items: center;
+  border: 1px solid var(--fg); padding: 9px 2ch; text-decoration: none;
+  font: inherit; color: var(--fg); background: none; cursor: pointer;
+}
+.act::after { content: "->"; }
+.act:hover, .act:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+.act.alt { border-color: var(--line); }
+.act.alt:hover, .act.alt:focus-visible { border-color: var(--fg); }
+.note-art { display: block; margin: 0 auto; }
