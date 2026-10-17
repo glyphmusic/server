@@ -24,7 +24,8 @@ use glyph_protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use store::{AccountStore, BlobStore, Device, Item, Login, Passkey, StoreError, User};
+use crate::share::{ShareRequest, ShareResponse, SharedPlaylist};
+use store::{AccountStore, BlobStore, Device, Item, Login, Passkey, Share, StoreError, User};
 use webauthn::{b64, unb64, Expect};
 
 const SEC: u64 = 1000;
@@ -72,6 +73,8 @@ pub struct Accounts {
 pub fn max_body_bytes(path: &str) -> Option<usize> {
     if path == "/v1/sync/push" {
         Some(MAX_PUSH_BYTES)
+    } else if let Some(n) = crate::share::max_body_bytes(path) {
+        Some(n)
     } else if path.starts_with("/v1/sync/covers/") {
         Some(MAX_OWN_COVER)
     } else {
@@ -81,7 +84,7 @@ pub fn max_body_bytes(path: &str) -> Option<usize> {
 
 /// Paths owned by this module.
 pub fn owns(path: &str) -> bool {
-    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/"]
+    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/"]
         .iter()
         .any(|p| path == p.trim_end_matches('/') || path.starts_with(&format!("{}/", p.trim_end_matches('/'))))
 }
@@ -412,6 +415,71 @@ impl Accounts {
         Ok(Session { access_token: access, refresh_token: refresh, access_expires_in_s: ACCESS_TTL / SEC, device_id: device.id, account: account_of(user) })
     }
 
+    /// Where short playlist links point: the share origin, else this server.
+    fn share_link(&self, svc: &Services, id: &str) -> String {
+        let origin = svc.config.share_origin.as_deref().unwrap_or(&self.origin);
+        format!("{}/p/{id}", origin.trim_end_matches('/'))
+    }
+
+    async fn shared(&self, id: &str) -> Result<SharedPlaylist, ApiErr> {
+        let missing = || ApiErr::not_found("no such playlist link");
+        if !crate::share::valid_id(id) {
+            return Err(missing());
+        }
+        let s = self.store.share(id).await.map_err(store_err)?.ok_or_else(missing)?;
+        let author = if s.kind == "album" { None } else { self.store.user(&s.owner_id).await.map_err(store_err)?.map(|u| u.handle) };
+        Ok(SharedPlaylist { code: s.code, name: s.name, songs: s.songs, kind: s.kind, author })
+    }
+
+    /// `POST /v1/share`, `GET|DELETE /v1/share/<id>` and the `/p/<id>` page.
+    async fn share(&self, svc: &Services, req: &Request, path: &str) -> Result<Response, ApiErr> {
+        let m = req.method;
+        if let Some(id) = path.strip_prefix("/p/") {
+            if m != Method::Get {
+                return Err(method());
+            }
+            return Ok(match self.shared(id).await {
+                Ok(p) => crate::share::page(Some((&p, &self.share_link(svc, id)))),
+                Err(_) => crate::share::page(None),
+            });
+        }
+        if let Some(id) = path.strip_prefix("/v1/share/") {
+            return match m {
+                Method::Get => Ok(Response::json(200, &self.shared(id).await?)),
+                Method::Delete => {
+                    let a = self.auth(svc, req).await?;
+                    if !self.store.delete_share(&a.user.id, id).await.map_err(store_err)? {
+                        return Err(ApiErr::not_found("no such playlist link"));
+                    }
+                    Ok(Response::json(200, &serde_json::json!({})))
+                }
+                _ => Err(method()),
+            };
+        }
+        if m != Method::Post {
+            return Err(method());
+        }
+        let a = self.auth(svc, req).await?;
+        self.limit(svc, &format!("share:{}", a.user.id), crate::share::CREATES_PER_HOUR, 3600).await?;
+        let r: ShareRequest = json_body(req, crate::share::MAX_CODE_BYTES + 4096)?;
+        let code = crate::share::clean_code(&r.code).ok_or_else(|| ApiErr::bad_request("code must be a glyph:playlist: code"))?;
+        let mut id = crate::share::id_for(&a.user.id, &code, 8);
+        if self.store.share(&id).await.map_err(store_err)?.is_some_and(|s| s.owner_id != a.user.id || s.code != code) {
+            id = crate::share::id_for(&a.user.id, &code, crate::share::LONG_ID_LEN);
+        }
+        let share = Share {
+            id: id.clone(),
+            owner_id: a.user.id.clone(),
+            name: crate::share::clean_name(r.name),
+            songs: r.songs.unwrap_or(0),
+            kind: crate::share::clean_kind(r.kind.as_deref()),
+            created_at: svc.rt.now_ms(),
+            code,
+        };
+        self.store.put_share(&share).await.map_err(store_err)?;
+        Ok(Response::json(200, &ShareResponse { url: self.share_link(svc, &id), id }))
+    }
+
     pub async fn handle(&self, svc: &Arc<Services>, req: Request) -> Response {
         match self.dispatch(svc, &req).await {
             Ok(r) => r,
@@ -496,6 +564,9 @@ impl Accounts {
         }
         if let Some(name) = path.strip_prefix("/v1/sync/covers/") {
             return self.own_cover(svc, req, name).await;
+        }
+        if path == "/v1/share" || path.starts_with("/v1/share/") || path.starts_with("/p/") {
+            return self.share(svc, req, path).await;
         }
 
         match (path, m) {

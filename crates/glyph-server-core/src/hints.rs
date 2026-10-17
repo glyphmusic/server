@@ -6,9 +6,10 @@
 //! client, which then skips its own (slow) yt-dlp search. Only ids are
 //! stored, never audio.
 //!
-//! A report is trusted when the YouTube Data API (if a key is configured)
-//! confirms the video exists and its title / channel / duration fit the song,
-//! or else once [`MIN_VOTES`] different installs reported the same video.
+//! A report is trusted when the YouTube Data API (if a key is configured) or
+//! the server's own yt-dlp confirms the video exists and its title / channel /
+//! duration fit the song, or else once [`MIN_VOTES`] different installs
+//! reported the same video. With yt-dlp the first sure report is shared at once.
 
 use crate::cache::{self, DAY};
 use crate::error::ApiErr;
@@ -114,7 +115,9 @@ async fn verify(svc: &Services, want: &Track, video_id: &str) -> Option<bool> {
         #[serde(default)]
         duration: Option<String>,
     }
-    let key = svc.config.secrets.youtube_api_key.as_deref()?;
+    let Some(key) = svc.config.secrets.youtube_api_key.as_deref() else {
+        return verify_ytdlp(svc, want, video_id).await;
+    };
     let url = build_url(
         "https://www.googleapis.com/youtube/v3/videos",
         &[("part", "snippet,contentDetails"), ("id", video_id), ("key", key)],
@@ -124,6 +127,16 @@ async fn verify(svc: &Services, want: &Track, video_id: &str) -> Option<bool> {
     let Some(item) = r.items.into_iter().next() else { return Some(false) };
     let ms = item.details.and_then(|d| d.duration).and_then(|d| crate::providers::youtube::parse_iso8601_duration(&d));
     Some(video_fits(want, &item.snippet.title, &item.snippet.channel, ms))
+}
+
+/// Same check through yt-dlp (metadata only). `None` = no yt-dlp or it failed.
+async fn verify_ytdlp(svc: &Services, want: &Track, video_id: &str) -> Option<bool> {
+    if !svc.config.provider_enabled(glyph_protocol::ProviderId::YouTube) {
+        return None;
+    }
+    // No metadata (bot check, empty output): the votes decide.
+    let (title, channel, ms) = crate::providers::youtube::video_info(svc, video_id).await.ok()??;
+    Some(video_fits(want, &title, &channel, ms))
 }
 
 /// Records one report. Writes the cache only when something changed.
@@ -251,6 +264,22 @@ mod tests {
             let bad = report(&h.svc, "a", req("xxxxxxxxxxx")).await.unwrap();
             assert!(!bad.accepted);
             assert_eq!(lookup(&h.svc, &song()).await, None);
+            let ok = report(&h.svc, "a", req("7wtfhZwyrcc")).await.unwrap();
+            assert!(ok.accepted && ok.confirmed);
+            assert_eq!(lookup(&h.svc, &song()).await.as_deref(), Some("7wtfhZwyrcc"));
+        });
+    }
+
+    #[test]
+    fn ytdlp_verifies_without_api_key() {
+        let h = harness_with_ytdlp(Default::default());
+        h.cmds.on(
+            "watch?v=7wtfhZwyrcc",
+            r#"{"id":"7wtfhZwyrcc","title":"Believer","channel":"Imagine Dragons - Topic","duration":204}"#,
+        );
+        h.cmds.on("watch?v=xxxxxxxxxxx", r#"{"id":"xxxxxxxxxxx","title":"Never Gonna Give You Up","channel":"Rick Astley","duration":213}"#);
+        block_on(async {
+            assert!(!report(&h.svc, "a", req("xxxxxxxxxxx")).await.unwrap().accepted);
             let ok = report(&h.svc, "a", req("7wtfhZwyrcc")).await.unwrap();
             assert!(ok.accepted && ok.confirmed);
             assert_eq!(lookup(&h.svc, &song()).await.as_deref(), Some("7wtfhZwyrcc"));

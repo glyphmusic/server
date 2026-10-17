@@ -89,6 +89,21 @@ pub struct Login {
     pub expires: u64,
 }
 
+/// A short playlist link (`/p/<id>`), owned by the account that made it and
+/// deleted with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Share {
+    pub id: String,
+    pub owner_id: String,
+    /// `glyph:playlist:` code.
+    pub code: String,
+    pub name: String,
+    pub songs: u32,
+    /// "playlist", or "album" for an artist's single / album (no author shown).
+    pub kind: String,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub kind: String,
@@ -157,6 +172,12 @@ pub trait AccountStore: MaybeSendSync {
     async fn items_since(&self, user_id: &str, since: u64, limit: u32) -> StoreResult<Vec<Item>>;
     /// Drop tombstones older than `before` (ms) and raise `purged_rev`.
     async fn purge_tombstones(&self, user_id: &str, before: u64) -> StoreResult<()>;
+
+    /// Insert or replace a short playlist link (by id).
+    async fn put_share(&self, share: &Share) -> StoreResult<()>;
+    async fn share(&self, id: &str) -> StoreResult<Option<Share>>;
+    /// `false` when `user_id` has no link `id`.
+    async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool>;
 }
 
 /// Binary objects (cover images).
@@ -178,6 +199,7 @@ struct Mem {
     logins: BTreeMap<String, Login>,
     devices: BTreeMap<String, Device>,
     items: BTreeMap<(String, String, String), Item>,
+    shares: BTreeMap<String, Share>,
     default_limit: Option<u8>,
 }
 
@@ -271,6 +293,7 @@ impl AccountStore for MemStore {
         m.devices.retain(|_, d| d.user_id != user_id);
         m.items.retain(|(u, _, _), _| u != user_id);
         m.logins.retain(|_, l| l.user_id.as_deref() != Some(user_id));
+        m.shares.retain(|_, s| s.owner_id != user_id);
         Ok(())
     }
     async fn passkey(&self, cred_id: &str) -> StoreResult<Option<Passkey>> {
@@ -384,6 +407,21 @@ impl AccountStore for MemStore {
             u.purged_rev = u.purged_rev.max(max);
         }
         Ok(())
+    }
+    async fn put_share(&self, share: &Share) -> StoreResult<()> {
+        self.m.lock().unwrap().shares.insert(share.id.clone(), share.clone());
+        Ok(())
+    }
+    async fn share(&self, id: &str) -> StoreResult<Option<Share>> {
+        Ok(self.m.lock().unwrap().shares.get(id).cloned())
+    }
+    async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool> {
+        let mut m = self.m.lock().unwrap();
+        if m.shares.get(id).is_some_and(|s| s.owner_id == user_id) {
+            m.shares.remove(id);
+            return Ok(true);
+        }
+        Ok(false)
     }
 }
 

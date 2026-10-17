@@ -279,12 +279,36 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
     let Ok(permit) = audio_slots().clone().try_acquire_owned() else {
         return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later");
     };
-    fetch_upstream_audio(&url, range, Some(permit)).await
+    let mut permit = Some(permit);
+    let out = fetch_upstream_audio(&url, range, &mut permit).await;
+    if provider == glyph_protocol::ProviderId::YouTube && !is_download {
+        return retry_stale_youtube(&svc, &id, range, out, &mut permit).await;
+    }
+    out
+}
+
+/// A cached YouTube URL the upstream refuses is dropped and resolved again once.
+async fn retry_stale_youtube(
+    svc: &glyph_server_core::Services,
+    id: &str,
+    range: Option<&str>,
+    out: Response,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Response {
+    if !matches!(out.status().as_u16(), 403 | 404) {
+        return out;
+    }
+    glyph_server_core::media::forget_audio_url(svc, id).await;
+    match glyph_server_core::media::audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
+        Ok(url) => fetch_upstream_audio(&url, range, permit).await,
+        Err(_) => out,
+    }
 }
 
 /// Streams one audio response from the provider. Byte ranges are forwarded
 /// upstream, so a seek only costs the requested bytes.
-async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+/// The permit moves into the body only on success, so a retry can reuse it.
+async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
     // Fetch on the extraction host: YouTube signatures can be bound to its IP.
     let client = match reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -337,6 +361,7 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: Option<tok
     if let Some(cr) = content_range {
         out = out.header("content-range", cr);
     }
+    let permit = permit.take();
     let mut received = 0u64;
     let stream = resp.bytes_stream().map(move |chunk| {
         let _ = &permit;
@@ -369,7 +394,9 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         let url = match glyph_server_core::media::audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {
             Ok(u) => u, Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio lookup failed"),
         };
-        return fetch_upstream_audio(&url, None, Some(_permit)).await;
+        let mut permit = Some(_permit);
+        let out = fetch_upstream_audio(&url, None, &mut permit).await;
+        return retry_stale_youtube(&svc, id, None, out, &mut permit).await;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
     let Ok(command) = serde_json::from_slice::<CommandRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid command") };

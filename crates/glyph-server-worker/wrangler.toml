@@ -5,7 +5,20 @@ compatibility_date = "2025-01-01"
 # api.glyph.my: Cloudflare creates the DNS record and certificate on deploy.
 # workers.dev stays reachable for older app builds.
 workers_dev = true
-routes = [{ pattern = "api.glyph.my", custom_domain = true }]
+# glyph.my/p/*: short playlist links (SHARE_ORIGIN below). Needs a proxied
+# DNS record for glyph.my; everything else on glyph.my is left alone.
+routes = [
+  { pattern = "api.glyph.my", custom_domain = true },
+  { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
+]
+
+# Same as the dashboard (Settings > Observability): only invocation logs.
+[observability.logs]
+enabled = false
+invocation_logs = true
+
+[observability.traces]
+enabled = false
 
 [build]
 command = "cargo install -q worker-build && worker-build --release"
@@ -36,6 +49,7 @@ RATE_LIMIT_PER_MIN = "60"
 # changing it later invalidates every passkey.
 PUBLIC_ORIGIN = "https://api.glyph.my"
 ACCOUNT_RP_ID = "glyph.my"
+SHARE_ORIGIN = "https://glyph.my"
 YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 
 # Secrets (never put keys in this file). Set each one you have with
