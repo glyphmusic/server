@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 — 2026-10-18
+
+- Resolve Worker cache misses on the companion (`POST /internal/resolve`), so the Worker parses one small answer instead of several provider searches. Without a companion, or when it is busy or offline, the Worker resolves itself as before.
+- Never share the admission queue between Worker requests. A permit handed across requests woke the waiter in the other request's context, which Cloudflare reported as hung requests and exceeded CPU limits.
+- Accept Audius' presigned R2 audio redirects (`*.r2.cloudflarestorage.com`) as redirect targets only; Audius playback and downloads returned HTTP 502.
+
 ## 0.2.2 — 2026-10-18
 
 - Reuse three prestarted yt-dlp extractors in parallel, coalesce duplicate video lookups, and separate audio transfer capacity from metadata requests. Keep a bounded CLI fallback.

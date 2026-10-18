@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-native"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-worker"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "console_error_panic_hook",

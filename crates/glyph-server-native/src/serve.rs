@@ -237,7 +237,7 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
 
-    if path_only == "/internal/ytdlp" || path_only.starts_with("/internal/audio/") {
+    if path_only == "/internal/ytdlp" || path_only == "/internal/resolve" || path_only.starts_with("/internal/audio/") {
         return companion(&st.server, &path_only, &headers, method, &body).await;
     }
     if let Err(resp) = st.server.check_access(&Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local)) {
@@ -472,7 +472,11 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     // holds the token, learns about it).
     if companion_disabled() { return plain(StatusCode::FORBIDDEN, "companion disabled"); }
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    // Resolves mostly wait on provider APIs; their yt-dlp steps still pass
+    // the command slots below.
+    static RESOLVE_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let slots = if path.starts_with("/internal/audio/") { audio_slots() }
+        else if path == "/internal/resolve" { RESOLVE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
         else { SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))) };
     let Ok(_permit) = slots.clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later") };
     let svc = server.services();
@@ -500,6 +504,14 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         return retry_stale_youtube(&svc, id, range, out, &mut permit).await;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
+    if path == "/internal/resolve" {
+        // The Worker's whole resolve miss path runs here (CPU-limited there).
+        let Ok(req) = serde_json::from_slice::<glyph_protocol::ResolveRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid resolve request") };
+        if req.track.title.trim().is_empty() || req.track.artist.trim().is_empty() { return plain(StatusCode::BAD_REQUEST, "title and artist required"); }
+        let resolved = glyph_server_core::resolver::resolve(&svc, req).await;
+        let body = serde_json::to_vec(&resolved).unwrap();
+        return Response::builder().header("content-type", "application/json").header("cache-control", "no-store").body(Body::from(body)).unwrap();
+    }
     let Ok(command) = serde_json::from_slice::<CommandRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid command") };
     if !valid_command(&command.args) { return plain(StatusCode::BAD_REQUEST, "command denied"); }
     let Some(bin) = svc.config.ytdlp_path.as_deref() else { return plain(StatusCode::SERVICE_UNAVAILABLE, "yt-dlp missing") };

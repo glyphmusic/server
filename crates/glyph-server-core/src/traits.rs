@@ -179,6 +179,13 @@ pub enum CommandError {
 pub trait CommandRunner: MaybeSendSync {
     /// Run `program` with `args`, capture stdout and give up after `timeout_ms`.
     async fn run(&self, program: &str, args: &[String], timeout_ms: u64) -> Result<Vec<u8>, CommandError>;
+
+    /// Resolve a song on the companion machine instead of here: the Worker's
+    /// CPU budget cannot afford several provider searches per request.
+    /// `None` = no companion or it failed; resolve locally.
+    async fn resolve(&self, _req: &glyph_protocol::ResolveRequest) -> Option<glyph_protocol::ResolveResponse> {
+        None
+    }
 }
 
 /// Used where no process can be spawned (Cloudflare Workers).

@@ -242,6 +242,26 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
         let reply: CommandResponse = serde_json::from_slice(&bytes).map_err(|_| CommandError::Failed)?;
         Ok(reply.stdout.into_bytes())
     }
+
+    /// The companion runs every provider search natively; here only one small
+    /// JSON answer is parsed. Busy or offline: `None`, the Worker resolves itself.
+    async fn resolve(&self, req: &glyph_protocol::ResolveRequest) -> Option<glyph_protocol::ResolveResponse> {
+        let body = serde_json::to_vec(req).ok()?;
+        let headers = Headers::new();
+        headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
+        headers.set("content-type", "application/json").ok()?;
+        let mut init = RequestInit::new();
+        init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
+            .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+        let url = format!("{}/internal/resolve", self.url.trim_end_matches('/'));
+        let request = worker::Request::new_with_init(&url, &init).ok()?;
+        let work = async {
+            let mut resp = Fetch::Request(request).send().await.ok()?;
+            if resp.status_code() != 200 { return None; }
+            serde_json::from_slice(&resp.bytes().await.ok()?).ok()
+        };
+        glyph_server_core::traits::with_timeout(&WorkerRuntime, 25_000, work).await.flatten()
+    }
 }
 
 /// Secrets and updates are managed with wrangler / Cloudflare. Limits and the

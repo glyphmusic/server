@@ -14,14 +14,13 @@ struct State {
 }
 pub(crate) struct Permit(Arc<Queue>);
 
+/// Never shared across Worker requests: a permit handed from one request wakes
+/// the waiter inside the other request's I/O context, which Cloudflare reports
+/// as hung requests and bills as the sender's CPU. Permits held by aborted
+/// streams also never drop there. The Worker builds a Server per request, so
+/// this queue is effectively unbounded on Workers; Cloudflare caps load itself.
 pub(crate) fn new_queue() -> Arc<Queue> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        thread_local! { static QUEUE: Arc<Queue> = Arc::default(); }
-        QUEUE.with(Clone::clone)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    { Arc::default() }
+    Arc::default()
 }
 impl Queue {
     pub async fn enter(self: &Arc<Self>, member: bool) -> Result<Permit, ApiErr> {

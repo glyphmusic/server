@@ -1,15 +1,7 @@
-# Glyph Server 0.2.2
+# Glyph Server 0.2.3
 
-- Run three reusable YouTube audio resolvers concurrently and start them before playback requests arrive. Duplicate requests share extraction; searches have independent capacity.
-- Forward media revision metadata for background download refresh checks.
-
-- Keep resolved YouTube URLs in companion memory so seeking and refilling reuse the source instead of rerunning yt-dlp.
-
-- Signed-in sharing copies short Glyph links for songs, artists and playlists, with rich previews and desktop deep links. Shared playlists open as a preview with an explicit Add to library action.
-
-- Stream YouTube audio in byte ranges immediately and find full songs through the companion, including ISRC matching.
-- Prepare audio qualities concurrently in the background, including after partial responses or client disconnects.
-- Fix Unicode cache keys that could terminate the Worker isolate.
-- Publish a single SHA256SUMS.txt checksum manifest.
+- The companion now resolves songs for the Worker, which keeps Worker requests within Cloudflare's CPU limit. Without a companion the Worker resolves as before. Add `JAMENDO_CLIENT_ID` and `SOUNDCLOUD_CLIENT_ID`/`SOUNDCLOUD_CLIENT_SECRET` to the companion's `.env` so it searches the same sources as the Worker.
+- Fix hung Worker requests and exceeded CPU limits under concurrent load.
+- Fix Audius playback and downloads (HTTP 502) after Audius moved audio to presigned R2 URLs.
 
 Cloudflare deployments require D1 migrations through 0013_audio_variant_jobs.sql.

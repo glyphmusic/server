@@ -52,10 +52,19 @@ pub fn allowed_upstream(url: &worker::Url, audio: bool) -> bool {
         .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
+/// Audius content nodes hand audio off to presigned R2 URLs. Only valid as a
+/// redirect target: `/v1/upstream` must not proxy arbitrary R2 buckets.
+fn presigned_r2(url: &worker::Url) -> bool {
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.host_str().is_some_and(|h| h.ends_with(".r2.cloudflarestorage.com"))
+        && url.query_pairs().any(|(k, _)| k == "X-Amz-Signature")
+}
+
 async fn origin(mut url: worker::Url, audio: bool) -> Result<Response> {
-    for _ in 0..5 {
+    for hop in 0..5 {
         // The caller checks audio-specific domains; all redirect targets must stay on known media hosts.
-        if !allowed_upstream(&url, audio) {
+        if !(allowed_upstream(&url, audio) || (audio && hop > 0 && presigned_r2(&url))) {
             return Response::error("upstream host denied", 502);
         }
         let mut init = RequestInit::new();

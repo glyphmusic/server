@@ -177,6 +177,16 @@ async fn try_preview(svc: &Services, want: &Track) -> Option<(Track, PlaybackSou
     Some((m, fresh.playback?, s))
 }
 
+/// Cache lifetime of an answer: full sources 30 days, previews (signed URLs)
+/// 5 minutes, misses 1 hour.
+fn ttl(resp: &ResolveResponse) -> u64 {
+    match &resp.source {
+        Some(PlaybackSource::Preview { .. }) => 5 * cache::MINUTE,
+        Some(_) => 30 * DAY,
+        None => HOUR,
+    }
+}
+
 pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let want = &req.track;
     let prio = effective_priority(&req.priority);
@@ -185,7 +195,13 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         if matches!(hit.source, Some(PlaybackSource::Preview { .. })) {
             // A preview is a temporary fallback, never a successful full-source
             // mapping. Retry full providers before refreshing its signed URL.
-            for p in &prio {
+            let remote = svc.cmds.resolve(&req).await;
+            if let Some(remote) = remote.as_ref().filter(|r| r.source.is_some()) {
+                cache::put_json(&*svc.cache, &key, remote, ttl(remote)).await;
+                return remote.clone();
+            }
+            // The companion already searched every provider without luck.
+            for p in prio.iter().filter(|_| remote.is_none()) {
                 if let Some((m, pb, c)) = try_provider(svc, *p, want).await {
                     let upgraded = ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None };
                     cache::put_json(&*svc.cache, &key, &upgraded, 30 * DAY).await;
@@ -207,6 +223,10 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         }
     }
 
+    if let Some(remote) = svc.cmds.resolve(&req).await {
+        cache::put_json(&*svc.cache, &key, &remote, ttl(&remote)).await;
+        return remote;
+    }
     let mut found = None;
     for p in &prio {
         if let Some(r) = try_provider(svc, *p, want).await {
@@ -243,6 +263,35 @@ mod tests {
 
     fn cand(id: &str, title: &str, artist: &str, secs: u64) -> Candidate {
         Candidate { track: track(id, YouTube, title, artist, secs), bonus: 0.0, playback: None }
+    }
+
+    /// Companion that answers every resolve with one fixed match.
+    struct Companion(std::sync::Mutex<usize>);
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::traits::CommandRunner for Companion {
+        async fn run(&self, _: &str, _: &[String], _: u64) -> Result<Vec<u8>, crate::traits::CommandError> {
+            Err(crate::traits::CommandError::Unavailable)
+        }
+        async fn resolve(&self, req: &ResolveRequest) -> Option<ResolveResponse> {
+            *self.0.lock().unwrap() += 1;
+            let m = track("yt1", YouTube, &req.track.title, &req.track.artist, 369);
+            Some(ResolveResponse { matched: Some(m), source: Some(providers::youtube::playback("yt1")), confidence: 0.9, youtube_hint: None })
+        }
+    }
+
+    #[test]
+    fn misses_are_resolved_on_the_companion_and_cached() {
+        let h = harness(all_secrets());
+        let companion = std::sync::Arc::new(Companion(Default::default()));
+        let svc = Services { http: h.svc.http.clone(), cache: h.svc.cache.clone(), limiter: h.svc.limiter.clone(), rt: h.svc.rt.clone(), cmds: companion.clone(), config: h.svc.config.clone() };
+        let req = || ResolveRequest { track: want(), priority: vec![] };
+        let first = block_on(resolve(&svc, req()));
+        assert_eq!(first.matched.unwrap().id, "yt1");
+        // No provider was asked here; the second call is a cache hit.
+        assert_eq!(h.http.call_count("http"), 0);
+        block_on(resolve(&svc, req()));
+        assert_eq!(*companion.0.lock().unwrap(), 1);
     }
 
     #[test]
