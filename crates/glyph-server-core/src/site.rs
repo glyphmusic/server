@@ -12,7 +12,7 @@ pub const BASE_CSS: &str = include_str!("site/base.css");
 /// `glyphNote(canvas, rowH)`: the app's splash animation.
 pub const NOTE_JS: &str = include_str!("site/note.js");
 /// The app icon, shown next to the brand name.
-const ICON_PNG: &[u8] = include_bytes!("../../../../glyph/assets/icons/icon-64.png");
+const ICON_PNG: &[u8] = include_bytes!("site/icon-64.png");
 
 /// `url(data:...)` of the app icon for CSS.
 pub fn icon_css_url() -> String {
@@ -42,9 +42,9 @@ const FILES: &[(&str, &str, u32, &[u8])] = &[
     ("/.well-known/security.txt", "text/plain; charset=utf-8", 86400, include_bytes!("site/security.txt")),
     ("/site.webmanifest", "application/manifest+json", 86400, include_bytes!("site/site.webmanifest")),
     ("/og.png", "image/png", 86400, include_bytes!("site/og.png")),
-    ("/favicon.ico", "image/x-icon", 604800, include_bytes!("../../../../glyph/assets/icons/glyph.ico")),
-    ("/icon.png", "image/png", 604800, include_bytes!("../../../../glyph/assets/icons/icon-512.png")),
-    ("/apple-touch-icon.png", "image/png", 604800, include_bytes!("../../../../glyph/assets/icons/icon-256.png")),
+    ("/favicon.ico", "image/x-icon", 604800, include_bytes!("site/glyph.ico")),
+    ("/icon.png", "image/png", 604800, include_bytes!("site/icon-512.png")),
+    ("/apple-touch-icon.png", "image/png", 604800, include_bytes!("site/icon-256.png")),
 ];
 
 fn file(path: &str) -> Option<&'static (&'static str, &'static str, u32, &'static [u8])> {
