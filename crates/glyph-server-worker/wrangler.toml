@@ -7,11 +7,22 @@ compatibility_date = "2025-01-01"
 workers_dev = true
 # glyph.my: the landing page (/) and short playlist links (/p/*,
 # SHARE_ORIGIN below). Needs a proxied DNS record for
-# glyph.my; every other path on glyph.my is left alone.
+# glyph.my; the site pages and embedded assets must all reach this Worker.
 routes = [
   { pattern = "api.glyph.my", custom_domain = true },
   { pattern = "glyph.my/", zone_name = "glyph.my" },
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
+  { pattern = "glyph.my/download*", zone_name = "glyph.my" },
+  { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
+  { pattern = "glyph.my/favicon.ico", zone_name = "glyph.my" },
+  { pattern = "glyph.my/icon.png", zone_name = "glyph.my" },
+  { pattern = "glyph.my/apple-touch-icon.png", zone_name = "glyph.my" },
+  { pattern = "glyph.my/site.webmanifest", zone_name = "glyph.my" },
+  { pattern = "glyph.my/og.png", zone_name = "glyph.my" },
+  { pattern = "glyph.my/robots.txt", zone_name = "glyph.my" },
+  { pattern = "glyph.my/sitemap.xml", zone_name = "glyph.my" },
+  { pattern = "glyph.my/llms.txt", zone_name = "glyph.my" },
+  { pattern = "glyph.my/.well-known/security.txt", zone_name = "glyph.my" },
 ]
 
 # Keep production diagnostics in sync with the Cloudflare dashboard.
