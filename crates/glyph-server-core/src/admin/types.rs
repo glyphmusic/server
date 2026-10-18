@@ -123,10 +123,15 @@ pub struct Limits {
     /// Days companion audio stays in R2 (Worker only).
     #[serde(default = "audio_days")]
     pub audio_cache_days: u32,
-    /// Max GB of companion audio in R2; the oldest songs go first (Worker only).
+    /// Total R2 GB ceiling including protected uploads; evicts cold caches only.
     #[serde(default = "audio_gb")]
     pub audio_cache_max_gb: u32,
+    /// Independent D1 database ceiling in decimal MB (Worker only).
+    #[serde(default = "d1_mb")]
+    pub d1_max_mb: u32,
 }
+
+fn d1_mb() -> u32 { 500 }
 
 fn enabled() -> bool {
     true

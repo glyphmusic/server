@@ -4,7 +4,7 @@
 bind = "0.0.0.0:8787"
 # cache_dir = "cache"            # optional disk cache for long-lived entries
 cache_entries = 10000
-trust_proxy = false              # true behind a reverse proxy (reads X-Forwarded-For)
+trust_proxy = false              # true behind a loopback reverse proxy that overwrites forwarded headers
 rate_limit_per_min = 60
 youtube_daily_budget_units = 9000   # playlist import only; search uses yt-dlp
 # ytdlp_path = "/usr/bin/yt-dlp"    # YouTube search + audio; found in PATH when unset

@@ -63,9 +63,12 @@ pub enum RemoteCmd {
         /// Days companion audio stays in R2 (Worker)
         #[arg(long)]
         audio_days: Option<u32>,
-        /// Max GB of companion audio in R2 (Worker)
-        #[arg(long)]
+        /// Total R2 storage ceiling in GB (Worker)
+        #[arg(long = "r2-max-gb", visible_alias = "audio-max-gb")]
         audio_max_gb: Option<u32>,
+        /// Independent D1 database ceiling in MB (Worker)
+        #[arg(long)]
+        d1_max_mb: Option<u32>,
     },
     /// Switch the yt-dlp companion (YouTube) on or off; no argument shows it
     Companion {
@@ -429,10 +432,11 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { rate, youtube_budget, import_pages, audio_days, audio_max_gb } => {
+        RemoteCmd::Limits { rate, youtube_budget, import_pages, audio_days, audio_max_gb, d1_max_mb } => {
             let c = Client::connect(a.server).await?;
             let mut l: Limits = c.get("limits").await?;
-            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() {
+            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() || d1_max_mb.is_some() {
+                if let Some(v) = d1_max_mb { l.d1_max_mb = v; }
                 if let Some(v) = audio_days {
                     l.audio_cache_days = v;
                 }
@@ -456,7 +460,10 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             println!("Pages per playlist import       {}", l.import_max_pages);
             println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
             println!("Companion audio in R2 (days)    {}", l.audio_cache_days);
-            println!("Companion audio in R2 (max GB)  {}", l.audio_cache_max_gb);
+            println!("R2 total ceiling (GB)          {}", l.audio_cache_max_gb);
+            println!("R2 working target (GB)         {:.3}", f64::from(l.audio_cache_max_gb) - 0.5);
+            println!("D1 database ceiling (MB)       {}", l.d1_max_mb);
+            println!("D1 working target (MB)         {}", l.d1_max_mb - 50.min(l.d1_max_mb/10));
             Ok(())
         }
         RemoteCmd::Companion { cmd } => {
@@ -564,6 +571,22 @@ fn print_account(a: &AdminAccount) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_limits_have_independent_cli_flags_and_legacy_alias() {
+        use clap::Parser;
+        #[derive(Parser)] struct TestCli { #[command(flatten)] remote: super::RemoteArgs }
+        for flag in ["--r2-max-gb", "--audio-max-gb"] {
+            let args = TestCli::try_parse_from(["test", "limits", "--d1-max-mb", "250", flag, "20"]).unwrap();
+            match args.remote.cmd {
+                super::RemoteCmd::Limits { d1_max_mb, audio_max_gb, .. } => {
+                    assert_eq!(d1_max_mb, Some(250));
+                    assert_eq!(audio_max_gb, Some(20));
+                }
+                _ => panic!("wrong command"),
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -58,7 +58,7 @@ pub type PResult<T> = Result<T, ProviderError>;
 
 pub(crate) fn user_agent(svc: &Services) -> String {
     format!(
-        "glyph-server/{} (+https://github.com/glyphmusic/glyph-server)",
+        "glyph-server/{} (+https://github.com/glyphmusic/server)",
         svc.config.server_version
     )
 }
@@ -72,6 +72,18 @@ pub(crate) fn build_url(base: &str, params: &[(&str, &str)]) -> String {
 }
 
 pub(crate) async fn fetch(svc: &Services, req: HttpRequest) -> PResult<Vec<u8>> {
+    if let Ok(url) = url::Url::parse(&req.url) {
+        if url.host_str() == Some("www.googleapis.com") && url.path().starts_with("/youtube/v3/") {
+            // All currently used Data API read endpoints cost one unit.
+            if !matches!(url.path(), "/youtube/v3/videos" | "/youtube/v3/playlists" | "/youtube/v3/playlistItems") {
+                return Err(ProviderError::Quota);
+            }
+            let day = svc.rt.now_ms() / 86_400_000;
+            let limit = svc.config.youtube_daily_budget_units.min(u64::from(u32::MAX)) as u32;
+            if matches!(svc.limiter.check(&format!("youtube:budget:{day}"), limit, 86_400).await,
+                crate::RateDecision::Limited { .. }) { return Err(ProviderError::Quota); }
+        }
+    }
     let req = req.header("user-agent", user_agent(svc));
     let resp = svc.http.send(req).await.map_err(|_| ProviderError::Network)?;
     match resp.status {
@@ -186,4 +198,28 @@ pub(crate) fn de_u64_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<O
         N::S(s) => s.trim().parse::<f64>().ok().filter(|v| *v >= 0.0).map(|v| v as u64),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::testutil::*;
+    use futures::executor::block_on;
+    #[test]
+    fn all_youtube_api_reads_share_a_budget_before_outbound_requests() {
+        let mut h = harness(all_secrets());
+        std::sync::Arc::get_mut(&mut h.svc).unwrap().config.youtube_daily_budget_units = 2;
+        h.http.on("googleapis", 200, "{}");
+        block_on(async {
+            for endpoint in ["videos", "playlists"] {
+                assert!(fetch(&h.svc, HttpRequest::get(format!("https://www.googleapis.com/youtube/v3/{endpoint}"))).await.is_ok());
+            }
+            assert_eq!(fetch(&h.svc, HttpRequest::get("https://www.googleapis.com/youtube/v3/playlistItems")).await, Err(ProviderError::Quota));
+            assert_eq!(h.http.call_count("googleapis"), 2);
+            h.rt.advance(86_400_000);
+            assert!(fetch(&h.svc, HttpRequest::get("https://www.googleapis.com/youtube/v3/playlistItems")).await.is_ok());
+            assert_eq!(fetch(&h.svc, HttpRequest::get("https://www.googleapis.com/youtube/v3/search")).await, Err(ProviderError::Quota));
+            assert_eq!(h.http.call_count("googleapis"), 3);
+        });
+    }
 }

@@ -14,7 +14,7 @@ use crate::cache;
 use crate::config::{mask_secret, KEY_NAMES};
 use crate::error::ApiErr;
 use crate::search::is_skipped;
-use crate::server::{parse_body, rate_limit, Request, Response, Server};
+use crate::server::{parse_body, Request, Response, Server};
 use crate::traits::{Method, RateDecision, Services};
 use auth::{ACCESS_TTL_S, REFRESH_TTL_S};
 use glyph_protocol::{ApiError, ProviderId, PROTOCOL_VERSION};
@@ -100,6 +100,7 @@ fn limits_of(svc: &Services) -> Limits {
         companion_enabled: svc.config.companion_enabled,
         audio_cache_days: svc.config.audio_cache_days,
         audio_cache_max_gb: svc.config.audio_cache_max_gb,
+        d1_max_mb: svc.config.d1_max_mb,
     }
 }
 
@@ -132,7 +133,6 @@ impl Server {
                 "the admin API is only available over HTTPS (or from this machine)",
             ));
         }
-        rate_limit(svc, &req).await?;
         let key = auth::token_key(&hash);
         let now = svc.rt.now_ms();
 
@@ -257,6 +257,9 @@ impl Server {
                 if !(1..=1000).contains(&l.audio_cache_max_gb) {
                     return Err(ApiErr::bad_request("audio_cache_max_gb must be between 1 and 1000"));
                 }
+                if !(64..=4_000).contains(&l.d1_max_mb) {
+                    return Err(ApiErr::bad_request("d1_max_mb must be between 64 and 4000; provider plan limits still apply"));
+                }
                 self.host.persist_limits(&l).await.map_err(host_err)?;
                 self.update_config(|c| {
                     c.rate_limit_per_min = l.rate_limit_per_min;
@@ -265,6 +268,7 @@ impl Server {
                     c.companion_enabled = l.companion_enabled;
                     c.audio_cache_days = l.audio_cache_days;
                     c.audio_cache_max_gb = l.audio_cache_max_gb;
+                    c.d1_max_mb = l.d1_max_mb;
                 });
                 Ok(Response::json(200, &l))
             }
@@ -310,7 +314,7 @@ impl Server {
             }
         }
         if let RateDecision::Limited { retry_after_s } =
-            svc.limiter.check(&format!("admin-login:{who}"), LOGIN_PER_MIN, 60).await
+            svc.limiter.check_admin(&format!("admin-login:{who}"), LOGIN_PER_MIN, 60).await
         {
             return Err(ApiErr::rate_limited(retry_after_s));
         }

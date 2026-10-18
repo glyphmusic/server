@@ -151,6 +151,7 @@ fn route(path: &str) -> Option<(Route, Method)> {
 
 #[derive(Clone)]
 pub struct Server {
+    queue: Arc<crate::admission::Queue>,
     /// Current services; replaced (not mutated) when admin changes the config.
     svc: Arc<RwLock<Arc<Services>>>,
     pub(crate) host: Arc<dyn AdminHost>,
@@ -164,7 +165,7 @@ impl Server {
     }
 
     pub fn from_arc(svc: Arc<Services>) -> Self {
-        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost), accounts: None }
+        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost), accounts: None, queue: crate::admission::new_queue() }
     }
 
     pub fn with_host(mut self, host: Arc<dyn AdminHost>) -> Self {
@@ -199,13 +200,29 @@ impl Server {
     }
 
     pub async fn handle(&self, req: Request) -> Response {
+        if req.path.starts_with("/admin/v1") {
+            if let Err(response) = self.check_access(&req) { return response; }
+            let svc = self.services();
+            let ip = req.client_ip.as_deref().unwrap_or("unknown");
+            if let RateDecision::Limited { retry_after_s } = svc.limiter.check_admin(&format!("admin-request:{ip}"), 120, 60).await {
+                return Response::error(ApiErr::rate_limited(retry_after_s));
+            }
+            // handle_admin still validates the admin password/session. Its
+            // limiter avoids D1 so administrators can raise a full DB's cap.
+            return self.handle_admin(&svc, req).await;
+        }
+        // Includes unknown routes and account endpoints, before authentication
+        // storage lookups. Health remains available for liveness probes.
+        let member = if req.path != "/v1/health" && req.method != Method::Options {
+            match self.admit(&req, false).await {
+                Ok(member) => member,
+                Err(e) => return Response::error(e),
+            }
+        } else { false };
         if let Err(response) = self.check_access(&req) { return response; }
         let svc = self.services();
         if req.path == "/v1/access" && req.method == Method::Get {
             return Response::json(200, &serde_json::json!({"ok": true}));
-        }
-        if req.path.starts_with("/admin/v1") {
-            return self.handle_admin(&svc, req).await;
         }
         if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
             return acc.handle(&svc, req).await;
@@ -224,40 +241,80 @@ impl Server {
             r.headers.push(("allow".into(), if method == Method::Get { "GET" } else { "POST" }.into()));
             return r;
         }
-        if route != Route::Health {
-            if let Err(e) = rate_limit(&svc, &req).await {
-                return Response::error(e);
+        let permit = if route != Route::Health {
+            match crate::traits::with_timeout(&*svc.rt, 15_000, self.queue.enter(member)).await {
+                Some(Ok(p)) => Some(p),
+                Some(Err(e)) => return Response::error(e),
+                None => {
+                    let mut e = ApiErr::unavailable("queue wait timed out; retry later");
+                    e.body.retry_after_s = Some(2);
+                    return Response::error(e);
+                }
             }
-        }
+        } else { None };
         let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.blobs.is_some()));
         match dispatch(&svc, route, req, features).await {
-            Ok(r) => r,
+            Ok(mut r) => {
+                if let Body::Stream(stream) = r.body {
+                    r.body = Body::Stream(boxed_stream(futures::stream::unfold((stream, permit), |(mut stream, permit)| async move {
+                        stream.next().await.map(|chunk| (chunk, (stream, permit)))
+                    })));
+                }
+                r
+            },
             Err(e) => Response::error(e),
+        }
+    }
+
+    /// Shared by metadata and host-owned media routes. No client trust flags.
+    pub async fn admit(&self, req: &Request, media: bool) -> Result<bool, ApiErr> {
+        let svc = self.services();
+        let ip = req.client_ip.as_deref().unwrap_or("unknown");
+        let ip_key = format!("ip:{ip}");
+        check_ban(&svc, &ip_key).await?;
+        let namespace = if media { "media" } else { "api" };
+        let base = svc.config.rate_limit_per_min.max(1).saturating_mul(if media { 20 } else { 1 });
+        // Fixed IP ceiling: adding or rotating an install ID never raises it.
+        check_quota(&svc, &format!("{namespace}:{ip_key}"), &ip_key, base.saturating_mul(8)).await?;
+        let identity = match &self.accounts {
+            Some(a) => a.abuse_identity(&svc, req).await,
+            None => None,
+        };
+        if let Some((user, device)) = identity {
+            for key in [format!("user:{user}"), format!("device:{device}")] {
+                check_ban(&svc, &key).await?;
+                check_quota(&svc, &format!("{namespace}:{key}"), &key, base.saturating_mul(4)).await?;
+            }
+            Ok(true)
+        } else {
+            check_quota(&svc, &format!("{namespace}:guest:{ip}"), &ip_key, base).await?;
+            if let Some(id) = req.header(INSTALL_ID_HEADER).filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
+                let key = format!("install:{id}");
+                check_ban(&svc, &key).await?;
+                check_quota(&svc, &format!("{namespace}:{key}"), &key, base).await?;
+            }
+            Ok(false)
         }
     }
 }
 
-/// Per install id (`limit`/min) and per IP (4x, since NATs share one).
-pub async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(), ApiErr> {
-    {
-        let limit = svc.config.rate_limit_per_min.max(1);
-        let mut checks: Vec<(String, u32)> = Vec::new();
-        if let Some(id) = req.header(INSTALL_ID_HEADER) {
-            let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-            if ok {
-                checks.push((format!("id:{id}"), limit));
-            }
-        }
-        let ip = req.client_ip.as_deref().unwrap_or("unknown");
-        let ip_limit = if checks.is_empty() { limit } else { limit.saturating_mul(4) };
-        checks.push((format!("ip:{ip}"), ip_limit));
-        for (key, lim) in checks {
-            if let RateDecision::Limited { retry_after_s } = svc.limiter.check(&key, lim, 60).await {
-                return Err(ApiErr::rate_limited(retry_after_s));
-            }
-        }
-        Ok(())
+async fn check_ban(svc: &Services, key: &str) -> Result<(), ApiErr> {
+    if let Some(retry) = svc.limiter.blocked(key).await {
+        let mut e = ApiErr::rate_limited(retry);
+        e.body.code = "temporarily_blocked".into();
+        e.body.message = "temporary abuse protection; retry later".into();
+        return Err(e);
     }
+    Ok(())
+}
+
+async fn check_quota(svc: &Services, key: &str, principal: &str, limit: u32) -> Result<(), ApiErr> {
+    if let RateDecision::Limited { retry_after_s } = svc.limiter.check(key, limit, 60).await {
+        svc.limiter.penalize(principal).await;
+        check_ban(svc, principal).await?;
+        return Err(ApiErr::rate_limited(retry_after_s));
+    }
+    Ok(())
 }
 
 /// Cover art for `track`: its own, else Deezer by ISRC, else a Deezer search hit.
@@ -515,8 +572,8 @@ mod tests {
         assert_eq!(v["code"], "rate_limited");
         assert!(v["retry_after_s"].as_u64().unwrap() >= 1);
         assert!(r.headers.iter().any(|(k, _)| k == "retry-after"));
-        // Another install id behind the same IP is still fine (IP limit is 4x).
-        assert_eq!(block_on(s.handle(with_id("other"))).status, 400);
+        // Rotating an untrusted install ID does not bypass the guest IP quota.
+        assert_eq!(block_on(s.handle(with_id("other"))).status, 429);
         // Health is never rate limited.
         for _ in 0..20 {
             assert_eq!(block_on(s.handle(get("/v1/health"))).status, 200);
@@ -524,6 +581,38 @@ mod tests {
         // Window passes -> allowed again.
         h.rt.advance(61_000);
         assert_eq!(block_on(s.handle(with_id("abc"))).status, 400);
+    }
+
+    #[test]
+    fn repeated_abuse_bans_ip_across_media_and_metadata_then_expires() {
+        let h = harness(Default::default());
+        let s = server(&h);
+        s.update_config(|c| c.rate_limit_per_min = 1);
+        let req = Request::new(Method::Get, "/v1/lyrics", vec![], vec![], Some("abusive".into()));
+        block_on(async {
+            assert!(!s.admit(&req, false).await.unwrap());
+            for _ in 0..12 { assert!(s.admit(&req, false).await.is_err()); }
+            let e = s.admit(&req, true).await.unwrap_err();
+            assert_eq!(e.body.code, "temporarily_blocked");
+            assert_eq!(e.body.retry_after_s, Some(900));
+            let other = Request::new(Method::Get, "/v1/lyrics", vec![], vec![], Some("innocent".into()));
+            assert!(!s.admit(&other, false).await.unwrap());
+            h.rt.advance(900_000);
+            assert!(!s.admit(&req, false).await.unwrap());
+        });
+    }
+
+    #[test]
+    fn unconsumed_search_stream_holds_slot_until_disconnect() {
+        use futures::FutureExt;
+        let h = harness(Default::default());
+        let s = server(&h);
+        let mut responses: Vec<_> = (0..8).map(|_| block_on(s.handle(get("/v1/search?q=hello")))).collect();
+        assert!(responses.iter().all(|r| r.status == 200));
+        let mut waiting = Box::pin(s.handle(get("/v1/search?q=hello")));
+        assert!(waiting.as_mut().now_or_never().is_none());
+        drop(responses.pop());
+        assert_eq!(waiting.as_mut().now_or_never().unwrap().status, 200);
     }
 
     #[test]

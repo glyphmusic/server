@@ -9,9 +9,11 @@
 //! audio; the Worker returns relative media references to clients.
 
 pub mod access;
+mod admission;
 pub mod accounts;
 pub mod admin;
 pub mod cache;
+pub mod chunks;
 pub mod config;
 pub mod error;
 pub mod hints;

@@ -338,7 +338,7 @@ pub mod win {
                     t
                 }
             })?;
-        let _ = svc.set_description("Glyph metadata server (https://github.com/glyphmusic/glyph-server)");
+        let _ = svc.set_description("Glyph metadata server (https://github.com/glyphmusic/server)");
         svc.start::<OsString>(&[]).map_err(|e| format!("installed, but could not start: {e}"))?;
         println!("Windows service \"{WINDOWS_SERVICE}\" installed and started (starts automatically at boot).");
         Ok(())

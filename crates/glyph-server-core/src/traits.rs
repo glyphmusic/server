@@ -146,6 +146,14 @@ pub enum RateDecision {
 pub trait RateLimiter: MaybeSendSync {
     /// Count one hit for `key`; allow at most `limit` hits per `window_s`.
     async fn check(&self, key: &str, limit: u32, window_s: u64) -> RateDecision;
+    /// Administrative recovery must remain usable when database growth stops.
+    async fn check_admin(&self, key: &str, limit: u32, window_s: u64) -> RateDecision {
+        self.check(key, limit, window_s).await
+    }
+    /// Read a temporary abuse lockout without extending it.
+    async fn blocked(&self, key: &str) -> Option<u64>;
+    /// Record a rejected request; repeated violations trigger a temporary ban.
+    async fn penalize(&self, key: &str);
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

@@ -175,7 +175,9 @@ pub fn transport(headers: &HeaderMap, peer: SocketAddr, trust_proxy: bool, tls: 
     let local = peer.ip().is_loopback() && !via_proxy;
     let mut secure = tls;
     let mut ip = peer.ip().to_string();
-    if trust_proxy {
+    // The compatibility switch trusts only a local reverse proxy. A direct
+    // remote caller must never select its own IP or claim HTTPS.
+    if trust_proxy && peer.ip().is_loopback() {
         if let Some(v) = hv(headers, "cf-connecting-ip").or_else(|| hv(headers, "x-real-ip")) {
             ip = v.trim().to_string();
         } else if let Some(first) = hv(headers, "x-forwarded-for").and_then(|v| v.split(',').next()) {
@@ -189,6 +191,7 @@ pub fn transport(headers: &HeaderMap, peer: SocketAddr, trust_proxy: bool, tls: 
             secure = true;
         }
     }
+    ip = ip.parse::<std::net::IpAddr>().unwrap_or(peer.ip()).to_string();
     (ip, secure, local)
 }
 
@@ -212,7 +215,7 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
         .collect();
     let method_s = req.method().to_string();
-    let body = match axum::body::to_bytes(req.into_body(), 128 * 1024).await {
+    let body = match axum::body::to_bytes(req.into_body(), glyph_server_core::server::max_body_bytes(&path_only)).await {
         Ok(b) => b.to_vec(),
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
@@ -231,7 +234,7 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     // Audio/cover streaming happens here, not in the core router (streamed bytes,
     // byte ranges and provider-side redirects).
     if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
-        return media(&st.server, &path_only, &headers, method, Some(ip)).await;
+        return media(&st.server, &target, &headers, method, Some(ip)).await;
     }
 
     let resp = st
@@ -291,23 +294,32 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
         return plain(StatusCode::METHOD_NOT_ALLOWED, "GET required");
     }
     let svc = server.services();
-    // Seeking makes many requests; audio gets the same limit with room to spare.
-    let key = format!("media:ip:{}", ip.as_deref().unwrap_or("unknown"));
-    if let glyph_server_core::RateDecision::Limited { retry_after_s } = svc
-        .limiter
-        .check(&key, svc.config.rate_limit_per_min.max(1).saturating_mul(20), 60)
-        .await
-    {
-        let mut out = plain(StatusCode::TOO_MANY_REQUESTS, "too many audio requests");
-        if let Ok(v) = HeaderValue::from_str(&retry_after_s.to_string()) {
-            out.headers_mut().insert("retry-after", v);
-        }
-        return out;
+    let request = Request::new(method, path, headers.to_vec(), vec![], ip);
+    if let Err(e) = server.admit(&request, true).await {
+        let r = glyph_server_core::Response::error(e);
+        let mut out = Response::builder().status(r.status);
+        for (k, v) in &r.headers { out = out.header(k.as_str(), v.as_str()); }
+        return out.body(Body::from(r.bytes().unwrap_or_default().to_vec())).unwrap();
     }
+    let path = path.split('?').next().unwrap_or(path);
     let is_download = path.starts_with("/v1/download/");
     let Some((provider, id)) = audio_target(path) else {
         return plain(StatusCode::BAD_REQUEST, "invalid audio path");
     };
+    if provider == glyph_protocol::ProviderId::YouTube && !is_download {
+        if let Some(raw) = request.query.get("quality") {
+            let Some(variant) = media::AudioVariant::parse(raw) else { return plain(StatusCode::BAD_REQUEST,"invalid audio quality"); };
+            // High already means the best original source. Keep standalone
+            // playback working without FFmpeg; lower bitrates need encoding.
+            if variant != media::AudioVariant::High {
+                let Ok(permit)=audio_slots().clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS,"busy, retry later"); };
+                let response=companion_variant(&svc,&id,variant,permit,false).await;
+                if response.status()!=StatusCode::OK {return response;}
+                let range=headers.iter().find(|(k,_)|k=="range").map(|(_,v)|v.as_str());
+                return slice_variant(response,range).await;
+            }
+        }
+    }
     let url = if is_download {
         match media::download_url(&svc, provider, &id).await {
             Ok(Some(u)) => u,
@@ -381,6 +393,13 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio upstream unavailable"),
     };
     let total = resp.content_length();
+    if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        match resp.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(glyph_server_core::media::content_range_total) {
+            Some(size) if size <= MAX_AUDIO_BYTES => {},
+            Some(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "full audio object exceeds size limit"),
+            None => return plain(StatusCode::BAD_GATEWAY, "invalid upstream content range"),
+        }
+    }
     if total.is_some_and(|n| n > MAX_AUDIO_BYTES) {
         return plain(StatusCode::PAYLOAD_TOO_LARGE, "audio too large");
     }
@@ -438,6 +457,11 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     let svc = server.services();
     if let Some(id) = path.strip_prefix("/internal/audio/") {
         if method != Method::Get || !glyph_server_core::media::valid_video_id(id) { return plain(StatusCode::BAD_REQUEST, "invalid video request"); }
+        if let Some((_, quality)) = headers.iter().find(|(k,_)| k == "x-glyph-audio-quality") {
+            let Some(variant) = glyph_server_core::media::AudioVariant::parse(quality) else { return plain(StatusCode::BAD_REQUEST, "invalid audio quality"); };
+            let background = headers.iter().any(|(k,v)| k == "x-glyph-audio-background" && v == "1");
+            return companion_variant(&svc, id, variant, _permit, background).await;
+        }
         let url = match glyph_server_core::media::audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {
             Ok(u) => u, Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio lookup failed"),
         };
@@ -457,6 +481,112 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         }
         _ => plain(StatusCode::BAD_GATEWAY, "yt-dlp failed"),
     }
+}
+
+type VariantCache = std::collections::VecDeque<(String,std::time::Instant,Bytes)>;
+fn variant_cache() -> &'static std::sync::Mutex<VariantCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<VariantCache>>=std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+fn variant_response(bytes:Bytes) -> Response {
+    Response::builder().header("content-type","audio/mp4").header("content-length",bytes.len())
+        .header("cache-control","no-store").header("accept-ranges","bytes").body(Body::from(bytes)).unwrap()
+}
+async fn slice_variant(response:Response,range:Option<&str>) -> Response {
+    let Some(range)=range else{return response;};
+    let Ok(bytes)=axum::body::to_bytes(response.into_body(),MAX_AUDIO_BYTES as usize).await else{return plain(StatusCode::BAD_GATEWAY,"audio unavailable");};
+    let total=bytes.len() as u64;
+    let Some((start,end))=glyph_server_core::media::byte_range(range,total) else {
+        return Response::builder().status(416).header("content-range",format!("bytes */{total}")).body(Body::empty()).unwrap();
+    };
+    let mut out=variant_response(bytes.slice(start as usize..=end as usize));
+    *out.status_mut()=StatusCode::PARTIAL_CONTENT;
+    out.headers_mut().insert("content-range",format!("bytes {start}-{end}/{total}").parse().unwrap());
+    out
+}
+
+/// The authenticated Worker selects a fixed, validated bitrate. Local files
+/// allow MP4 fast-start, so a client need not fetch the tail to begin playback.
+async fn companion_variant(svc: &Arc<Services>, id: &str, variant: glyph_server_core::media::AudioVariant, permit: tokio::sync::OwnedSemaphorePermit, background: bool) -> Response {
+    let cache_key=format!("{id}/{}",variant.name());
+    {
+        let mut cache=variant_cache().lock().unwrap();
+        cache.retain(|(_,at,_)|at.elapsed()<std::time::Duration::from_secs(600));
+        if let Some((_,_,bytes))=cache.iter().find(|(key,_,_)|key==&cache_key) {return variant_response(bytes.clone());}
+    }
+    static BACKGROUND: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _background = if background {
+        match BACKGROUND.get_or_init(|| tokio::sync::Semaphore::new(1)).try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS, "background encoder busy"),
+        }
+    } else { None };
+    static ENCODERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let Ok(_encoder) = ENCODERS.get_or_init(|| tokio::sync::Semaphore::new(2)).try_acquire() else {
+        return plain(StatusCode::TOO_MANY_REQUESTS, "audio encoder busy; retry later");
+    };
+    let url = match glyph_server_core::media::audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
+        Ok(url) => url, Err(_) => return plain(StatusCode::BAD_GATEWAY,"audio lookup failed"),
+    };
+    let mut slot = Some(permit);
+    let response = fetch_upstream_audio(&url, None, &mut slot).await;
+    let response = retry_stale_youtube(svc, id, None, response, &mut slot).await;
+    if response.status() != StatusCode::OK { return response; }
+    let bytes = match axum::body::to_bytes(response.into_body(), MAX_AUDIO_BYTES as usize).await {
+        Ok(bytes) => bytes, Err(_) => return plain(StatusCode::BAD_GATEWAY,"audio source exceeds size limit"),
+    };
+    // Force a known demuxer rather than allowing playlist auto-detection to
+    // introduce arbitrary network URLs or local file references.
+    let input_format = if bytes.get(4..8) == Some(b"ftyp") { "mov" }
+        else if bytes.starts_with(b"OggS") { "ogg" }
+        else if bytes.starts_with(&[0x1a,0x45,0xdf,0xa3]) { "matroska" }
+        else { return plain(StatusCode::BAD_GATEWAY,"unsupported audio container"); };
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir, Err(_) => return plain(StatusCode::SERVICE_UNAVAILABLE,"audio workspace unavailable"),
+    };
+    let input = dir.path().join("source.audio");
+    let output = dir.path().join("variant.m4a");
+    if tokio::fs::write(&input, &bytes).await.is_err() { return plain(StatusCode::SERVICE_UNAVAILABLE,"audio workspace unavailable"); }
+    let ffmpeg = std::env::var("GLYPH_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
+    let mut command = tokio::process::Command::new(ffmpeg);
+    command.args(["-nostdin","-hide_banner","-loglevel","error","-y","-protocol_whitelist","file,pipe","-f",input_format,"-i"])
+        .arg(&input).args(["-map","0:a:0","-vn"]);
+    if variant == glyph_server_core::media::AudioVariant::High && input_format == "mov" {
+        // Keep the best source AAC rather than introducing another lossy encode.
+        command.args(["-c:a","copy"]);
+    } else {
+        command.args(["-ac","2","-ar","44100","-c:a","aac","-b:a"])
+            .arg(format!("{}k",variant.bitrate()));
+    }
+    command.args(["-threads","1","-movflags","+faststart","-fs","33488896"])
+        .arg(&output).kill_on_drop(true)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let mut child = match command.spawn() {
+        Ok(child) => child, Err(_) => return plain(StatusCode::SERVICE_UNAVAILABLE,"ffmpeg is required for audio quality variants"),
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(45),child.wait()).await {
+        Ok(Ok(status)) if status.success() => {},
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return plain(StatusCode::BAD_GATEWAY,"audio encoding failed or timed out");
+        }
+    }
+    let size = tokio::fs::metadata(&output).await.map(|m|m.len()).unwrap_or(0);
+    // ffmpeg's size cap may stop a long input early. Never advertise that
+    // truncated output as a complete song; leave margin for its final MP4 atoms.
+    if size == 0 || size >= 33_480_000 { return plain(StatusCode::PAYLOAD_TOO_LARGE,"encoded audio exceeds size limit"); }
+    let bytes = match tokio::fs::read(&output).await {
+        Ok(bytes) => bytes, Err(_) => return plain(StatusCode::BAD_GATEWAY,"encoded audio unavailable"),
+    };
+    let bytes=Bytes::from(bytes);
+    {
+        let mut cache=variant_cache().lock().unwrap();
+        cache.retain(|(key,_,_)|key!=&cache_key);
+        while cache.len()>=8 || cache.iter().map(|(_,_,v)|v.len()).sum::<usize>()+bytes.len()>64*1024*1024 {if cache.pop_front().is_none(){break;}}
+        cache.push_back((cache_key,std::time::Instant::now(),bytes.clone()));
+    }
+    variant_response(bytes)
 }
 
 fn plain(status: StatusCode, msg: &str) -> Response {
@@ -550,6 +680,9 @@ mod tests {
         let remote: SocketAddr = "203.0.113.7:5000".parse().unwrap();
         let h = headers(&[("x-forwarded-for", "1.1.1.1"), ("x-forwarded-proto", "https")]);
         assert_eq!(transport(&h, remote, false, false), ("203.0.113.7".into(), false, false));
+        assert_eq!(transport(&h, remote, true, false), ("203.0.113.7".into(), false, false));
+        let invalid = headers(&[("x-forwarded-for", "not-an-ip")]);
+        assert_eq!(transport(&invalid, "127.0.0.1:1".parse().unwrap(), true, false).0, "127.0.0.1");
         // direct TLS counts as secure
         assert!(transport(&headers(&[]), remote, false, true).1);
         // cloudflare tunnel
@@ -557,4 +690,16 @@ mod tests {
         let (ip, secure, local) = transport(&cf, "127.0.0.1:1".parse().unwrap(), true, false);
         assert_eq!((ip.as_str(), secure, local), ("9.9.9.9", true, false));
     }
+    #[tokio::test]
+    async fn encoded_variant_ranges_use_the_selected_representation() {
+        let response=slice_variant(variant_response(Bytes::from_static(b"abcdefghij")),Some("bytes=3-5")).await;
+        assert_eq!(response.status(),StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-range"],"bytes 3-5/10");
+        assert_eq!(response.headers()["content-length"],"3");
+        assert_eq!(axum::body::to_bytes(response.into_body(),100).await.unwrap(),Bytes::from_static(b"def"));
+        let response=slice_variant(variant_response(Bytes::from_static(b"abc")),Some("bytes=9-10")).await;
+        assert_eq!(response.status(),StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()["content-range"],"bytes */3");
+    }
+
 }

@@ -53,6 +53,9 @@ impl AdminHost for NativeHost {
     }
 
     async fn persist_limits(&self, l: &Limits) -> Result<(), HostError> {
+        if l.audio_cache_days != 15 || l.audio_cache_max_gb != 10 || l.d1_max_mb != 500 {
+            return Err(HostError::Unsupported("D1/R2 storage limits are Worker-only; this native server does not store audio".into()));
+        }
         let mut cfg = load_file(&self.config_path, false).map_err(HostError::Failed)?;
         cfg.rate_limit_per_min = Some(l.rate_limit_per_min);
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
@@ -97,11 +100,11 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, audio_cache_days: 15, audio_cache_max_gb: 10 })
+        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(host.companion_flag.exists());
-        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, audio_cache_days: 15, audio_cache_max_gb: 10 })
+        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(!host.companion_flag.exists());

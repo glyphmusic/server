@@ -309,6 +309,13 @@ fn limits_get_set_and_validate() {
     assert!(!t.server.services().config.companion_enabled);
     let (_, v, _) = call(&t, req(Method::Get, "/admin/v1/limits", "", tok));
     assert_eq!(v["companion_enabled"], false);
+    let separate = r#"{"rate_limit_per_min":30,"youtube_daily_budget_units":5000,"import_max_pages":3,"audio_cache_max_gb":20,"d1_max_mb":250}"#;
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", separate, tok)).0, 200);
+    assert_eq!(t.server.services().config.audio_cache_max_gb, 20);
+    assert_eq!(t.server.services().config.d1_max_mb, 250);
+    let invalid = separate.replace("\"d1_max_mb\":250", "\"d1_max_mb\":0");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &invalid, tok)).0, 400);
+    assert_eq!(t.server.services().config.d1_max_mb, 250);
 }
 
 #[test]

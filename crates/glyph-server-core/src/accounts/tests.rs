@@ -11,6 +11,44 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const ORIGIN: &str = "https://glyph.example";
 const RP: &str = "glyph.example";
 
+#[test]
+fn abuse_privileges_require_live_sessions_and_account_quotas_survive_ip_changes() {
+    let t = setup();
+    let (session, _, _) = sign_up(&t, "abuse_test");
+    t.s.update_config(|c| c.rate_limit_per_min = 2);
+    t.h.rt.advance(61_000);
+    let req = |token: &str, ip: &str| Request::new(Method::Get, "/v1/lyrics",
+        vec![("authorization".into(), format!("Bearer {token}")), (glyph_protocol::INSTALL_ID_HEADER.into(), "fake-device".into())],
+        vec![], Some(ip.into()));
+    block_on(async {
+        // Unverified bearer and device headers grant no privileges.
+        assert!(!t.s.admit(&req("forged", "guest"), false).await.unwrap());
+        assert!(!t.s.admit(&req("forged", "guest"), false).await.unwrap());
+        assert_eq!(t.s.admit(&req("forged", "guest"), false).await.unwrap_err().status, 429);
+        for i in 0..8 {
+            assert!(t.s.admit(&req(&session.access_token, &format!("member-{i}")), false).await.unwrap());
+        }
+        assert_eq!(t.s.admit(&req(&session.access_token, "another-ip"), false).await.unwrap_err().status, 429);
+        let accounts = t.s.accounts.as_ref().unwrap();
+        assert!(accounts.abuse_identity(&t.s.services(), &req(&session.access_token, "ip")).await.is_some());
+        t.h.rt.advance(ACCESS_TTL);
+        assert!(accounts.abuse_identity(&t.s.services(), &req(&session.access_token, "ip")).await.is_none());
+    });
+}
+
+#[test]
+fn revoked_device_immediately_loses_abuse_privileges() {
+    let t = setup();
+    let (session, _, _) = sign_up(&t, "revoked_test");
+    let req = Request::new(Method::Get, "/v1/lyrics", vec![("authorization".into(), format!("Bearer {}", session.access_token))], vec![], None);
+    block_on(async {
+        let accounts = t.s.accounts.as_ref().unwrap();
+        let (user, device) = accounts.abuse_identity(&t.s.services(), &req).await.unwrap();
+        accounts.store.delete_device(&user, &device).await.unwrap();
+        assert!(accounts.abuse_identity(&t.s.services(), &req).await.is_none());
+    });
+}
+
 /// Deterministic "randomness" for tests.
 #[derive(Default)]
 struct Counter(AtomicU64);

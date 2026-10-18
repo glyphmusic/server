@@ -100,7 +100,7 @@ is skipped for 10 minutes.
 Cloudflare free plan notes: 100,000 requests/day, 10 ms CPU per request, 50 subrequests per
 request (the playlist import is capped at `import_max_pages` = 5 pages for that reason) and
 1,000 KV writes/day. To stay inside the KV limit only long-lived entries (resolver mappings,
-lyrics, 1 h or more) are written to KV; everything else, rate-limit counters included, uses
+lyrics, 1 h or more) are written to KV; short-lived metadata uses
 the free Cache API, which is per data center. Rate limits are therefore approximate.
 
 ### YouTube companion for the Worker
@@ -132,9 +132,33 @@ not durable offline storage. Failed/partial responses are not cached. Unknown
 length streams are bounded but not cached. Background fills can be interrupted
 by Cloudflare's request-lifecycle limits. Audio is never written to Workers KV.
 
-Media requests have a separate per-IP budget of 20 times `RATE_LIMIT_PER_MIN`,
-so cover loads and range requests do not consume the metadata budget. The Cache
-API rate limiter remains approximate. The proxy only follows HTTPS redirects to
+Abuse protection treats every client as untrusted. `RATE_LIMIT_PER_MIN` is the
+anonymous metadata budget per IP and installation. Only an unexpired server-side
+account session grants 4x that budget per account and registered device. Every
+caller also shares a fixed 8x IP ceiling; choosing an installation ID never raises
+it. Media has separate budgets multiplied by 20 for seeks and cover loads.
+Twelve rejected quota checks within 15 minutes trigger a 15-minute temporary ban
+of the offending IP, account, or device/installation. Responses use HTTP 429 and
+`Retry-After`; bans apply across metadata and media routes. Guests behind a NAT
+share an IP budget. Installation IDs are resettable signals, not hardware proof;
+Glyph does not collect hardware serial numbers. Health and OPTIONS are exempt.
+
+Native quotas/bans live in bounded process memory and reset on restart. Worker
+quotas/bans use atomic D1 updates shared across instances and locations. Before
+rolling out this version, bind `GLYPH_DB` and apply migration `0009_abuse_limits.sql`
+with `npx wrangler d1 migrations apply glyph --remote`. Missing/unavailable storage
+fails closed for protected requests. D1 operations consume database quotas, so
+edge request filtering remains useful for large floods. Expired rows are cleaned
+in bounded batches, and stored principal keys are SHA-256 hashes.
+
+Metadata work uses eight active slots and at most 64 waiting requests, with a
+15-second queue timeout. Under contention three account requests are admitted
+per guest request; FIFO applies within each class. Streaming searches retain
+their slot until completion or disconnect. The queue is per native server or
+Worker isolate, not a global Cloudflare queue. Existing native audio concurrency
+limits remain separate. Account sessions never grant admin access.
+
+The proxy only follows HTTPS redirects to
 known provider hosts and never forwards browser cookies or authorization headers.
 The companion secret is sent only to its configured HTTPS endpoint, without redirects.
 
@@ -155,10 +179,12 @@ glyph-server --bind 0.0.0.0:8787
 
 Configuration: environment variables, or `server.toml` (see `server.example.toml`; env wins).
 Optional disk cache: `GLYPH_CACHE_DIR` / `cache_dir`. Behind a reverse proxy set
-`GLYPH_TRUST_PROXY=1` so the client IP comes from `X-Forwarded-For`.
+`GLYPH_TRUST_PROXY=1` only with a reverse proxy on loopback. Forwarded headers
+from remote peers are ignored. The local proxy must overwrite incoming client-IP
+and HTTPS headers; for `X-Forwarded-For` it must supply the actual client IP first.
 
 Updates: `glyph-server --check-update` and `glyph-server self-update` use the GitHub releases
-of `GLYPH_SERVER_REPO` (default `glyphmusic/glyph-server`), expect the asset
+of `GLYPH_SERVER_REPO` (default `glyphmusic/server`), expect the asset
 `glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus its `.sha256`, verify the
 checksum, and replace the running binary. No telemetry.
 
@@ -190,3 +216,105 @@ configured yt-dlp helper. Provider keys and companion tokens stay in secrets/env
 ## License
 
 MIT OR Apache-2.0, see `LICENSE-MIT` and `LICENSE-APACHE`.
+
+
+## Storage ceilings and scheduled maintenance
+
+D1 and R2 have independent storage budgets. Configure both with the native CLI:
+
+```sh
+glyph-server remote limits --server https://api.glyph.my --d1-max-mb 500 --r2-max-gb 10
+glyph-server remote limits --server https://api.glyph.my
+```
+
+`--audio-max-gb` remains an alias for `--r2-max-gb`. The JSON field
+`audio_cache_max_gb` is retained for compatibility, but now covers all objects in
+this Glyph R2 bucket, including protected user images. Only `audio/` and `covers/`
+are automatically evictable. `users/` and unknown prefixes are never deleted for
+space. Values are decimal MB/GB. The R2 working target is 500 MB below the ceiling
+(or half the ceiling for smaller programmatic caps): 10 GB means 9.5 GB usable.
+D1 reserves 10 percent, capped at 50 MB: 500 MB means a 450 MB working target.
+Cloudflare's plan/account limits still apply independently of these app settings.
+
+A once-per-hour R2 inventory lists actual objects with pagination and reconciles
+sizes, including objects missing from the old ledger. Minute cron ticks resume
+bounded inventory/eviction batches after interruptions. Expired cache objects go
+first; otherwise less-requested objects are deleted first, with last access as a
+tiebreaker. Counts are incremented on actual R2 reads. No new objects are admitted
+while inventory is incomplete. Atomic D1 reservations charge actual upload bytes
+before R2 writes, including concurrent uploads; failed R2 deletions never release
+bytes. If only protected data or in-flight reservations remain, further writes
+are refused instead of deleting user data. Lower ceilings can require several
+maintenance batches to drain an existing cache. Existing reads continue.
+
+D1 checks use the database's actual `size_after` metadata, plus conservative
+reservations for concurrent SQLite page/index growth. Periodic cleanup removes
+expired abuse counters, pending logins and handle holds. It never discards live
+accounts, credentials, libraries or sync tombstones. Deleting rows does not
+necessarily shrink the physical database immediately. If cleanup cannot restore
+headroom, writes stop; authenticated admin login/refresh/limit changes remain
+available through a separate limiter. R2 reservations and D1 envelopes left by
+uncertain failures/canceled writes remain charged conservatively and are logged;
+manual reconciliation may be needed rather than automatically risking orphaned
+uploads or deleting personal data.
+
+Before deploying, apply migrations through `0013_audio_variant_jobs.sql`:
+
+```sh
+cd crates/glyph-server-worker
+npx wrangler d1 migrations apply glyph --remote
+```
+
+The Worker cron is configured in `wrangler.toml`; deploying activates it. These
+checks cover this Glyph database and bucket, not other projects in the account,
+Workers KV, local application downloads, billing, or network egress. Native
+servers do not store R2 audio and reject non-default cloud storage settings.
+The YouTube Data API budget is now checked before every supported API read and
+resets at UTC midnight; yt-dlp search is outside that API quota.
+
+
+## Progressive audio quality variants
+
+New app builds offer Auto for streaming and downloads. Auto uses only recent
+measured transfers (no speed-test traffic), begins at Standard when unknown,
+downgrades quickly, and requires repeated fast samples before choosing High.
+Manual quality is binding. Auto streaming can switch during a song: stalled
+reads downgrade after a minimum five-second interval, while upgrades wait at
+least 45 seconds. Each change reopens the decoder and seeks by timestamp, with
+a possible brief buffering pause. Auto skips switches near the end of a song.
+Downloads choose once when the job starts. Streaming Range chunks adapt during playback: 64 KiB at
+startup, then roughly two seconds of measured throughput, bounded to 32–384 KiB.
+On slow/unknown connections the app avoids a second full background stream-cache
+download competing with playback. Locally downloaded files still play offline.
+
+For Worker/companion YouTube audio, `?quality=low|standard|high` selects 48 kbps AAC,
+96 kbps AAC, or the best source AAC (normally around 128 kbps). High remuxes M4A
+without another lossy encode; other supported containers are converted to AAC.
+FFmpeg is required on the companion (`GLYPH_FFMPEG_PATH` can override its path).
+The companion Dockerfile already includes it. Two encoders maximum, one FFmpeg
+thread each, a 45-second timeout and a 32 MiB media ceiling bound the work.
+MP4 fast-start lets the player decode from its first range instead of fetching
+the end of the file to find the index. The first request may have encoding latency.
+
+The requested variant is generated first and cached as content-addressed 1 MiB
+R2 objects. Background preparation then attempts all three qualities (Low first),
+with shared 90-second job leases and one background encoder maximum. Cold tracks
+may need preparation time; a busy companion, full storage or the Worker's bounded
+background lifetime can defer completion until a later request. Direct requests
+for another quality work independently. Every variant byte counts toward the
+same R2 ceiling. A D1 manifest is published
+only after all chunks have uploaded. Each playback range reads only the needed
+part of the relevant chunks from R2. Different qualities never mix MP4 byte
+positions in one stream. Missing/expired chunks trigger a companion refresh;
+failed/incomplete writes retain reservations conservatively. Retention and
+popularity-based eviction apply to these chunks too. This is progressive byte-
+range playback with timestamp-based decoder replacement, rather than a seamless
+HLS/DASH player. A provider that offers no alternate encoding retains its own
+format. Standalone native servers honor the same quality parameter, using a
+bounded 64 MiB, eight-entry, ten-minute memory cache rather than R2 for encoded
+Low/Standard audio. Native High retains the original source and works without
+FFmpeg.
+
+D1 limits currently accept 64–4000 MB; the Rust Worker's size metadata uses a
+32-bit `usize`, so larger app ceilings would be misleading on wasm32. Provider
+plan limits may be lower. D1 size and R2 size are measured separately.

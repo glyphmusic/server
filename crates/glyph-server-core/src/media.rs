@@ -8,6 +8,29 @@ use serde::{Deserialize, Serialize};
 
 // The app decodes AAC/Vorbis; selecting arbitrary WebM audio could return unsupported Opus.
 pub const AUDIO_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[acodec=vorbis]";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioVariant { Low, Standard, High }
+impl AudioVariant {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "low" => Some(Self::Low), "standard" => Some(Self::Standard), "high" => Some(Self::High), _ => None }
+    }
+    pub fn name(self) -> &'static str {
+        match self { Self::Low => "low", Self::Standard => "standard", Self::High => "high" }
+    }
+    pub fn bitrate(self) -> u32 {
+        match self { Self::Low => 48, Self::Standard => 96, Self::High => 128 }
+    }
+}
+
+/// Validate the full representation size, not merely a small requested range.
+pub fn content_range_total(header: &str) -> Option<u64> {
+    let (range, total) = header.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total) = (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?, total.parse::<u64>().ok()?);
+    (start <= end && end < total).then_some(total)
+}
 #[derive(Serialize, Deserialize)]
 pub struct CommandRequest {
     pub args: Vec<String>,
@@ -290,6 +313,13 @@ pub fn byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_range_size_cannot_be_hidden_by_a_small_slice() {
+        assert_eq!(content_range_total("bytes 0-9/999999999"), Some(999999999));
+        for invalid in ["bytes 10-0/100", "bytes 0-10/10", "bytes 0-9/*", "bytes */100", "items 0-9/100"] {
+            assert_eq!(content_range_total(invalid), None);
+        }
+    }
     #[test]
     fn ranges() {
         assert_eq!(byte_range("bytes=0-99", 50), Some((0, 49)));

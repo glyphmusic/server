@@ -7,6 +7,10 @@
 //! accounts and sync, R2 `GLYPH_COVERS` the cover cache. Compiled for wasm32 only.
 #![cfg(target_arch = "wasm32")]
 mod accounts;
+mod abuse;
+mod audio_cache;
+mod storage;
+mod variants;
 mod media;
 
 use async_trait::async_trait;
@@ -14,7 +18,6 @@ use futures::StreamExt;
 use glyph_server_core::admin::host::{AdminHost, HostError};
 use glyph_server_core::admin::types::{Capabilities, Limits};
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
-use glyph_server_core::ratelimit::CacheRateLimiter;
 use glyph_server_core::{
     Body, Cache, Config, HttpClient, HttpError, HttpRequest, HttpResponse, Method, NoCommands, Runtime,
     Secrets, Server, Services,
@@ -178,6 +181,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         config.companion_enabled = l.companion_enabled;
         config.audio_cache_days = l.audio_cache_days;
         config.audio_cache_max_gb = l.audio_cache_max_gb;
+        config.d1_max_mb = l.d1_max_mb;
     }
     let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), secret(env, "YTDLP_SERVICE_TOKEN")) {
         // `remote companion off`: YouTube search is off, audio answers 403.
@@ -195,15 +199,15 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
     // Short playlist links (`/p/<id>`); the domain must route `/p/*` to this Worker.
     config.share_origin = secret(env, "SHARE_ORIGIN").filter(|o| o.starts_with("https://"));
-    // Rate-limit counters live in the (free, unmetered) Cache API, not in KV.
+    // Abuse counters must be atomic and shared across locations. Requires 0009.
     let api_cache = api.clone();
-    let limiter = Arc::new(CacheRateLimiter::new(api, rt.clone()));
-    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { db: env.d1("GLYPH_DB").ok(), cache: api_cache }));
+    let limiter = Arc::new(abuse::D1Limiter { db: env.d1("GLYPH_DB").ok(), rt: rt.clone(), admin: Arc::new(glyph_server_core::ratelimit::CacheRateLimiter::new(api.clone(), rt.clone())) });
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
             store: Arc::new(accounts::D1Store { db }),
-            blobs: env.bucket("GLYPH_COVERS").ok().map(|bucket| Arc::new(accounts::R2Blobs { bucket }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
+            blobs: env.bucket("GLYPH_COVERS").ok().map(|bucket| Arc::new(accounts::R2Blobs { bucket, db: env.d1("GLYPH_DB").ok() }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
             entropy: Arc::new(accounts::WebCrypto),
             origin: origin.trim_end_matches('/').to_string(),
             extra_origins: secret(env, "ACCOUNT_EXTRA_ORIGINS").map(|v| v.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect()).unwrap_or_default(),
@@ -246,6 +250,7 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
 struct WorkerHost {
     db: Option<worker::D1Database>,
     cache: Arc<dyn Cache>,
+    bucket: Option<worker::Bucket>,
 }
 
 const SETTINGS_CACHE_KEY: &str = "admin:limits";
@@ -295,7 +300,57 @@ impl AdminHost for WorkerHost {
             ))?;
         // This location sees the change at once, the others within SETTINGS_CACHE_S.
         glyph_server_core::cache::put_json(self.cache.as_ref(), SETTINGS_CACHE_KEY, &Some(l.clone()), SETTINGS_CACHE_S).await;
+        if let Some(bucket) = &self.bucket {
+            if !audio_cache::inventory(db, bucket).await.map_err(|_| HostError::Failed("limits saved; storage inventory pending".into()))? {
+                return Err(HostError::Failed("limits saved; storage inventory continues in scheduled maintenance".into()));
+            }
+            audio_cache::trim(db, bucket, l.audio_cache_days, audio_cache::target(u64::from(l.audio_cache_max_gb)*1_000_000_000)).await
+                .map_err(|_| HostError::Failed("limits saved; audio cleanup pending".into()))?;
+        }
         Ok(())
+    }
+}
+
+// Retention also runs for cold objects that nobody requests again.
+#[event(scheduled)]
+async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+    let Ok(db) = env.d1("GLYPH_DB") else { return; };
+    if storage::maintain(&db).await.is_err() {
+        worker::console_error!("D1 storage cleanup/measurement failed");
+    }
+    let Ok(bucket) = env.bucket("GLYPH_COVERS") else { return; };
+    let limits = saved_limits(&env).await;
+    let days = limits.as_ref().map(|l| l.audio_cache_days).unwrap_or(15);
+    let cap = u64::from(limits.as_ref().map(|l| l.audio_cache_max_gb).unwrap_or(10))*1_000_000_000;
+    // Start a fresh all-object recount once an hour. Minute ticks continue
+    // interrupted pages/eviction without starting another full inventory.
+    let now = worker::Date::now().as_millis();
+    let reset = db.prepare("UPDATE audio_cache_inventory SET ready=0,cursor=NULL,scan_id=?1 WHERE id=1 AND ready=1 AND finished<=?2")
+        .bind(&[(now as f64).into(),(now.saturating_sub(3_600_000) as f64).into()]);
+    let Ok(reset) = reset else { return; };
+    if reset.run().await.is_err() { return; }
+    // JSON batch accounting keeps each page to a handful of D1 queries.
+    for _ in 0..2 {
+        match audio_cache::inventory(&db, &bucket).await {
+            Ok(true) => {
+                if audio_cache::trim(&db, &bucket, days, audio_cache::target(cap)).await.is_err() {
+                    worker::console_error!("scheduled storage eviction failed; bytes remain charged");
+                }
+                #[derive(serde::Deserialize,serde::Serialize)]
+                struct Usage { bytes: u64, files: u64, protected: u64, reserved: u64 }
+                if let Ok(Some(usage)) = db.prepare("SELECT COALESCE(SUM(size),0) AS bytes,COUNT(*) AS files,COALESCE(SUM(CASE WHEN key NOT GLOB 'audio/*' AND key NOT GLOB 'covers/*' THEN size ELSE 0 END),0) AS protected,COALESCE(SUM(CASE WHEN state<>'ready' THEN size ELSE 0 END),0) AS reserved FROM audio_cache").first::<Usage>(None).await {
+                    worker::console_log!("storage bytes={} files={} protected={} reserved={} target={}", usage.bytes,usage.files,usage.protected,usage.reserved,audio_cache::target(cap));
+                }
+                return;
+            }
+            Ok(false) => continue,
+            Err(_) => {
+                // Even under D1 pressure, evict known regenerable objects.
+                let _ = audio_cache::trim(&db, &bucket, days, audio_cache::target(cap)).await;
+                worker::console_error!("scheduled storage inventory failed; known cache cleanup attempted");
+                return;
+            }
+        }
     }
 }
 

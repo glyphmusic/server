@@ -299,7 +299,7 @@ impl Settings {
             ytdlp_path: env("YTDLP_PATH").or(file.ytdlp_path),
             proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
-            update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/glyph-server".into()),
+            update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,
             secrets,

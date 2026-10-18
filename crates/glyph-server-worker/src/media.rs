@@ -61,7 +61,7 @@ async fn origin(mut url: worker::Url, audio: bool) -> Result<Response> {
         let mut init = RequestInit::new();
         let headers = Headers::new();
         headers.set("accept-encoding", "identity")?;
-        headers.set("user-agent", "glyph-server/0.1 (+https://github.com/glyphmusic/glyph-server)")?;
+        headers.set("user-agent", "glyph-server/0.1 (+https://github.com/glyphmusic/server)")?;
         init.with_headers(headers)
             .with_redirect(RequestRedirect::Manual);
         let req = worker::Request::new_with_init(url.as_str(), &init)?;
@@ -89,24 +89,10 @@ pub async fn handle(
     env: &worker::Env,
 ) -> Result<Response> {
     let svc = server.services();
-    // Streaming and cover loads use many more requests than metadata (especially seeks).
-    let key = format!(
-        "media:ip:{}",
-        core.client_ip.as_deref().unwrap_or("unknown")
-    );
-    if let glyph_server_core::RateDecision::Limited { retry_after_s } = svc
-        .limiter
-        .check(
-            &key,
-            svc.config.rate_limit_per_min.max(1).saturating_mul(20),
-            60,
-        )
-        .await
-    {
-        let e = glyph_server_core::ApiErr::rate_limited(retry_after_s);
-        let mut out = Response::from_json(&e.body)?.with_status(e.status);
-        out.headers_mut()
-            .set("retry-after", &retry_after_s.to_string())?;
+    if let Err(e) = server.admit(core, true).await {
+        let r = glyph_server_core::Response::error(e);
+        let mut out = Response::from_bytes(r.bytes().unwrap_or_default().to_vec())?.with_status(r.status);
+        for (k, v) in &r.headers { out.headers_mut().set(k, v)?; }
         return Ok(out);
     }
     if !matches!(req.method(), worker::Method::Get | worker::Method::Head) {
@@ -138,6 +124,30 @@ pub async fn handle(
     } else {
         upstream = None;
     }
+    let variant = if let Some(id) = core.path.strip_prefix("/v1/audio/youtube/") {
+        if !media::valid_video_id(id) { return Response::error("invalid video id",400); }
+        if !svc.config.companion_enabled { return Response::error("companion disabled",403); }
+        match core.query.get("quality") {
+            Some(raw) => {
+                let Some(quality)=media::AudioVariant::parse(raw) else { return Response::error("invalid audio quality",400); };
+                if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
+                    match super::variants::cached(&db,bucket,id,quality,range.as_deref(),req.method()==worker::Method::Head,svc.config.audio_cache_days).await {
+                        Ok(Some(hit)) => {
+                            let env=env.clone();let id=id.to_string();
+                            let days=svc.config.audio_cache_days;
+                            let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
+                            ctx.wait_until(async move { if super::variants::warm(env,id,days,cap).await.is_err(){worker::console_error!("audio quality preparation deferred");} });
+                            return Ok(hit);
+                        },
+                        Ok(None) => {},
+                        Err(_) => worker::console_error!("audio chunk cache lookup failed; using companion"),
+                    }
+                }
+                Some((id.to_string(),quality))
+            }
+            None => None,
+        }
+    } else {None};
     // Cloudflare automatically serves byte ranges from complete cached objects.
     let headers = Headers::new();
     if let Some(r) = &range {
@@ -147,7 +157,12 @@ pub async fn handle(
     init.with_headers(headers);
     let cache_req = worker::Request::new_with_init(key.as_str(), &init)?;
     let cache = worker::Cache::default();
-    if let Some(hit) = cache.get(&cache_req, false).await? {
+    let companion_audio = core.path.starts_with("/v1/audio/youtube/");
+    if companion_audio && !svc.config.companion_enabled {
+        return Response::error("companion disabled", 403);
+    }
+    // Edge hits would bypass the current R2 retention and companion switch.
+    if let Some(hit) = if companion_audio { None } else { cache.get(&cache_req, false).await? } {
         let headers = hit.headers().clone();
         headers.set("x-glyph-cache", "HIT")?;
         let hit = hit.with_headers(headers);
@@ -225,7 +240,7 @@ pub async fn handle(
     // a song plays once from the companion machine and from R2 after that,
     // even while that machine is off. The companion itself caches nothing.
     let audio_bucket = env.bucket("GLYPH_COVERS").ok();
-    let r2_key = companion.then(|| r2_audio_key(url.path())).flatten();
+    let r2_key = (companion && variant.is_none()).then(|| r2_audio_key(url.path())).flatten();
     let mut from_r2 = false;
     if let (Some(bucket), Some(k)) = (&audio_bucket, &r2_key) {
         let max_age_ms = u64::from(svc.config.audio_cache_days) * 86_400_000;
@@ -233,6 +248,7 @@ pub async fn handle(
             // Older than `audio_cache_days`: fetch again (and replace it).
             let age_ms = (worker::Date::now().as_millis()).saturating_sub(obj.uploaded().as_millis());
             if age_ms <= max_age_ms {
+            if let Ok(db) = env.d1("GLYPH_DB") { super::audio_cache::touch(&db, k).await; }
             let content_type = obj.http_metadata().content_type.unwrap_or_else(|| "audio/mp4".into());
             let size = obj.size();
             if let Some(body) = obj.body() {
@@ -254,6 +270,7 @@ pub async fn handle(
         };
         let headers = Headers::new();
         headers.set("authorization", &format!("Bearer {token}"))?;
+        if let Some((_,quality))=&variant {headers.set("x-glyph-audio-quality",quality.name())?;}
         let mut init = RequestInit::new();
         init.with_headers(headers)
             .with_redirect(RequestRedirect::Manual);
@@ -331,12 +348,33 @@ pub async fn handle(
     if req.method() == worker::Method::Head {
         return head(full);
     }
-    if length.is_some_and(|n| n > 0 && n <= MAX_CACHE_BYTES) {
+    if !companion_audio && length.is_some_and(|n| n > 0 && n <= MAX_CACHE_BYTES) {
         let cached = full.cloned()?;
         let key = key.to_string();
         ctx.wait_until(async move {
             let _ = worker::Cache::default().put(key, cached).await;
         });
+    }
+    if let Some((id,quality))=variant {
+        if length.is_some_and(|n|n>0 && n<=MAX_CACHE_BYTES) {
+            if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
+                let mut copy=full.cloned()?;
+                let days=svc.config.audio_cache_days;
+                let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
+                let warm_env=env.clone();
+                ctx.wait_until(async move {
+                    if let Ok(bytes)=copy.bytes().await {
+                        if Some(bytes.len() as u64)!=length{return;}
+                        if super::variants::store(&db,&bucket,&id,quality,bytes,days,cap).await.is_err(){
+                            worker::console_error!("audio variant caching failed; bytes remain reserved");
+                        }
+                        if super::variants::warm(warm_env,id,days,cap).await.is_err(){
+                            worker::console_error!("audio quality preparation deferred");
+                        }
+                    }
+                });
+            }
+        }
     }
     if let (Some(bucket), Some(k), false) = (audio_bucket, r2_key, from_r2) {
         if length.is_some_and(|n| n > 0 && n <= MAX_CACHE_BYTES) {
@@ -344,14 +382,13 @@ pub async fn handle(
             let content_type = content_type.clone();
             let db = env.d1("GLYPH_DB").ok();
             let max_bytes = u64::from(svc.config.audio_cache_max_gb) * 1_000_000_000;
+            let days = svc.config.audio_cache_days;
             ctx.wait_until(async move {
-                if let Ok(bytes) = copy.bytes().await {
-                    let size = bytes.len() as u64;
-                    let meta = worker::HttpMetadata { content_type: Some(content_type), ..Default::default() };
-                    if bucket.put(k.clone(), bytes).http_metadata(meta).execute().await.is_ok() {
-                        if let Some(db) = db {
-                            keep_under_cap(&db, &bucket, &k, size, max_bytes).await;
-                        }
+                if let (Some(db), Ok(bytes)) = (db, copy.bytes().await) {
+                    // Never charge a claimed Content-Length: account actual bytes.
+                    if Some(bytes.len() as u64) != length { return; }
+                    if super::audio_cache::store(&db, &bucket, &k, bytes, content_type, days, max_bytes).await.is_err() {
+                        worker::console_error!("audio cache persistence/maintenance failed; reservation retained");
                     }
                 }
             });
@@ -404,33 +441,4 @@ fn head(resp: Response) -> Result<Response> {
 fn r2_audio_key(path: &str) -> Option<String> {
     let id = path.strip_prefix("/internal/audio/")?.rsplit('/').next()?;
     media::valid_video_id(id).then(|| format!("audio/youtube/{id}"))
-}
-
-/// Records a stored song and deletes the oldest ones while the total is over
-/// `audio_cache_max_gb`. Without migration 0008 it does nothing (the R2
-/// lifecycle rule still removes old songs).
-async fn keep_under_cap(db: &worker::D1Database, bucket: &worker::Bucket, key: &str, size: u64, max_bytes: u64) {
-    use worker::wasm_bindgen::JsValue;
-    #[derive(serde::Deserialize)]
-    struct Total { total: Option<f64> }
-    #[derive(serde::Deserialize)]
-    struct Oldest { key: String }
-    let now = worker::Date::now().as_millis() as f64;
-    let Ok(stmt) = db
-        .prepare("INSERT INTO audio_cache (key, size, created) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET size = excluded.size, created = excluded.created")
-        .bind(&[JsValue::from(key), JsValue::from(size as f64), JsValue::from(now)])
-    else { return };
-    if stmt.run().await.is_err() { return; }
-    // Bounded, so one request never deletes more than a batch.
-    for _ in 0..50 {
-        let total = match db.prepare("SELECT SUM(size) AS total FROM audio_cache").first::<Total>(None).await {
-            Ok(Some(t)) => t.total.unwrap_or(0.0) as u64,
-            _ => return,
-        };
-        if total <= max_bytes { return; }
-        let Ok(Some(old)) = db.prepare("SELECT key FROM audio_cache ORDER BY created LIMIT 1").first::<Oldest>(None).await else { return };
-        let _ = bucket.delete(&old.key).await;
-        let Ok(del) = db.prepare("DELETE FROM audio_cache WHERE key = ?1").bind(&[JsValue::from(old.key.as_str())]) else { return };
-        if del.run().await.is_err() { return; }
-    }
 }

@@ -83,3 +83,7 @@ YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 # For `wrangler dev`, put the same names in crates/glyph-server-worker/.dev.vars
 
 # Optional private-instance access (off by default): wrangler secret put GLYPH_SERVER_BEARER
+
+# Hourly full R2 recount; minute ticks finish bounded inventory/eviction batches.
+[triggers]
+crons = ["* * * * *"]

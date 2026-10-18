@@ -48,12 +48,17 @@ impl D1Store {
     }
 
     async fn run(&self, sql: &str, args: &[JsValue]) -> StoreResult<usize> {
-        let r = self.stmt(sql, args)?.run().await.map_err(err)?;
+        let stmt = self.stmt(sql, args)?;
+        let r = if sql.trim_start().starts_with("DELETE ") {
+            stmt.run().await
+        } else {
+            super::storage::guarded(&self.db, 32*1024*1024, stmt.run()).await
+        }.map_err(err)?;
         Ok(r.meta().map_err(err)?.and_then(|m| m.changes).unwrap_or(0))
     }
 
     async fn batch(&self, stmts: Vec<D1PreparedStatement>) -> StoreResult<Vec<worker::D1Result>> {
-        self.db.batch(stmts).await.map_err(err)
+        super::storage::guarded(&self.db, 32*1024*1024, self.db.batch(stmts)).await.map_err(err)
     }
 }
 
@@ -606,6 +611,7 @@ impl D1Store {
 
 pub struct R2Blobs {
     pub bucket: worker::Bucket,
+    pub db: Option<D1Database>,
 }
 
 #[async_trait(?Send)]
@@ -614,13 +620,16 @@ impl BlobStore for R2Blobs {
         let Some(obj) = self.bucket.get(key).execute().await.map_err(err)? else { return Ok(None) };
         let ct = obj.http_metadata().content_type.unwrap_or_else(|| "application/octet-stream".into());
         let Some(body) = obj.body() else { return Ok(None) };
+        if let Some(db) = &self.db { super::audio_cache::touch(db, key).await; }
         Ok(Some((body.bytes().await.map_err(err)?, ct)))
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> StoreResult<()> {
-        let meta = worker::HttpMetadata { content_type: Some(content_type.into()), ..Default::default() };
-        self.bucket.put(key, bytes).http_metadata(meta).execute().await.map_err(err)?;
-        Ok(())
+        let db = self.db.as_ref().ok_or_else(|| StoreError("storage accounting unavailable".into()))?;
+        match super::audio_cache::store(db, &self.bucket, key, bytes, content_type.into(), 15, 10_000_000_000).await.map_err(err)? {
+            true => Ok(()),
+            false => Err(StoreError("storage capacity unavailable; retry later".into())),
+        }
     }
 
     async fn delete_prefix(&self, prefix: &str) -> StoreResult<()> {
@@ -630,7 +639,14 @@ impl BlobStore for R2Blobs {
             if keys.is_empty() {
                 return Ok(());
             }
-            self.bucket.delete_multiple(keys).await.map_err(err)?;
+            self.bucket.delete_multiple(keys.clone()).await.map_err(err)?;
+            if let Some(db) = &self.db {
+                let keys = serde_json::to_string(&keys).map_err(|_| StoreError("storage accounting failed".into()))?;
+                // In-flight uploads keep their reservation even if the user's
+                // existing ready objects have been deleted concurrently.
+                db.prepare("DELETE FROM audio_cache WHERE state='ready' AND key IN (SELECT value FROM json_each(?1))")
+                    .bind(&[s(&keys)]).map_err(err)?.run().await.map_err(err)?;
+            }
             if !list.truncated() {
                 return Ok(());
             }

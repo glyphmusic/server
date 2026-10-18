@@ -120,11 +120,11 @@ pub struct Config {
     pub proxy_audio: bool,
     pub secrets: Secrets,
     pub server_version: String,
-    /// Requests per minute per install id (per IP the limit is 4x, for NAT).
+    /// Anonymous requests/minute; verified accounts get 4x, fixed IP ceiling 8x.
     pub rate_limit_per_min: u32,
     pub provider_timeout_ms: u64,
-    /// Stop calling YouTube once this many quota units were spent today
-    /// (playlist import only; search goes through yt-dlp).
+    /// Stop YouTube Data API reads at this many units per UTC day.
+    /// Search through yt-dlp does not consume this API budget.
     pub youtube_daily_budget_units: u64,
     /// yt-dlp executable used for YouTube search. `None` = yt-dlp is not
     /// available on this platform (Cloudflare Workers), so search is off.
@@ -136,6 +136,7 @@ pub struct Config {
     /// Days / GB of companion audio kept in R2 (Worker).
     pub audio_cache_days: u32,
     pub audio_cache_max_gb: u32,
+    pub d1_max_mb: u32,
     pub audius_app_name: String,
     /// Argon2id PHC hash of the admin password. `None` = admin API disabled.
     pub admin_password_hash: Option<String>,
@@ -159,6 +160,7 @@ impl Config {
             companion_enabled: true,
             audio_cache_days: 15,
             audio_cache_max_gb: 10,
+            d1_max_mb: 500,
             audius_app_name: "glyph".to_string(),
             admin_password_hash: None,
             share_origin: None,

@@ -23,6 +23,7 @@ axum = { version = "0.7", default-features = false, features = ["http1", "tokio"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "signal", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json", "stream"] }
 lru = "0.12"
+tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 semver = "1"
