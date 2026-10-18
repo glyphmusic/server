@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Match YouTube by ISRC when available, then retry artist/title without the audio suffix if necessary (fixes Blender's LUVME falling back to a preview).
+- Prepare two quality variants concurrently in the background, keeping an encoder available for foreground work.
+
 - Forward requested byte ranges through the Worker and companion to YouTube, avoiding repeated downloads of the entire prefix when seeking or refilling the decoder.
 
 - Stream uncached high-quality YouTube audio immediately instead of waiting for a whole download and remux.

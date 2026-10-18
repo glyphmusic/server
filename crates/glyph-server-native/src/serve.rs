@@ -517,13 +517,13 @@ async fn companion_variant(svc: &Arc<Services>, id: &str, variant: glyph_server_
     }
     static BACKGROUND: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     let _background = if background {
-        match BACKGROUND.get_or_init(|| tokio::sync::Semaphore::new(1)).try_acquire() {
+        match BACKGROUND.get_or_init(|| tokio::sync::Semaphore::new(2)).try_acquire() {
             Ok(permit) => Some(permit),
             Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS, "background encoder busy"),
         }
     } else { None };
     static ENCODERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    let Ok(_encoder) = ENCODERS.get_or_init(|| tokio::sync::Semaphore::new(2)).try_acquire() else {
+    let Ok(_encoder) = ENCODERS.get_or_init(|| tokio::sync::Semaphore::new(3)).try_acquire() else {
         return plain(StatusCode::TOO_MANY_REQUESTS, "audio encoder busy; retry later");
     };
     let url = match glyph_server_core::media::audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {

@@ -119,17 +119,25 @@ async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Tr
     }
     // Ask the companion for the song audio rather than choreography, live
     // performances and music videos with a different duration.
-    let q = if p == ProviderId::YouTube { format!("{} {} audio", want.artist, want.title) }
-        else { format!("{} {}", want.artist, want.title) };
-    let cands = search_provider(svc, p, q.trim()).await.ok()?;
-    let (cand, s) = best(want, &cands)?;
-    let pb = match &cand.playback {
-        Some(pb) => pb.clone(),
-        None => providers::playback_for(svc, p, &cand.track.id).await.ok()?,
-    };
-    let mut m = cand.track.clone();
-    merge_into(&mut m, want);
-    Some((m, pb, s))
+    let base = format!("{} {}", want.artist, want.title);
+    let mut queries = Vec::new();
+    if p == ProviderId::YouTube {
+        if let Some(isrc) = want.isrc.as_ref().filter(|s| !s.trim().is_empty()) { queries.push(isrc.clone()); }
+        queries.push(format!("{base} audio"));
+    }
+    queries.push(base);
+    for query in queries {
+        let cands = search_provider(svc, p, query.trim()).await.ok()?;
+        let Some((cand, s)) = best(want, &cands) else { continue; };
+        let pb = match &cand.playback {
+            Some(pb) => pb.clone(),
+            None => providers::playback_for(svc, p, &cand.track.id).await.ok()?,
+        };
+        let mut m = cand.track.clone();
+        merge_into(&mut m, want);
+        return Some((m, pb, s));
+    }
+    None
 }
 
 async fn try_preview(svc: &Services, want: &Track) -> Option<(Track, PlaybackSource, f32)> {
@@ -367,7 +375,18 @@ mod tests {
         h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369.0}"#);
         let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
-        assert_eq!(h.cmds.call_count("ytsearch10:Daft Punk Get Lucky audio"), 1);
+        assert_eq!(h.cmds.call_count("ytsearch10:GBDUW1300001"), 1);
+    }
+
+    #[test]
+    fn youtube_retries_plain_query_when_audio_query_has_no_match() {
+        let h = setup();
+        h.cmds.on("Get Lucky audio", "{}");
+        h.cmds.on("ytsearch10:Daft Punk Get Lucky", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
+        let mut track = want();
+        track.isrc = None;
+        let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
     }
 
     #[test]

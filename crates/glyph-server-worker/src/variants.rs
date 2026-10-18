@@ -116,13 +116,15 @@ pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()>
     #[derive(serde::Deserialize)]struct Lease{#[allow(dead_code)]track_id:String}
     let claimed=super::storage::guarded(&db,64*1024,lease.first::<Lease>(None)).await?;
     if claimed.is_none(){return Ok(());}
-    for quality in [AudioVariant::Low,AudioVariant::Standard,AudioVariant::High] {
+    let jobs=futures::stream::iter([AudioVariant::Low,AudioVariant::Standard,AudioVariant::High]).map(|quality| {
+        let (env,db,id,base,token)=(&env,&db,id.as_str(),base.as_str(),token.as_str());
+        async move {
         let bucket=env.bucket("GLYPH_COVERS")?;
-        if cached(&db,bucket,&id,quality,None,true,days).await?.is_some(){continue;}
+        if cached(&db,bucket,&id,quality,None,true,days).await?.is_some(){return Ok(());}
         // Account source/encoding work only when this installation can store it.
         #[derive(serde::Deserialize)]struct Usage{size:u64}
         let usage=db.prepare("SELECT COALESCE(SUM(size),0) AS size FROM audio_cache").first::<Usage>(None).await?;
-        if usage.is_some_and(|u|u.size>=super::audio_cache::target(cap)){break;}
+        if usage.is_some_and(|u|u.size>=super::audio_cache::target(cap)){return Ok(());}
         let headers=Headers::new();
         headers.set("authorization",&format!("Bearer {token}"))?;
         headers.set("x-glyph-audio-quality",quality.name())?;
@@ -131,9 +133,9 @@ pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()>
         init.with_headers(headers).with_redirect(worker::RequestRedirect::Manual);
         let url=format!("{}/internal/audio/{id}",base.trim_end_matches('/'));
         let mut response=worker::Fetch::Request(worker::Request::new_with_init(&url,&init)?).send().await?;
-        if response.status_code()!=200 { continue; }
+        if response.status_code()!=200 { return Ok(()); }
         let length=response.headers().get("content-length")?.and_then(|v|v.parse::<u64>().ok());
-        if !length.is_some_and(|v|v>0 && v<=32*1024*1024){continue;}
+        if !length.is_some_and(|v|v>0 && v<=32*1024*1024){return Ok(());}
         // Enforce the cap on actual streamed bytes, even if upstream lies.
         let mut body=response.stream()?;
         let mut bytes=Vec::new();
@@ -142,10 +144,14 @@ pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()>
             if bytes.len()+chunk.len()>32*1024*1024{return Err(worker::Error::RustError("background audio exceeds size limit".into()));}
             bytes.extend_from_slice(&chunk);
         }
-        if Some(bytes.len() as u64)!=length{continue;}
+        if Some(bytes.len() as u64)!=length{return Ok(());}
         let bucket=env.bucket("GLYPH_COVERS")?;
         store(&db,&bucket,&id,quality,bytes,days,cap).await?;
-    }
+        Ok::<(),worker::Error>(())
+        }
+    });
+    let mut jobs=jobs.buffer_unordered(2);
+    while let Some(result)=jobs.next().await { result?; }
     // Retain the lease until expiry: repeated partial/failed jobs back off.
     Ok(())
 }
