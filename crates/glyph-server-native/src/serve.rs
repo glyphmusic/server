@@ -45,9 +45,10 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     let services = Services {
         http: Arc::new(ReqwestClient::new()),
         cache: if companion_mode() {
-            // As the Worker's companion it keeps nothing: the Worker caches
-            // everything on Cloudflare (Cache API, KV, R2).
-            Arc::new(NoCache) as Arc<dyn glyph_server_core::Cache>
+            // Keep resolved URLs in bounded memory so seeks/refills do not
+            // launch yt-dlp again. Audio bytes still live only on Cloudflare;
+            // nothing is persisted to the companion's disk.
+            Arc::new(LruDiskCache::new(128, None)) as Arc<dyn glyph_server_core::Cache>
         } else {
             Arc::new(LruDiskCache::new(s.cache_entries, s.cache_dir.clone()))
         },
@@ -72,16 +73,6 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
 /// Companion of a Cloudflare Worker (YTDLP_SERVICE_TOKEN set).
 fn companion_mode() -> bool {
     std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32)
-}
-
-struct NoCache;
-
-#[async_trait::async_trait]
-impl glyph_server_core::Cache for NoCache {
-    async fn get(&self, _key: &str) -> Option<Vec<u8>> {
-        None
-    }
-    async fn put(&self, _key: &str, _value: Vec<u8>, _ttl_s: u64) {}
 }
 
 pub fn companion_off_flag(s: &Settings) -> std::path::PathBuf {
@@ -623,6 +614,11 @@ mod tests {
         std::env::set_var("YTDLP_SERVICE_TOKEN",token);
         let settings = Settings::resolve(Default::default(), None, "test-nonexistent.toml".into());
         let state = AppState { server: build_server(&settings,LogBuffer::new()),trust_proxy:false,tls:false };
+        // Companion mode must retain URL metadata between range requests.
+        // The old NoCache implementation discarded this immediately.
+        let cache = state.server.services().cache.clone();
+        cache.put("ytaudio:v1:abcdefghijk", b"resolved-url".to_vec(), 60).await;
+        assert_eq!(cache.get("ytaudio:v1:abcdefghijk").await, Some(b"resolved-url".to_vec()));
         let peer = "127.0.0.1:5000".parse().unwrap();
         for path in ["/v1/audio/youtube/abcdefghijk", "/v1/download/jamendo/42", "/v1/search?q=test"] {
             let request = axum::http::Request::builder().uri(path).body(Body::empty()).unwrap();
