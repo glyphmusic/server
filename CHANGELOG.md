@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Forward requested byte ranges through the Worker and companion to YouTube, avoiding repeated downloads of the entire prefix when seeking or refilling the decoder.
+
+- Stream uncached high-quality YouTube audio immediately instead of waiting for a whole download and remux.
+- Publish one `SHA256SUMS.txt` for the complete release; self-update matches exact filenames and retains support for old sidecars.
+
+- Search for song audio through the configured companion when resolving a YouTube match; avoid unrelated video results and duration mismatches.
+- Explicitly slice full edge-cache hits for range requests; re-fetch entries missing the byte length instead of returning inconsistent audio responses.
+
+- Retry full playback sources before a cached Deezer preview and shorten preview caching to five minutes. Invalidate earlier resolver mappings.
+- Skip per-video metadata extraction when YouTube flat results already include duration.
+- Do not disable all YouTube requests for ten minutes after one network failure or timeout.
+
 ## 0.2.0 — 2026-10-18
 
 - Prefer the Windows setup executable on the download page when a release includes one. Keep the portable ZIP as the fallback for earlier releases.

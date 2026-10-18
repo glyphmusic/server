@@ -96,7 +96,7 @@ fn cache_key(want: &Track, prio: &[ProviderId]) -> String {
         ),
     };
     let p: Vec<&str> = prio.iter().map(|p| p.badge()).collect();
-    format!("resolve:v1:{ident}:{}", p.join(""))
+    format!("resolve:v2:{ident}:{}", p.join(""))
 }
 
 async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Track, PlaybackSource, f32)> {
@@ -117,7 +117,10 @@ async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Tr
             return Some((m, pb, 1.0));
         }
     }
-    let q = format!("{} {}", want.artist, want.title);
+    // Ask the companion for the song audio rather than choreography, live
+    // performances and music videos with a different duration.
+    let q = if p == ProviderId::YouTube { format!("{} {} audio", want.artist, want.title) }
+        else { format!("{} {}", want.artist, want.title) };
     let cands = search_provider(svc, p, q.trim()).await.ok()?;
     let (cand, s) = best(want, &cands)?;
     let pb = match &cand.playback {
@@ -171,7 +174,16 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let prio = effective_priority(&req.priority);
     let key = cache_key(want, &prio);
     if let Some(hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
-        if matches!(hit.source, Some(PlaybackSource::Preview { provider: ProviderId::Deezer, .. })) {
+        if matches!(hit.source, Some(PlaybackSource::Preview { .. })) {
+            // A preview is a temporary fallback, never a successful full-source
+            // mapping. Retry full providers before refreshing its signed URL.
+            for p in &prio {
+                if let Some((m, pb, c)) = try_provider(svc, *p, want).await {
+                    let upgraded = ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None };
+                    cache::put_json(&*svc.cache, &key, &upgraded, 30 * DAY).await;
+                    return upgraded;
+                }
+            }
             // Even old persistent cache entries may contain expired signatures.
             if let Some(matched) = hit.matched.as_ref() {
                 if let Some(Ok(c)) = with_timeout(
@@ -198,7 +210,10 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         found = with_timeout(&*svc.rt, svc.config.provider_timeout_ms, try_preview(svc, want)).await.flatten();
     }
     let (resp, ttl) = match found {
-        Some((m, pb, c)) => (ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None }, 30 * DAY),
+        Some((m, pb, c)) => {
+            let ttl = if matches!(pb, PlaybackSource::Preview { .. }) { 5 * cache::MINUTE } else { 30 * DAY };
+            (ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None }, ttl)
+        },
         None => (ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None }, HOUR),
     };
     cache::put_json(&*svc.cache, &key, &resp, ttl).await;
@@ -338,7 +353,21 @@ mod tests {
             r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/newer.mp3"}"#.into();
         let second = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![] }));
         assert!(matches!(second.source, Some(PlaybackSource::Preview { url, .. }) if url == "https://cdn/newer.mp3"));
-        assert_eq!(h.http.calls.lock().unwrap().len(), 2);
+        assert_eq!(h.http.calls.lock().unwrap().iter().filter(|url| url.contains("api.deezer.com/track/1")).count(), 2);
+    }
+
+    #[test]
+    fn cached_preview_does_not_hide_recovered_youtube() {
+        let h = setup();
+        let track = want();
+        let preview = ResolveResponse { matched: Some(track.clone()),
+            source: Some(PlaybackSource::Preview { provider: Deezer, url: "https://cdn/preview.mp3".into() }),
+            confidence: 1.0, youtube_hint: None };
+        block_on(cache::put_json(&*h.svc.cache, &cache_key(&track, &[YouTube]), &preview, 30 * DAY));
+        h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369.0}"#);
+        let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+        assert_eq!(h.cmds.call_count("ytsearch10:Daft Punk Get Lucky audio"), 1);
     }
 
     #[test]

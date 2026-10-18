@@ -20,6 +20,7 @@ pub fn encode_event(ev: &SearchEvent) -> Vec<u8> {
 }
 
 fn skip_key(id: ProviderId) -> String {
+    if id == ProviderId::YouTube { return "skip:v2:YT".into(); }
     format!("skip:{}", id.badge())
 }
 
@@ -60,6 +61,8 @@ pub async fn search_provider_page(svc: &Services, id: ProviderId, q: &str, page:
     };
     match &res {
         Ok(v) => cache::put_json(&*svc.cache, &ckey, v, providers::search_ttl(id)).await,
+        // One slow YouTube request must not disable every song for ten minutes.
+        Err(ProviderError::Timeout | ProviderError::Network) if id == ProviderId::YouTube => {},
         Err(_) => mark_skipped(svc, id).await,
     }
     res

@@ -166,11 +166,15 @@ pub async fn handle(
         let headers = hit.headers().clone();
         headers.set("x-glyph-cache", "HIT")?;
         let hit = hit.with_headers(headers);
-        return if req.method() == worker::Method::Head {
-            head(hit)
-        } else {
-            Ok(hit)
-        };
+        let length = hit.headers().get("content-length")?.and_then(|s| s.parse::<u64>().ok());
+        // Stream-backed Cache API objects can return a full 200 even when
+        // the lookup requested a range. Slice it explicitly, just like a miss.
+        // Without a length, re-fetch rather than hand the decoder a different
+        // response shape (and lose MP3's leading-ID3 workaround).
+        if range.is_none() || hit.status_code() == 206 || length.is_some() {
+            return if req.method() == worker::Method::Head { head(hit) }
+                else { range_response(hit, range, length) };
+        }
     }
     let mut companion = false;
     let mut cached_upstream: Option<Response> = None;
@@ -270,7 +274,16 @@ pub async fn handle(
         };
         let headers = Headers::new();
         headers.set("authorization", &format!("Bearer {token}"))?;
-        if let Some((_,quality))=&variant {headers.set("x-glyph-audio-quality",quality.name())?;}
+        if let Some((_,quality))=&variant {
+            // High is the original best source, as on the standalone server.
+            // Do not wait for an entire download and remux before sending its
+            // first bytes. Lower-bitrate representations still use the encoder.
+            if *quality != media::AudioVariant::High {
+                headers.set("x-glyph-audio-quality",quality.name())?;
+            } else if let Some(range) = &range {
+                headers.set("range", range)?;
+            }
+        }
         let mut init = RequestInit::new();
         init.with_headers(headers)
             .with_redirect(RequestRedirect::Manual);
@@ -280,6 +293,20 @@ pub async fn handle(
     } else {
         origin(url, is_audio).await?
     };
+    if upstream.status_code() == 206 && is_audio && range.is_some() {
+        let Some(content_range) = upstream.headers().get("content-range")? else { return Response::error("missing upstream range",502); };
+        if !media::content_range_total(&content_range).is_some_and(|n| n <= MAX_CACHE_BYTES) {
+            return Response::error("invalid upstream range",502);
+        }
+        let headers = Headers::new();
+        for name in ["content-type", "content-length", "content-range"] {
+            if let Some(value) = upstream.headers().get(name)? { headers.set(name, &value)?; }
+        }
+        headers.set("accept-ranges", "bytes")?;
+        headers.set("cache-control", "no-store")?;
+        let mut partial = upstream;
+        return Ok(Response::from_stream(partial.stream()?)?.with_status(206).with_headers(headers));
+    }
     if upstream.status_code() != 200 {
         let status = match upstream.status_code() {
             401 | 403 | 404 => upstream.status_code(),
@@ -356,7 +383,8 @@ pub async fn handle(
         });
     }
     if let Some((id,quality))=variant {
-        if length.is_some_and(|n|n>0 && n<=MAX_CACHE_BYTES) {
+        if length.is_some_and(|n|n>0 && n<=MAX_CACHE_BYTES)
+            && (quality != media::AudioVariant::High || content_type.starts_with("audio/mp4")) {
             if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
                 let mut copy=full.cloned()?;
                 let days=svc.config.audio_cache_days;
@@ -395,6 +423,11 @@ pub async fn handle(
         }
     }
     full.headers_mut().set("x-glyph-cache", if from_r2 { "R2" } else { "MISS" })?;
+    range_response(full, range, length)
+}
+
+fn range_response(mut full: Response, range: Option<String>, length: Option<u64>) -> Result<Response> {
+    if full.status_code() != 200 { return Ok(full); }
     if let (Some(value), Some(total)) = (range, length) {
         let Some((start, end)) = media::byte_range(&value, total) else {
             let mut out = Response::error("range not satisfiable", 416)?;

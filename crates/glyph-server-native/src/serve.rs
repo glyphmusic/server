@@ -466,8 +466,9 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
             Ok(u) => u, Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio lookup failed"),
         };
         let mut permit = Some(_permit);
-        let out = fetch_upstream_audio(&url, None, &mut permit).await;
-        return retry_stale_youtube(&svc, id, None, out, &mut permit).await;
+        let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
+        let out = fetch_upstream_audio(&url, range, &mut permit).await;
+        return retry_stale_youtube(&svc, id, range, out, &mut permit).await;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
     let Ok(command) = serde_json::from_slice::<CommandRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid command") };

@@ -38,6 +38,20 @@ pub fn parse_sha256(text: &str) -> Option<String> {
     (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
 }
 
+fn checksum_for_asset(text: &str, filename: &str) -> Option<String> {
+    let mut found = None;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let hash = parts.next()?;
+        let name = parts.next().map(|n| n.trim_start().trim_start_matches('*'));
+        if name.is_some_and(|n| n != filename) { continue; }
+        if name.is_none() && text.split_whitespace().count() != 1 { continue; }
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || found.is_some() { return None; }
+        found = Some(hash.to_ascii_lowercase());
+    }
+    found
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -135,11 +149,12 @@ pub async fn apply(repo: &str) -> Result<UpdateApplyResponse, String> {
     let name = archive_name(&remote, TARGET);
     let find = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
     let url = find(&name).ok_or_else(|| format!("release {remote} has no asset `{name}` for this platform"))?;
-    let sum_url = find(&format!("{name}.sha256"))
+    let sum_url = find("SHA256SUMS.txt").or_else(|| find(&format!("{name}.sha256")))
         .ok_or_else(|| format!("release {remote} has no `{name}.sha256`; refusing to install unverified code"))?;
 
     let archive = download(&url).await?;
-    let expected = parse_sha256(&String::from_utf8_lossy(&download(&sum_url).await?)).ok_or("malformed .sha256 file")?;
+    let expected = checksum_for_asset(&String::from_utf8_lossy(&download(&sum_url).await?), &name)
+        .ok_or("checksum manifest has no valid, unique entry for this archive")?;
     if sha256_hex(&archive) != expected {
         return Err("SHA-256 mismatch; aborting update".into());
     }
@@ -190,6 +205,12 @@ mod tests {
         assert_eq!(parse_sha256(&format!("{h}  file.zip\n")), Some(h.clone()));
         assert_eq!(parse_sha256(&h.to_uppercase()), Some(h));
         assert_eq!(parse_sha256("nothex"), None);
+        let h = "a".repeat(64);
+        let other = "b".repeat(64);
+        let manifest = format!("{other}  other.zip\n{h}  file.zip\n");
+        assert_eq!(checksum_for_asset(&manifest, "file.zip"), Some(h));
+        assert_eq!(checksum_for_asset(&manifest, "missing.zip"), None);
+        assert_eq!(checksum_for_asset(&manifest.repeat(2), "file.zip"), None);
     }
 
     #[test]

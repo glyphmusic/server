@@ -187,7 +187,7 @@ and HTTPS headers; for `X-Forwarded-For` it must supply the actual client IP fir
 
 Updates: `glyph-server --check-update` and `glyph-server self-update` use the GitHub releases
 of `GLYPH_SERVER_REPO` (default `glyphmusic/server`), expect the asset
-`glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus its `.sha256`, verify the
+`glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus `SHA256SUMS.txt` (or a legacy `.sha256`), verify the
 checksum, and replace the running binary. No telemetry.
 
 Docker: `docker build -t glyph-server .` then

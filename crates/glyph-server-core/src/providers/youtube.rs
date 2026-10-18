@@ -161,12 +161,14 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
 
     // Durations are missing in flat mode; one call for all ids at once.
     let mut detail: Vec<Entry> = Vec::new();
-    if !ids.is_empty() {
+    let missing: Vec<_> = flat.iter().filter(|e| e.duration.filter(|d| *d > 0.0).is_none())
+        .map(|e| &e.id).filter(|id| ids.contains(id)).collect();
+    if !missing.is_empty() {
         let mut args = base_args();
         args.push("--dump-json".into());
         args.push("--skip-download".into());
         args.push("--".into());
-        args.extend(ids.iter().map(|id| format!("https://www.youtube.com/watch?v={id}")));
+        args.extend(missing.iter().map(|id| format!("https://www.youtube.com/watch?v={id}")));
         // Metadata is a nice-to-have: keep the hits when it fails.
         detail = run(svc, &bin, &args, DETAIL_TIMEOUT_MS).await.unwrap_or_default();
     }
@@ -280,6 +282,7 @@ mod tests {
         let r = block_on(search(&h.svc, "song")).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].track.duration_ms, Some(200_000));
+        assert_eq!(h.cmds.call_count("--skip-download"), 0);
     }
 
     #[test]
