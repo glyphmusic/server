@@ -84,7 +84,7 @@ footer a { color: var(--dim); }
 
   <div class="notes">
     <p>Each file has a <code>.sha256</code> next to it on the release, to check the download.</p>
-    <p>Windows: unzip and run <code>glyph.exe</code>. macOS and Linux: unpack the <code>.tar.gz</code> and run <code>glyph</code>.</p>
+    <p>Windows: run the setup executable to install Glyph. New versions update the same installation and keep your library and settings. For a portable ZIP, unzip and run <code>glyph.exe</code>. macOS and Linux: unpack the <code>.tar.gz</code> and run <code>glyph</code>.</p>
     <p>Glyph updates itself from the same releases.</p>
   </div>
 </main>
@@ -125,7 +125,10 @@ document.querySelectorAll("[data-rule]").forEach(el => {
     if (r.ok) rel = await r.json();
   } catch (_) {}
 
-  const assetFor = t => rel && rel.assets.find(a => a.name.includes(`-${t}.`) && /\.(zip|tar\.gz)$/.test(a.name));
+  const assetFor = t => rel && (
+    (t === "x86_64-pc-windows-msvc" && rel.assets.find(a => /-windows-x64-setup\.exe$/.test(a.name))) ||
+    rel.assets.find(a => a.name.includes(`-${t}.`) && /\.(zip|tar\.gz)$/.test(a.name))
+  );
   if (rel) {
     const date = new Date(rel.published_at).toISOString().slice(0, 10);
     $("ver").innerHTML = "";
@@ -141,7 +144,7 @@ document.querySelectorAll("[data-rule]").forEach(el => {
     row.className = "plat" + (p.os === mine ? " mine" : "");
     const name = document.createElement("div");
     name.className = "name";
-    name.append(Object.assign(document.createElement("b"), { textContent: p.name }), Object.assign(document.createElement("span"), { textContent: p.sub }));
+    name.append(Object.assign(document.createElement("b"), { textContent: p.name }), Object.assign(document.createElement("span"), { textContent: a && a.name.endsWith("-setup.exe") ? "x64 · installer" : p.sub }));
     const size = Object.assign(document.createElement("div"), { className: "size", textContent: a ? mb(a.size) : "" });
     const btn = document.createElement("a");
     btn.className = "act alt";
