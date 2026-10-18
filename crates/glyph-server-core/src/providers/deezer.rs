@@ -64,12 +64,18 @@ pub async fn by_id(svc: &Services, id: &str) -> PResult<Candidate> {
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    search_page(svc, q, 0).await
+}
+
+/// One page of 15 results (`page` 0 = first).
+pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Candidate>> {
     #[derive(Deserialize)]
     struct Resp {
         #[serde(default)]
         data: Vec<DzTrack>,
     }
-    let url = build_url("https://api.deezer.com/search", &[("q", q), ("limit", "15")]);
+    let index = (page * 15).to_string();
+    let url = build_url("https://api.deezer.com/search", &[("q", q), ("limit", "15"), ("index", &index)]);
     let resp: Resp = fetch_json(svc, HttpRequest::get(url)).await?;
     Ok(resp.data.into_iter().map(to_candidate).collect())
 }

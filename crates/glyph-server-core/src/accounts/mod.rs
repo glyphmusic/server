@@ -87,7 +87,7 @@ pub fn max_body_bytes(path: &str) -> Option<usize> {
 
 /// Paths owned by this module.
 pub fn owns(path: &str) -> bool {
-    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/", "/v1/profile", "/v1/profiles/"]
+    ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/", "/embed/p/", "/oembed", "/v1/profile", "/v1/profiles/"]
         .iter()
         .any(|p| path == p.trim_end_matches('/') || path.starts_with(&format!("{}/", p.trim_end_matches('/'))))
 }
@@ -195,6 +195,7 @@ fn decode_exact(s: &str, len: usize, what: &str) -> Result<Vec<u8>, ApiErr> {
 
 fn wire_device(d: &Device, current: &str) -> glyph_protocol::Device {
     glyph_protocol::Device {
+        approximate_location: d.approximate_location.clone(),
         id: d.id.clone(),
         name: d.name.clone(),
         platform: d.platform.clone(),
@@ -339,8 +340,8 @@ impl Accounts {
             return Err(ApiErr::new(401, "token_expired", "refresh the access token"));
         }
         let user = self.store.user(&device.user_id).await.map_err(store_err)?.ok_or_else(unauthorized)?;
-        if now.saturating_sub(device.last_seen) > TOUCH_EVERY {
-            self.store.touch_device(&device.id, now).await.map_err(store_err)?;
+        if now.saturating_sub(device.last_seen) > TOUCH_EVERY || device.approximate_location.is_none() && req.approximate_location.is_some() {
+            self.store.touch_device(&device.id, now, req.approximate_location.as_deref()).await.map_err(store_err)?;
         }
         Ok(Authed { user, device })
     }
@@ -401,6 +402,7 @@ impl Accounts {
         let access = self.token("ga_");
         let refresh = self.token("gr_");
         let device = Device {
+            approximate_location: None,
             id: format!("d_{}", hex(&self.random(8))),
             user_id: user.id.clone(),
             name: clean_name(name),
@@ -434,16 +436,51 @@ impl Accounts {
         Ok(SharedPlaylist { code: s.code, name: s.name, songs: s.songs, kind: s.kind, author })
     }
 
-    /// `POST /v1/share`, `GET|DELETE /v1/share/<id>` and the `/p/<id>` page.
+    /// `POST /v1/share`, `GET|DELETE /v1/share/<id>`, the `/p/<id>` page with
+    /// its `/cover` and `/listen/<n>`, `/embed/p/<id>` and `/oembed`.
     async fn share(&self, svc: &Services, req: &Request, path: &str) -> Result<Response, ApiErr> {
         let m = req.method;
-        if let Some(id) = path.strip_prefix("/p/") {
+        if path == "/oembed" || path.starts_with("/embed/p/") || path.starts_with("/p/") {
             if m != Method::Get {
                 return Err(method());
             }
+        }
+        let lang = crate::share::lang(req.header("accept-language"));
+        if path == "/oembed" {
+            let id = req.query.get("url").and_then(crate::share::id_from_url).ok_or_else(|| ApiErr::not_found("not a Glyph link"))?;
+            if req.query.get("format").is_some_and(|f| f != "json") {
+                return Err(ApiErr::new(501, "not_implemented", "only format=json"));
+            }
+            let p = self.shared(&id).await?;
+            let mut r = Response::json(200, &crate::share::oembed(&p, &self.share_link(svc, &id), lang));
+            r.headers.push(("access-control-allow-origin".into(), "*".into()));
+            r.headers.push(("cache-control".into(), "public, max-age=3600".into()));
+            return Ok(r);
+        }
+        if let Some(id) = path.strip_prefix("/embed/p/") {
             return Ok(match self.shared(id).await {
-                Ok(p) => crate::share::page(Some((&p, &self.share_link(svc, id)))),
-                Err(_) => crate::share::page(None),
+                Ok(p) => crate::share::embed(Some((&p, &self.share_link(svc, id))), lang),
+                Err(_) => crate::share::embed(None, lang),
+            });
+        }
+        if let Some(rest) = path.strip_prefix("/p/") {
+            let (id, sub) = rest.split_once('/').unwrap_or((rest, ""));
+            if sub == "cover" {
+                return self.share_cover(svc, req, id, 0).await;
+            }
+            if let Some(n) = sub.strip_prefix("cover/") {
+                let n = n.parse().map_err(|_| ApiErr::not_found("no such song"))?;
+                return self.share_cover(svc, req, id, n).await;
+            }
+            if let Some(n) = sub.strip_prefix("listen/") {
+                return self.share_listen(svc, req, id, n).await;
+            }
+            if !sub.is_empty() {
+                return Err(ApiErr::not_found("unknown endpoint"));
+            }
+            return Ok(match self.shared(id).await {
+                Ok(p) => crate::share::page(Some((&p, &self.share_link(svc, id))), lang),
+                Err(_) => crate::share::page(None, lang),
             });
         }
         if let Some(id) = path.strip_prefix("/v1/share/") {
@@ -481,6 +518,48 @@ impl Accounts {
         };
         self.store.put_share(&share).await.map_err(store_err)?;
         Ok(Response::json(200, &ShareResponse { url: self.share_link(svc, &id), id }))
+    }
+
+    /// `GET /p/<id>/cover` (the first song's cover, for link cards) and
+    /// `/p/<id>/cover/<n>` (song rows); the app icon when there is none.
+    async fn share_cover(&self, svc: &Services, req: &Request, id: &str, n: usize) -> Result<Response, ApiErr> {
+        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        self.limit(svc, &format!("cover:{ip}"), 1200, 3600).await?;
+        let p = self.shared(id).await?;
+        let song = crate::share::songs(&p.code).into_iter().take(crate::share::MAX_LISTED).nth(n);
+        let cover = match song {
+            Some(t) => crate::server::find_cover(svc, &t).await,
+            None => None,
+        };
+        Ok(redirect(&cover.unwrap_or_else(|| "/og.png".into()), "public, max-age=86400"))
+    }
+
+    /// `GET /p/<id>/listen/<n>`: resolves song `n` and redirects to its
+    /// audio, for the web players. 404 for songs that only play in the app.
+    async fn share_listen(&self, svc: &Services, req: &Request, id: &str, n: &str) -> Result<Response, ApiErr> {
+        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        self.limit(svc, &format!("listen:{ip}"), 300, 3600).await?;
+        let n: usize = n.parse().map_err(|_| ApiErr::not_found("no such song"))?;
+        let p = self.shared(id).await?;
+        let track = crate::share::songs(&p.code).into_iter().take(crate::share::MAX_LISTED).nth(n).ok_or_else(|| ApiErr::not_found("no such song"))?;
+        let mut resolved = crate::resolver::resolve(svc, glyph_protocol::ResolveRequest { track, priority: vec![] }).await;
+        if svc.config.proxy_audio {
+            crate::media::proxy_playback(&mut resolved);
+        }
+        use glyph_protocol::PlaybackSource;
+        let (provider, url, preview) = match resolved.source {
+            Some(PlaybackSource::Stream { provider, url, .. }) => (provider, url, false),
+            Some(PlaybackSource::Preview { provider, url }) => (provider, url, true),
+            _ => return Err(ApiErr::not_found("this song only plays in the Glyph app")),
+        };
+        // `?json`: the web players also show the source badge (`[YT]`) and
+        // `[PREVIEW 0:30]` like the app's player bar.
+        if req.query.get("json").is_some() {
+            let mut r = Response::json(200, &serde_json::json!({ "url": url, "badge": provider.badge(), "preview": preview }));
+            r.headers.push(("cache-control".into(), "no-store".into()));
+            return Ok(r);
+        }
+        Ok(redirect(&url, "no-store"))
     }
 
     pub async fn handle(&self, svc: &Arc<Services>, req: Request) -> Response {
@@ -571,7 +650,7 @@ impl Accounts {
         if let Some(name) = path.strip_prefix("/v1/sync/covers/") {
             return self.own_cover(svc, req, name).await;
         }
-        if path == "/v1/share" || path.starts_with("/v1/share/") || path.starts_with("/p/") {
+        if path == "/v1/share" || path.starts_with("/v1/share/") || path.starts_with("/p/") || path.starts_with("/embed/p/") || path == "/oembed" {
             return self.share(svc, req, path).await;
         }
 
@@ -897,6 +976,7 @@ impl Accounts {
                 d.refresh_hash = hash(&refresh);
                 d.refresh_exp = now + REFRESH_TTL;
                 d.last_seen = now;
+                if req.approximate_location.is_some() { d.approximate_location = req.approximate_location.clone(); }
                 self.store.put_device(&d).await.map_err(store_err)?;
                 Ok(Response::json(
                     200,
@@ -1082,6 +1162,15 @@ impl Accounts {
             }
             _ => Err(method()),
         }
+    }
+}
+
+/// A 302 to `to` (a provider URL or a path on this server).
+fn redirect(to: &str, cache: &str) -> Response {
+    Response {
+        status: 302,
+        headers: vec![("location".into(), to.into()), ("cache-control".into(), cache.into()), ("referrer-policy".into(), "no-referrer".into())],
+        body: Body::Bytes(vec![]),
     }
 }
 

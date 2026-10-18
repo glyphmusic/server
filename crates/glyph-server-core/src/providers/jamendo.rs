@@ -42,9 +42,15 @@ fn to_candidate(i: Item) -> Option<Candidate> {
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    search_page(svc, q, 0).await
+}
+
+/// One page of 15 results (`page` 0 = first).
+pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Candidate>> {
+    let offset = (page * 15).to_string();
     let url = build_url(
         BASE,
-        &[("client_id", key(svc)?), ("format", "json"), ("limit", "15"), ("search", q), ("audioformat", "mp32")],
+        &[("client_id", key(svc)?), ("format", "json"), ("limit", "15"), ("offset", &offset), ("search", q), ("audioformat", "mp32")],
     );
     let resp: Resp = fetch_json(svc, HttpRequest::get(url)).await?;
     Ok(resp.results.into_iter().filter_map(to_candidate).collect())

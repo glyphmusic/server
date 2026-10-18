@@ -25,9 +25,16 @@ Getting started:
   glyph-server doctor             check config, keys, ports and reachability
   glyph-server service install    start it automatically at boot
 
+yt-dlp companion of the Cloudflare Worker (takes effect at once):
+  glyph-server companion status
+  glyph-server companion off      every companion request gets 403
+  glyph-server companion on
+
 Manage a running server (here or anywhere):
   glyph-server remote login https://glyph.example.com
   glyph-server remote status
+  glyph-server remote limits --rate 120
+  glyph-server remote companion off
   glyph-server remote keys set youtube_api_key
   glyph-server remote logs --follow
   glyph-server remote accounts default-limit 5
@@ -66,6 +73,13 @@ enum Cmd {
     Remote(remote::RemoteArgs),
     /// Print an Argon2id hash of an admin password (for Docker / Cloudflare secrets)
     HashPassword,
+    /// Require a shared server bearer (prompted without echo); --disable makes it public.
+    Access { #[arg(long)] disable: bool },
+    /// Turn the Worker's yt-dlp companion on or off (off = 403), or show its state
+    Companion {
+        #[command(subcommand)]
+        cmd: CompanionCmd,
+    },
     /// Check GitHub for a newer release
     CheckUpdate,
     /// Download, verify (SHA-256) and install the latest release
@@ -73,6 +87,47 @@ enum Cmd {
     /// Entry point used by the Windows service manager
     #[command(hide = true)]
     ServiceRun,
+}
+
+#[derive(Subcommand, Clone, Copy)]
+enum CompanionCmd {
+    /// Answer the Worker again
+    On,
+    /// Answer every companion request with 403 Forbidden (YouTube pauses)
+    Off,
+    /// Show whether the companion is on and set up
+    Status,
+}
+
+/// `glyph-server companion ...`: a marker file the running server checks on
+/// every request, so no restart is needed.
+fn companion_cmd(cmd: CompanionCmd, s: &settings::Settings) {
+    let flag = serve::companion_off_flag(s);
+    match cmd {
+        CompanionCmd::Off => {
+            if let Some(dir) = flag.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).unwrap_or_else(|e| fail(format!("cannot create {}: {e}", dir.display())));
+            }
+            std::fs::write(&flag, b"off
+").unwrap_or_else(|e| fail(format!("cannot write {}: {e}", flag.display())));
+            println!("companion: off (requests get 403 Forbidden, YouTube pauses)");
+        }
+        CompanionCmd::On => {
+            match std::fs::remove_file(&flag) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => fail(format!("cannot remove {}: {e}", flag.display())),
+            }
+            println!("companion: on");
+        }
+        CompanionCmd::Status => {
+            let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32);
+            println!("companion: {}", if flag.exists() { "off (403)" } else { "on" });
+            println!("token:     {}", if token { "set" } else { "missing (YTDLP_SERVICE_TOKEN, companion routes answer 404)" });
+            println!("yt-dlp:    {}", s.ytdlp_path.as_deref().unwrap_or("from PATH"));
+            println!("switch:    {}", flag.display());
+        }
+    }
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -116,6 +171,16 @@ fn main() {
     }
 
     match cli.command {
+        Some(Cmd::Access { disable }) => {
+            let mut file = settings::load_file(&config_path, false).unwrap_or_else(|e| fail(e));
+            file.server_bearer_hash = if disable { None } else {
+                let token = dialoguer::Password::new().with_prompt("Server bearer (32-256 characters)").with_confirmation("Confirm bearer", "Bearers differ").interact().unwrap_or_else(|e| fail(e));
+                if !glyph_server_core::access::valid_token(&token) { fail("use 32-256 ASCII bearer characters"); }
+                Some(glyph_server_core::access::token_hash(&token))
+            };
+            for warning in settings::save(&config_path, &file).unwrap_or_else(|e| fail(e)) { eprintln!("{warning}"); }
+            println!("Server access updated. Restart the server to apply (environment overrides still win).");
+        }
         None | Some(Cmd::Serve) => {
             let s = load_settings(&cli);
             if !s.config_path.exists() {
@@ -183,6 +248,7 @@ fn main() {
             Ok(h) => println!("{h}"),
             Err(e) => fail(e),
         },
+        Some(Cmd::Companion { ref cmd }) => companion_cmd(*cmd, &load_settings(&cli)),
         Some(Cmd::CheckUpdate) => {
             let s = load_settings(&cli);
             if let Err(e) = runtime().block_on(update::check(&s.update_repo)) {

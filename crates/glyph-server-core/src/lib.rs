@@ -8,6 +8,7 @@
 //! Provider keys stay on the server. Host adapters may proxy/cache the resolved
 //! audio; the Worker returns relative media references to clients.
 
+pub mod access;
 pub mod accounts;
 pub mod admin;
 pub mod cache;

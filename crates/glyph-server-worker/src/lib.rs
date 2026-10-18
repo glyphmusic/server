@@ -11,7 +11,8 @@ mod media;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use glyph_server_core::admin::host::AdminHost;
+use glyph_server_core::admin::host::{AdminHost, HostError};
+use glyph_server_core::admin::types::{Capabilities, Limits};
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
 use glyph_server_core::ratelimit::CacheRateLimiter;
 use glyph_server_core::{
@@ -138,7 +139,7 @@ fn secret(env: &Env, name: &str) -> Option<String> {
         .ok()
 }
 
-fn build_server(env: &Env) -> Server {
+fn build_server(env: &Env, saved: Option<Limits>) -> Server {
     let rt: Arc<dyn Runtime> = Arc::new(WorkerRuntime);
     let api: Arc<dyn Cache> = Arc::new(CacheApi { rt: rt.clone() });
     let cache: Arc<dyn Cache> = match env.kv("GLYPH_KV") {
@@ -162,7 +163,25 @@ fn build_server(env: &Env) -> Server {
     };
     let mut config = Config::new(secrets);
     config.proxy_audio = true;
+    config.server_bearer_hash = secret(env, "GLYPH_SERVER_BEARER").map(|t| glyph_server_core::access::token_hash(&t));
+    if let Some(n) = secret(env, "RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()) {
+        config.rate_limit_per_min = n;
+    }
+    if let Some(n) = secret(env, "YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()) {
+        config.youtube_daily_budget_units = n;
+    }
+    // Limits saved with `glyph-server remote limits` win over wrangler.toml.
+    if let Some(l) = &saved {
+        config.rate_limit_per_min = l.rate_limit_per_min;
+        config.youtube_daily_budget_units = l.youtube_daily_budget_units;
+        config.import_max_pages = l.import_max_pages;
+        config.companion_enabled = l.companion_enabled;
+        config.audio_cache_days = l.audio_cache_days;
+        config.audio_cache_max_gb = l.audio_cache_max_gb;
+    }
     let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), secret(env, "YTDLP_SERVICE_TOKEN")) {
+        // `remote companion off`: YouTube search is off, audio answers 403.
+        _ if !config.companion_enabled => Arc::new(NoCommands),
         (Some(url), Some(token)) if url.starts_with("https://") && token.len() >= 32 => {
             config.ytdlp_path = Some("remote".into());
             // Remote extraction includes the network round trip and metadata lookup.
@@ -176,15 +195,10 @@ fn build_server(env: &Env) -> Server {
         .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
     // Short playlist links (`/p/<id>`); the domain must route `/p/*` to this Worker.
     config.share_origin = secret(env, "SHARE_ORIGIN").filter(|o| o.starts_with("https://"));
-    if let Some(n) = secret(env, "RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()) {
-        config.rate_limit_per_min = n;
-    }
-    if let Some(n) = secret(env, "YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()) {
-        config.youtube_daily_budget_units = n;
-    }
     // Rate-limit counters live in the (free, unmetered) Cache API, not in KV.
+    let api_cache = api.clone();
     let limiter = Arc::new(CacheRateLimiter::new(api, rt.clone()));
-    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost));
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { db: env.d1("GLYPH_DB").ok(), cache: api_cache }));
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
@@ -226,12 +240,62 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
     }
 }
 
-/// Secrets, limits and updates are managed with wrangler / Cloudflare, not at runtime.
-struct WorkerHost;
+/// Secrets and updates are managed with wrangler / Cloudflare. Limits and the
+/// companion switch are saved in D1 (`server_settings`), so `glyph-server
+/// remote ...` changes them from any machine.
+struct WorkerHost {
+    db: Option<worker::D1Database>,
+    cache: Arc<dyn Cache>,
+}
 
+const SETTINGS_CACHE_KEY: &str = "admin:limits";
+/// Each Cloudflare location re-reads D1 at most this often.
+const SETTINGS_CACHE_S: u64 = 30;
+
+/// Saved limits, or `None` when nothing was saved (wrangler.toml applies).
+async fn saved_limits(env: &Env) -> Option<Limits> {
+    let rt: Arc<dyn Runtime> = Arc::new(WorkerRuntime);
+    let cache = CacheApi { rt };
+    if let Some(hit) = glyph_server_core::cache::get_json::<Option<Limits>>(&cache, SETTINGS_CACHE_KEY).await {
+        return hit;
+    }
+    let db = env.d1("GLYPH_DB").ok()?;
+    #[derive(serde::Deserialize)]
+    struct Row { value: String }
+    let row = db.prepare("SELECT value FROM server_settings WHERE key = 'limits'").first::<Row>(None).await;
+    let limits = match row {
+        Ok(row) => row.and_then(|r| serde_json::from_str::<Limits>(&r.value).ok()),
+        // Table missing (migration not applied yet) or D1 down: defaults, uncached.
+        Err(_) => return None,
+    };
+    glyph_server_core::cache::put_json(&cache, SETTINGS_CACHE_KEY, &limits, SETTINGS_CACHE_S).await;
+    limits
+}
+
+#[async_trait(?Send)]
 impl AdminHost for WorkerHost {
     fn platform(&self) -> &'static str {
         "worker"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities { set_limits: self.db.is_some(), ..Capabilities::default() }
+    }
+
+    async fn persist_limits(&self, l: &Limits) -> std::result::Result<(), HostError> {
+        let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
+        let value = serde_json::to_string(l).map_err(|_| HostError::Failed("could not encode limits".into()))?;
+        db.prepare("INSERT INTO server_settings (key, value) VALUES ('limits', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(&[value.into()])
+            .map_err(|_| HostError::Failed("could not save limits".into()))?
+            .run()
+            .await
+            .map_err(|_| HostError::Failed(
+                "could not save limits (run: npx wrangler d1 migrations apply glyph --remote)".into(),
+            ))?;
+        // This location sees the change at once, the others within SETTINGS_CACHE_S.
+        glyph_server_core::cache::put_json(self.cache.as_ref(), SETTINGS_CACHE_KEY, &Some(l.clone()), SETTINGS_CACHE_S).await;
+        Ok(())
     }
 }
 
@@ -272,11 +336,21 @@ async fn fetch(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
         }
     }
 
-    let server = build_server(&env);
+    let server = build_server(&env, saved_limits(&env).await);
     // Deployed Workers are HTTPS-only; `wrangler dev` serves http://localhost.
     let secure = url.scheme() == "https";
     let local = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));
-    let request = glyph_server_core::Request::new(method, &target, headers, body, ip).with_transport(secure, local);
+    let mut request = glyph_server_core::Request::new(method, &target, headers, body, ip).with_transport(secure, local);
+    // Cloudflare edge metadata is trusted; arbitrary CF-* client headers are not.
+    request.approximate_location = req.cf().and_then(|cf| {
+        let parts: Vec<String> = [cf.region(), cf.country()].into_iter().flatten().filter(|s| !s.is_empty() && s != "XX" && s != "T1").collect();
+        (!parts.is_empty()).then(|| parts.join(", ").chars().filter(|c| !c.is_control()).take(100).collect())
+    });
+    if let Err(resp) = server.check_access(&request) {
+        let headers = Headers::new();
+        for (k,v) in &resp.headers { headers.set(k,v)?; }
+        return Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers));
+    }
     if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
         return media::handle(&req, &request, &server, &ctx, &env).await;
     }

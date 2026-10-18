@@ -158,6 +158,7 @@ pub async fn handle(
         };
     }
     let mut companion = false;
+    let mut cached_upstream: Option<Response> = None;
     let url = if let Some(url) = upstream {
         url
     } else {
@@ -195,6 +196,9 @@ pub async fn handle(
             if !media::valid_video_id(id) {
                 return Response::error("invalid video id", 400);
             }
+            if !svc.config.companion_enabled {
+                return Response::error("companion disabled", 403);
+            }
             let Some(base) =
                 super::secret(env, "YTDLP_SERVICE_URL").filter(|u| u.starts_with("https://"))
             else {
@@ -217,7 +221,33 @@ pub async fn handle(
             url
         }
     };
-    let upstream = if companion {
+    // Everything fetched through the companion is kept on Cloudflare (R2), so
+    // a song plays once from the companion machine and from R2 after that,
+    // even while that machine is off. The companion itself caches nothing.
+    let audio_bucket = env.bucket("GLYPH_COVERS").ok();
+    let r2_key = companion.then(|| r2_audio_key(url.path())).flatten();
+    let mut from_r2 = false;
+    if let (Some(bucket), Some(k)) = (&audio_bucket, &r2_key) {
+        let max_age_ms = u64::from(svc.config.audio_cache_days) * 86_400_000;
+        if let Ok(Some(obj)) = bucket.get(k).execute().await {
+            // Older than `audio_cache_days`: fetch again (and replace it).
+            let age_ms = (worker::Date::now().as_millis()).saturating_sub(obj.uploaded().as_millis());
+            if age_ms <= max_age_ms {
+            let content_type = obj.http_metadata().content_type.unwrap_or_else(|| "audio/mp4".into());
+            let size = obj.size();
+            if let Some(body) = obj.body() {
+                let headers = Headers::new();
+                headers.set("content-type", &content_type)?;
+                headers.set("content-length", &size.to_string())?;
+                cached_upstream = Some(Response::from_stream(body.stream()?)?.with_headers(headers));
+                from_r2 = true;
+            }
+            }
+        }
+    }
+    let upstream = if let Some(hit) = cached_upstream.take() {
+        hit
+    } else if companion {
         let Some(token) = super::secret(env, "YTDLP_SERVICE_TOKEN").filter(|t| t.len() >= 32)
         else {
             return Response::error("yt-dlp companion not configured", 503);
@@ -308,7 +338,26 @@ pub async fn handle(
             let _ = worker::Cache::default().put(key, cached).await;
         });
     }
-    full.headers_mut().set("x-glyph-cache", "MISS")?;
+    if let (Some(bucket), Some(k), false) = (audio_bucket, r2_key, from_r2) {
+        if length.is_some_and(|n| n > 0 && n <= MAX_CACHE_BYTES) {
+            let mut copy = full.cloned()?;
+            let content_type = content_type.clone();
+            let db = env.d1("GLYPH_DB").ok();
+            let max_bytes = u64::from(svc.config.audio_cache_max_gb) * 1_000_000_000;
+            ctx.wait_until(async move {
+                if let Ok(bytes) = copy.bytes().await {
+                    let size = bytes.len() as u64;
+                    let meta = worker::HttpMetadata { content_type: Some(content_type), ..Default::default() };
+                    if bucket.put(k.clone(), bytes).http_metadata(meta).execute().await.is_ok() {
+                        if let Some(db) = db {
+                            keep_under_cap(&db, &bucket, &k, size, max_bytes).await;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    full.headers_mut().set("x-glyph-cache", if from_r2 { "R2" } else { "MISS" })?;
     if let (Some(value), Some(total)) = (range, length) {
         let Some((start, end)) = media::byte_range(&value, total) else {
             let mut out = Response::error("range not satisfiable", 416)?;
@@ -349,4 +398,39 @@ fn head(resp: Response) -> Result<Response> {
     let status = resp.status_code();
     let headers = resp.headers().clone();
     Ok(Response::empty()?.with_status(status).with_headers(headers))
+}
+
+/// R2 key for audio fetched from the companion (`/internal/audio/<id>` -> `audio/youtube/<id>`).
+fn r2_audio_key(path: &str) -> Option<String> {
+    let id = path.strip_prefix("/internal/audio/")?.rsplit('/').next()?;
+    media::valid_video_id(id).then(|| format!("audio/youtube/{id}"))
+}
+
+/// Records a stored song and deletes the oldest ones while the total is over
+/// `audio_cache_max_gb`. Without migration 0008 it does nothing (the R2
+/// lifecycle rule still removes old songs).
+async fn keep_under_cap(db: &worker::D1Database, bucket: &worker::Bucket, key: &str, size: u64, max_bytes: u64) {
+    use worker::wasm_bindgen::JsValue;
+    #[derive(serde::Deserialize)]
+    struct Total { total: Option<f64> }
+    #[derive(serde::Deserialize)]
+    struct Oldest { key: String }
+    let now = worker::Date::now().as_millis() as f64;
+    let Ok(stmt) = db
+        .prepare("INSERT INTO audio_cache (key, size, created) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET size = excluded.size, created = excluded.created")
+        .bind(&[JsValue::from(key), JsValue::from(size as f64), JsValue::from(now)])
+    else { return };
+    if stmt.run().await.is_err() { return; }
+    // Bounded, so one request never deletes more than a batch.
+    for _ in 0..50 {
+        let total = match db.prepare("SELECT SUM(size) AS total FROM audio_cache").first::<Total>(None).await {
+            Ok(Some(t)) => t.total.unwrap_or(0.0) as u64,
+            _ => return,
+        };
+        if total <= max_bytes { return; }
+        let Ok(Some(old)) = db.prepare("SELECT key FROM audio_cache ORDER BY created LIMIT 1").first::<Oldest>(None).await else { return };
+        let _ = bucket.delete(&old.key).await;
+        let Ok(del) = db.prepare("DELETE FROM audio_cache WHERE key = ?1").bind(&[JsValue::from(old.key.as_str())]) else { return };
+        if del.run().await.is_err() { return; }
+    }
 }

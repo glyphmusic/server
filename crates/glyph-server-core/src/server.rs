@@ -9,7 +9,7 @@ use crate::merge::plain_words;
 use crate::params::Query;
 use crate::providers::{self, lastfm, lrclib};
 use crate::resolver;
-use crate::search::{encode_event, search_stream};
+use crate::search::{encode_event, search_stream_page};
 use crate::traits::{boxed_stream, BoxStream, Method, RateDecision, Services};
 use futures::StreamExt;
 use glyph_protocol::{
@@ -36,6 +36,8 @@ pub struct Request {
     pub body: Vec<u8>,
     /// Peer address (or a trusted proxy header) as determined by the host.
     pub client_ip: Option<String>,
+    /// Trusted host-derived region/country, never parsed from client headers.
+    pub approximate_location: Option<String>,
     /// The connection reached us over HTTPS (directly or via a trusted proxy).
     pub secure: bool,
     /// The caller is on this machine (loopback, no proxy headers).
@@ -60,6 +62,7 @@ impl Request {
             headers: headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect(),
             body,
             client_ip,
+            approximate_location: None,
             secure: false,
             local: false,
         }
@@ -196,7 +199,11 @@ impl Server {
     }
 
     pub async fn handle(&self, req: Request) -> Response {
+        if let Err(response) = self.check_access(&req) { return response; }
         let svc = self.services();
+        if req.path == "/v1/access" && req.method == Method::Get {
+            return Response::json(200, &serde_json::json!({"ok": true}));
+        }
         if req.path.starts_with("/admin/v1") {
             return self.handle_admin(&svc, req).await;
         }
@@ -253,12 +260,31 @@ pub async fn rate_limit(svc: &Arc<Services>, req: &Request) -> Result<(), ApiErr
     }
 }
 
+/// Cover art for `track`: its own, else Deezer by ISRC, else a Deezer search hit.
+pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option<String> {
+    if let Some(c) = track.cover_url.clone().filter(|u| !u.is_empty()) {
+        return Some(c);
+    }
+    if let Some(isrc) = track.isrc.as_deref() {
+        let c = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc)).await
+            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url);
+        if c.is_some() {
+            return c;
+        }
+    }
+    let query = format!("{} {}", track.artist, track.title);
+    crate::search::search_provider(svc, ProviderId::Deezer, &query).await.ok()
+        .and_then(|hits| hits.into_iter().find(|c| crate::merge::artists_match(&track.artist, &c.track.artist) && crate::merge::normalize_title(&track.title) == crate::merge::normalize_title(&c.track.title)))
+        .and_then(|c| c.track.cover_url)
+}
+
 async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
     {
         match route {
             Route::Health => Ok(Response::json(
                 200,
                 &HealthResponse {
+                    server_auth_required: svc.config.server_bearer_hash.is_some(),
                     server_version: svc.config.server_version.clone(),
                     protocol_version: PROTOCOL_VERSION,
                     providers: svc.config.enabled_providers(),
@@ -268,7 +294,9 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
             )),
             Route::Search => {
                 let q = req.query.required("q")?.to_string();
-                let stream = search_stream(svc.clone(), q).map(|e| encode_event(&e));
+                // `page` (0-based) loads further results while scrolling.
+                let page = req.query.get("page").and_then(|p| p.parse::<usize>().ok()).unwrap_or(0).min(20);
+                let stream = search_stream_page(svc.clone(), q, page).map(|e| encode_event(&e));
                 Ok(Response {
                     status: 200,
                     headers: base_headers("application/x-ndjson; charset=utf-8"),
@@ -299,19 +327,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
             }
             Route::Cover => {
                 let track: glyph_protocol::Track = parse_body(&req)?;
-                let mut cover = track.cover_url.filter(|u| !u.is_empty());
-                if cover.is_none() {
-                    if let Some(isrc) = track.isrc.as_deref() {
-                        cover = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc)).await
-                            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url);
-                    }
-                    if cover.is_none() {
-                        let query = format!("{} {}", track.artist, track.title);
-                        cover = crate::search::search_provider(svc, ProviderId::Deezer, &query).await.ok()
-                            .and_then(|hits| hits.into_iter().find(|c| crate::merge::artists_match(&track.artist, &c.track.artist) && crate::merge::normalize_title(&track.title) == crate::merge::normalize_title(&c.track.title)))
-                            .and_then(|c| c.track.cover_url);
-                    }
-                }
+                let cover = find_cover(svc, &track).await;
                 Ok(Response::json(200, &serde_json::json!({ "url": cover })))
             }
             Route::Download => {

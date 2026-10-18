@@ -45,9 +45,15 @@ pub fn playback(svc: &Services, id: &str) -> PlaybackSource {
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    search_page(svc, q, 0).await
+}
+
+/// One page of 15 results (`page` 0 = first).
+pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Candidate>> {
+    let offset = (page * 15).to_string();
     let url = build_url(
         &format!("{BASE}/tracks/search"),
-        &[("query", q), ("limit", "15"), ("app_name", &svc.config.audius_app_name)],
+        &[("query", q), ("limit", "15"), ("offset", &offset), ("app_name", &svc.config.audius_app_name)],
     );
     let resp: Resp = fetch_json(svc, HttpRequest::get(url)).await?;
     Ok(resp

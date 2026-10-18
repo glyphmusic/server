@@ -105,6 +105,7 @@ struct PasskeyRow {
 
 #[derive(Deserialize)]
 struct DeviceRow {
+    approximate_location: Option<String>,
     id: String,
     user_id: String,
     name: String,
@@ -119,6 +120,7 @@ struct DeviceRow {
 impl From<DeviceRow> for Device {
     fn from(r: DeviceRow) -> Self {
         Device {
+            approximate_location: r.approximate_location,
             id: r.id,
             user_id: r.user_id,
             name: r.name,
@@ -175,7 +177,7 @@ struct RevRow {
 const USER_COLS: &str = "id, handle, created_at,
     COALESCE(NULLIF(device_limit, 0), (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_device_limit'), 5) AS device_limit,
     device_limit AS device_limit_set, rev, purged_rev, recovery_hash, handle_changed_at, pw_salt, pw_hash";
-const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp";
+const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp, approximate_location";
 const ITEM_COLS: &str = "kind, key, value, updated_at, device_id, deleted, rev";
 
 #[async_trait(?Send)]
@@ -366,7 +368,7 @@ impl AccountStore for D1Store {
 
     async fn put_device(&self, d: &Device) -> StoreResult<()> {
         self.run(
-            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
             &[
                 s(&d.id),
                 s(&d.user_id),
@@ -378,6 +380,7 @@ impl AccountStore for D1Store {
                 n(d.access_exp),
                 s(&d.refresh_hash),
                 n(d.refresh_exp),
+                opt(&d.approximate_location),
             ],
         )
         .await
@@ -388,8 +391,8 @@ impl AccountStore for D1Store {
         // One statement: the count and the insert cannot interleave with another sign-in.
         self.run(
             &format!(
-                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
-                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?11"
+                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?12"
             ),
             &[
                 s(&d.id),
@@ -402,6 +405,7 @@ impl AccountStore for D1Store {
                 n(d.access_exp),
                 s(&d.refresh_hash),
                 n(d.refresh_exp),
+                opt(&d.approximate_location),
                 n(limit as u64),
             ],
         )
@@ -409,8 +413,8 @@ impl AccountStore for D1Store {
         .map(|c| c == 1)
     }
 
-    async fn touch_device(&self, id: &str, last_seen: u64) -> StoreResult<()> {
-        self.run("UPDATE devices SET last_seen = ?1 WHERE id = ?2", &[n(last_seen), s(id)]).await.map(|_| ())
+    async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()> {
+        self.run("UPDATE devices SET last_seen = ?1, approximate_location = COALESCE(?3, approximate_location) WHERE id = ?2", &[n(last_seen), s(id), opt(&approximate_location.map(str::to_string))]).await.map(|_| ())
     }
 
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool> {

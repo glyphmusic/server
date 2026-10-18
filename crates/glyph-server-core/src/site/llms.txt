@@ -1,0 +1,29 @@
+# Glyph
+
+> Glyph is a free, fast desktop music player for Windows, macOS and Linux. It searches many legal music sources at once (Audius, Internet Archive, Jamendo, Deezer previews, SoundCloud, YouTube and more), merges the results into one list and plays them in one flat, quiet app with synced lyrics, ASCII-art covers and an optional account that syncs a library across devices.
+
+Glyph is a native app written in Rust (GPUI), not a web app. It plays only free and legal sources: full songs from open platforms and official 30 second previews elsewhere. It has no ads and no tracking. The server behind it (glyph-server) is open source and can be self-hosted.
+
+## Pages
+
+- [Home]({ORIGIN}/): what Glyph is, screenshots and features
+- [Download]({ORIGIN}/download): installers for Windows, macOS and Linux (latest GitHub release)
+
+## Features
+
+- Search everywhere: many sources merged into one ranked list
+- Synced lyrics that scroll with the song
+- Optional ASCII-art covers drawn from the real cover
+- Crossfade, loudness normalisation, 10-band equaliser, output device choice
+- Optional @handle account that syncs likes, playlists and settings
+- Share a playlist as a short link (`{ORIGIN}/p/<id>`); anyone can listen to it in the browser or paste it into Glyph to add it
+
+## Shared playlist links
+
+- `{ORIGIN}/p/<id>`: playlist page with a web player
+- `{ORIGIN}/embed/p/<id>`: small player for an iframe
+- `{ORIGIN}/oembed?url={ORIGIN}/p/<id>`: oEmbed (JSON) for that player
+
+## Optional
+
+- [Releases](https://github.com/glyphmusic/desktop/releases/latest): downloads and changelog

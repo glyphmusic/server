@@ -38,18 +38,23 @@ pub fn query_key(q: &str) -> String {
 
 /// Search one provider with cache, cool-off and timeout.
 pub async fn search_provider(svc: &Services, id: ProviderId, q: &str) -> Result<Vec<Candidate>, ProviderError> {
+    search_provider_page(svc, id, q, 0).await
+}
+
+/// [`search_provider`] for result page `page` (0 = first).
+pub async fn search_provider_page(svc: &Services, id: ProviderId, q: &str, page: usize) -> Result<Vec<Candidate>, ProviderError> {
     if !svc.config.provider_enabled(id) {
         return Err(ProviderError::NotConfigured);
     }
     if is_skipped(svc, id).await {
         return Err(ProviderError::Skipped);
     }
-    let ckey = format!("search:{}:{}", id.badge(), query_key(q));
+    let ckey = if page == 0 { format!("search:{}:{}", id.badge(), query_key(q)) } else { format!("search:{}:{}:p{page}", id.badge(), query_key(q)) };
     if let Some(hit) = cache::get_json::<Vec<Candidate>>(&*svc.cache, &ckey).await {
         return Ok(hit);
     }
     let timeout = if id == ProviderId::YouTube { svc.config.provider_timeout_ms.max(22_000) } else { svc.config.provider_timeout_ms };
-    let res = match with_timeout(&*svc.rt, timeout, providers::search(svc, id, q)).await {
+    let res = match with_timeout(&*svc.rt, timeout, providers::search(svc, id, q, page)).await {
         Some(r) => r,
         None => Err(ProviderError::Timeout),
     };
@@ -63,12 +68,18 @@ pub async fn search_provider(svc: &Services, id: ProviderId, q: &str) -> Result<
 /// Stream of events: one `Results` per provider that answers (merged with what
 /// was already sent), `ProviderError` for failures, then `Done`.
 pub fn search_stream(svc: Arc<Services>, q: String) -> BoxStream<SearchEvent> {
+    search_stream_page(svc, q, 0)
+}
+
+/// [`search_stream`] for result page `page`; later pages ask only the
+/// providers that can page.
+pub fn search_stream_page(svc: Arc<Services>, q: String, page: usize) -> BoxStream<SearchEvent> {
     let futs = FuturesUnordered::new();
-    for id in svc.config.search_providers() {
+    for id in svc.config.search_providers().into_iter().filter(|id| page == 0 || providers::pages(*id)) {
         let svc = svc.clone();
         let q = q.clone();
         futs.push(boxed_fut(async move {
-            let r = search_provider(&svc, id, &q).await;
+            let r = search_provider_page(&svc, id, &q, page).await;
             (id, r)
         }));
     }

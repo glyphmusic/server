@@ -8,8 +8,7 @@
 //!
 //! A report is trusted when the YouTube Data API (if a key is configured) or
 //! the server's own yt-dlp confirms the video exists and its title / channel /
-//! duration fit the song, or else once [`MIN_VOTES`] different installs
-//! reported the same video. With yt-dlp the first sure report is shared at once.
+//! duration fit the song. Client-chosen installation IDs never establish trust.
 
 use crate::cache::{self, DAY};
 use crate::error::ApiErr;
@@ -20,11 +19,8 @@ use glyph_protocol::{Track, YouTubeHintRequest, YouTubeHintResponse};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Different installs that must agree when the Data API cannot check.
-pub const MIN_VOTES: usize = 2;
 /// Hints live long; every vote is one cache (KV) write.
 const TTL_S: u64 = 60 * DAY;
-const MAX_VOTES: usize = 12;
 /// YouTube uploads often carry a few seconds of intro / outro.
 const DURATION_TOLERANCE_MS: u64 = 6_000;
 /// Reports per install (or IP) per hour.
@@ -54,7 +50,7 @@ pub fn valid_video_id(id: &str) -> bool {
 pub fn song_key(t: &Track) -> Option<String> {
     let artist = plain_words(&normalize_artist(&t.artist));
     let title = plain_words(&normalize_title(&t.title));
-    (!artist.is_empty() && !title.is_empty()).then(|| format!("ythint:{artist}:{title}"))
+    (!artist.is_empty() && !title.is_empty()).then(|| format!("ythint:verified-v2:{artist}:{title}"))
 }
 
 /// The shared video id for `t`, if one is confirmed.
@@ -134,7 +130,7 @@ async fn verify_ytdlp(svc: &Services, want: &Track, video_id: &str) -> Option<bo
     if !svc.config.provider_enabled(glyph_protocol::ProviderId::YouTube) {
         return None;
     }
-    // No metadata (bot check, empty output): the votes decide.
+    // No metadata (bot check, empty output): do not confirm client input.
     let (title, channel, ms) = crate::providers::youtube::video_info(svc, video_id).await.ok()??;
     Some(video_fits(want, &title, &channel, ms))
 }
@@ -154,41 +150,17 @@ pub async fn report(svc: &Services, voter: &str, req: YouTubeHintRequest) -> Res
         return Ok(YouTubeHintResponse { accepted: true, confirmed: true });
     }
     match verify(svc, &req.track, &req.video_id).await {
-        Some(false) => return Ok(YouTubeHintResponse { accepted: false, confirmed: entry.confirmed.is_some() }),
-        Some(true) if entry.confirmed.is_none() => {
-            entry.confirmed = Some(req.video_id.clone());
-            cache::put_json(&*svc.cache, &key, &entry, TTL_S).await;
-            return Ok(YouTubeHintResponse { accepted: true, confirmed: true });
+        Some(true) => {
+            // Preserve the existing verified match rather than letting a client replace it.
+            if entry.confirmed.is_none() {
+                entry.confirmed = Some(req.video_id.clone());
+                cache::put_json(&*svc.cache, &key, &entry, TTL_S).await;
+            }
+            Ok(YouTubeHintResponse { accepted: true, confirmed: entry.confirmed.as_deref() == Some(req.video_id.as_str()) })
         }
-        // Verified, but another verified id is already shared: count a vote.
-        _ => {}
+        Some(false) => Ok(YouTubeHintResponse { accepted: false, confirmed: false }),
+        None => Ok(YouTubeHintResponse { accepted: true, confirmed: false }),
     }
-    let before = entry.clone();
-    entry.votes.retain(|v| v.voter != voter);
-    entry.votes.push(Vote { video: req.video_id.clone(), voter });
-    if entry.votes.len() > MAX_VOTES {
-        let extra = entry.votes.len() - MAX_VOTES;
-        entry.votes.drain(..extra);
-    }
-    // The id with the most votes wins once it has enough of them.
-    let count = |id: &str| entry.votes.iter().filter(|v| v.video == id).count();
-    let mut leader: Option<(String, usize)> = None;
-    for v in &entry.votes {
-        let n = count(&v.video);
-        if leader.as_ref().map_or(true, |(_, best)| n > *best) {
-            leader = Some((v.video.clone(), n));
-        }
-    }
-    if let Some((id, n)) = leader {
-        let current = entry.confirmed.as_deref().map(count).unwrap_or(0);
-        if n >= MIN_VOTES && n > current {
-            entry.confirmed = Some(id);
-        }
-    }
-    if entry != before {
-        cache::put_json(&*svc.cache, &key, &entry, TTL_S).await;
-    }
-    Ok(YouTubeHintResponse { accepted: true, confirmed: entry.confirmed.as_deref() == Some(req.video_id.as_str()) })
 }
 
 #[cfg(test)]
@@ -229,20 +201,18 @@ mod tests {
     }
 
     #[test]
-    fn votes_confirm_without_api_key() {
+    fn client_chosen_installations_never_confirm_unverified_hints() {
         let h = harness(Default::default());
         block_on(async {
-            let r = report(&h.svc, "install-a", req("7wtfhZwyrcc")).await.unwrap();
-            assert!(r.accepted && !r.confirmed);
-            // The same install again does not count twice.
-            assert!(!report(&h.svc, "install-a", req("7wtfhZwyrcc")).await.unwrap().confirmed);
+            for i in 0..20 {
+                let result = report(&h.svc, &format!("attacker-{i}"), req("7wtfhZwyrcc")).await.unwrap();
+                assert!(result.accepted && !result.confirmed);
+            }
             assert_eq!(lookup(&h.svc, &song()).await, None);
-            let r = report(&h.svc, "install-b", req("7wtfhZwyrcc")).await.unwrap();
-            assert!(r.confirmed);
-            assert_eq!(lookup(&h.svc, &song()).await.as_deref(), Some("7wtfhZwyrcc"));
-            // One dissenting vote does not flip it.
-            assert!(!report(&h.svc, "install-c", req("IhP3J0j9JmY")).await.unwrap().confirmed);
-            assert_eq!(lookup(&h.svc, &song()).await.as_deref(), Some("7wtfhZwyrcc"));
+            // Values promoted under the old client-voting rules are ignored.
+            let old_key = song_key(&song()).unwrap().replace("ythint:verified-v2:", "ythint:");
+            cache::put_json(&*h.svc.cache, &old_key, &Entry { confirmed: Some("xxxxxxxxxxx".into()), ..Default::default() }, TTL_S).await;
+            assert_eq!(lookup(&h.svc, &song()).await, None);
         });
         assert_eq!(h.http.call_count("googleapis"), 0);
     }

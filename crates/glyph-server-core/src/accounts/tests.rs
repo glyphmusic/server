@@ -615,6 +615,18 @@ fn share_links_need_an_account_and_die_with_it() {
     let page = block_on(t.s.handle(Request::new(Method::Get, &format!("/p/{id}"), vec![], vec![], None)));
     assert_eq!(page.status, 200);
     assert!(String::from_utf8_lossy(page.bytes().unwrap()).contains("@gisela"));
+    // Link cards, the embed player and oEmbed.
+    let get = |p: &str| block_on(t.s.handle(Request::new(Method::Get, p, vec![], vec![], None)));
+    assert_eq!(get(&format!("/p/{id}/cover")).status, 302);
+    assert_eq!(get(&format!("/p/{id}/cover/0")).status, 302);
+    assert_eq!(get(&format!("/p/{id}/listen/999")).status, 404);
+    assert_eq!(get(&format!("/p/{id}/nope")).status, 404);
+    assert_eq!(get(&format!("/embed/p/{id}")).status, 200);
+    let o = get(&format!("/oembed?format=json&url={ORIGIN}/p/{id}"));
+    assert_eq!(o.status, 200);
+    let o: serde_json::Value = serde_json::from_slice(o.bytes().unwrap()).unwrap();
+    assert_eq!((o["type"].as_str(), o["author_name"].as_str()), (Some("rich"), Some("@gisela")));
+    assert_eq!(get("/oembed?url=https://example.com/x").status, 404);
 
     // Albums carry no author.
     let (_, v) = call(&t, Method::Post, "/v1/share", serde_json::json!({"code": "glyph:playlist:abc", "kind": "album"}), Some(&s1.access_token));
@@ -660,7 +672,13 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     assert_eq!(s, 404);
 
     // Picture: stored, served by its hash, the old one removed when replaced.
-    let pic = b"\xff\xd8\xffpicture".to_vec();
+    let make_pic = |color| {
+        let image = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba(color)));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    };
+    let pic = make_pic([10,20,30,255]);
     let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), pic.clone(), None)));
     assert_eq!(r.status, 200);
     let settings: serde_json::Value = serde_json::from_slice(r.bytes().unwrap()).unwrap();
@@ -668,8 +686,10 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), b"text".to_vec(), None)));
     assert_eq!(r.status, 400);
     let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{pic_sha}"), bearer(&viewer), vec![], None)));
-    assert_eq!((r.status, r.bytes().unwrap()), (200, pic.as_slice()));
-    let pic2 = b"\xff\xd8\xffsecond".to_vec();
+    assert_eq!(r.status, 200);
+    assert_eq!(&r.bytes().unwrap()[8..12], b"WEBP");
+    assert_eq!(::image::load_from_memory(r.bytes().unwrap()).unwrap().to_rgba8().get_pixel(0,0).0, [10,20,30,255]);
+    let pic2 = make_pic([30,20,10,255]);
     block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), pic2, None)));
     assert!(!t.blobs.objects.lock().unwrap().contains_key(&format!("users/{}/profile/{pic_sha}", owner.account.id)));
 
@@ -681,7 +701,11 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     assert_eq!((s, v["stored"].as_bool()), (200, Some(true)));
     let (_, v) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, Some(&viewer.access_token));
     assert_eq!(v["private"], false);
-    assert_eq!(v["playlists"], serde_json::json!([{"id": "p1", "name": "Shown", "songs": 2, "cover": cover_sha}]));
+    let pl = &v["playlists"][0];
+    assert_eq!(v["playlists"].as_array().map(|a| a.len()), Some(1));
+    assert_eq!((&pl["id"], &pl["name"], &pl["songs"], &pl["cover"]), (&serde_json::json!("p1"), &serde_json::json!("Shown"), &serde_json::json!(2), &serde_json::json!(cover_sha)));
+    // The first songs ride along for the app's cover mosaic.
+    assert_eq!(pl["preview"].as_array().map(|a| a.len()), Some(2));
     assert_eq!(v["recent"], serde_json::json!([track]));
     let (s, v) = call(&t, Method::Get, "/v1/profiles/owner/playlists/p1", serde_json::Value::Null, Some(&viewer.access_token));
     assert_eq!((s, v["tracks"].as_array().map(|a| a.len())), (200, Some(2)));
@@ -705,4 +729,26 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     assert!(!t.blobs.objects.lock().unwrap().keys().any(|k| k.starts_with(&format!("users/{}/", owner.account.id))));
     let (s, _) = call(&t, Method::Get, "/v1/profiles/owner", serde_json::Value::Null, Some(&viewer.access_token));
     assert_eq!(s, 404);
+}
+
+#[test]
+fn device_location_is_host_derived_and_logout_revokes_both_tokens() {
+    let t=setup();
+    let (alice,_,_)=sign_up(&t,"alice_location");
+    let (bob,_,_)=sign_up(&t,"bob_location");
+    let headers=vec![("authorization".into(),format!("Bearer {}",alice.access_token)),("x-device-location".into(),"Forged city".into()),("cf-region".into(),"Forged region".into())];
+    let request=Request::new(Method::Get,"/v1/devices",headers.clone(),vec![],None);
+    let response=block_on(t.s.handle(request));
+    let devices:DevicesResponse=serde_json::from_slice(response.bytes().unwrap()).unwrap();
+    assert_eq!(devices.devices[0].approximate_location,None,"client headers cannot supply location");
+    let mut request=Request::new(Method::Get,"/v1/devices",headers,vec![],None);
+    request.approximate_location=Some("Berlin, DE".into());
+    let response=block_on(t.s.handle(request));
+    let devices:DevicesResponse=serde_json::from_slice(response.bytes().unwrap()).unwrap();
+    assert_eq!(devices.devices[0].approximate_location.as_deref(),Some("Berlin, DE"));
+    assert_eq!(call(&t,Method::Delete,&format!("/v1/devices/{}",bob.device_id),serde_json::Value::Null,Some(&alice.access_token)).0,404);
+    assert_eq!(call(&t,Method::Get,"/v1/devices",serde_json::Value::Null,Some(&bob.access_token)).0,200);
+    assert_eq!(call(&t,Method::Delete,&format!("/v1/devices/{}",alice.device_id),serde_json::Value::Null,Some(&alice.access_token)).0,200);
+    assert_eq!(call(&t,Method::Get,"/v1/devices",serde_json::Value::Null,Some(&alice.access_token)).0,401);
+    assert_eq!(call(&t,Method::Post,"/v1/account/token/refresh",serde_json::json!({"refresh_token":alice.refresh_token}),None).0,401);
 }

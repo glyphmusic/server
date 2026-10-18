@@ -114,6 +114,8 @@ impl Secrets {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// SHA-256 of the optional self-hosted server bearer (never an account token).
+    pub server_bearer_hash: Option<String>,
     /// The host implements the streaming /v1/audio endpoint.
     pub proxy_audio: bool,
     pub secrets: Secrets,
@@ -129,6 +131,11 @@ pub struct Config {
     pub ytdlp_path: Option<String>,
     /// Max pages fetched per playlist import (Workers free plan: 50 subrequests).
     pub import_max_pages: u32,
+    /// Switch for the yt-dlp companion, changed with `remote companion on|off`.
+    pub companion_enabled: bool,
+    /// Days / GB of companion audio kept in R2 (Worker).
+    pub audio_cache_days: u32,
+    pub audio_cache_max_gb: u32,
     pub audius_app_name: String,
     /// Argon2id PHC hash of the admin password. `None` = admin API disabled.
     pub admin_password_hash: Option<String>,
@@ -140,6 +147,7 @@ pub struct Config {
 impl Config {
     pub fn new(secrets: Secrets) -> Self {
         Self {
+            server_bearer_hash: None,
             proxy_audio: false,
             secrets: secrets.normalized(),
             server_version: crate::SERVER_VERSION.to_string(),
@@ -148,6 +156,9 @@ impl Config {
             youtube_daily_budget_units: 9000,
             ytdlp_path: None,
             import_max_pages: 5,
+            companion_enabled: true,
+            audio_cache_days: 15,
+            audio_cache_max_gb: 10,
             audius_app_name: "glyph".to_string(),
             admin_password_hash: None,
             share_origin: None,

@@ -1,3 +1,5 @@
+# Optional shared app access: run `glyph-server access` or set GLYPH_SERVER_BEARER.
+# Off by default; independent of the admin password. HTTPS required outside loopback.
 # Copy to server.toml. Environment variables (YOUTUBE_API_KEY, ...) override this file.
 bind = "0.0.0.0:8787"
 # cache_dir = "cache"            # optional disk cache for long-lived entries

@@ -106,8 +106,23 @@ pub(crate) fn candidate(track: Track, playback: Option<PlaybackSource>) -> Candi
     Candidate { track, bonus: 0.0, playback }
 }
 
+/// Providers that can return further result pages (`page` > 0).
+pub fn pages(id: ProviderId) -> bool {
+    matches!(id, ProviderId::Deezer | ProviderId::Audius | ProviderId::Jamendo | ProviderId::Archive)
+}
+
 /// Search one provider (no caching, no timeout; see `search::search_provider`).
-pub async fn search(svc: &Services, id: ProviderId, q: &str) -> PResult<Vec<Candidate>> {
+/// `page` 0 is the first page; later pages only from providers with [`pages`].
+pub async fn search(svc: &Services, id: ProviderId, q: &str, page: usize) -> PResult<Vec<Candidate>> {
+    if page > 0 {
+        return match id {
+            ProviderId::Audius => audius::search_page(svc, q, page).await,
+            ProviderId::Jamendo => jamendo::search_page(svc, q, page).await,
+            ProviderId::Archive => archive::search_page(svc, q, page).await,
+            ProviderId::Deezer => deezer::search_page(svc, q, page).await,
+            _ => Ok(vec![]),
+        };
+    }
     match id {
         ProviderId::Audius => audius::search(svc, q).await,
         ProviderId::Jamendo => jamendo::search(svc, q).await,
@@ -145,8 +160,14 @@ pub fn is_full_source(id: ProviderId) -> bool {
 }
 
 /// Cache TTL for search results of a provider (seconds).
-pub fn search_ttl(_id: ProviderId) -> u64 {
-    15 * 60
+pub fn search_ttl(id: ProviderId) -> u64 {
+    match id {
+        // Each YouTube search is a yt-dlp run on the companion machine. Under
+        // an hour, so the Worker keeps it in the Cache API and not in KV
+        // (MinTtlCache, 1,000 KV writes/day on the free plan).
+        ProviderId::YouTube => 55 * 60,
+        _ => 15 * 60,
+    }
 }
 
 /// Provider-sent JSON sometimes uses numbers or strings for the same field.

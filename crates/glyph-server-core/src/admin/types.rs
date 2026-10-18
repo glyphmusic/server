@@ -117,6 +117,27 @@ pub struct Limits {
     pub rate_limit_per_min: u32,
     pub youtube_daily_budget_units: u64,
     pub import_max_pages: u32,
+    /// yt-dlp companion (YouTube search and audio). Off = YouTube answers 403.
+    #[serde(default = "enabled")]
+    pub companion_enabled: bool,
+    /// Days companion audio stays in R2 (Worker only).
+    #[serde(default = "audio_days")]
+    pub audio_cache_days: u32,
+    /// Max GB of companion audio in R2; the oldest songs go first (Worker only).
+    #[serde(default = "audio_gb")]
+    pub audio_cache_max_gb: u32,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+fn audio_days() -> u32 {
+    15
+}
+
+fn audio_gb() -> u32 {
+    10
 }
 
 /// `GET/PUT /admin/v1/account-defaults`.

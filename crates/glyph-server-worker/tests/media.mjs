@@ -8,7 +8,7 @@ const calls = [];
 const token = 'test-only-companion-token-32-characters';
 const sample = '0123456789abcdefghijklmnopqrstuvwxyz';
 let delayedComplete = false;
-const mf = new Miniflare({
+const options = {
   modules: true,
   scriptPath: fileURLToPath(new URL('../build/index.js', import.meta.url)),
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'], fallthrough: true }],
@@ -48,7 +48,8 @@ const mf = new Miniflare({
     if (u.hostname === 'api.audius.co' || u.hostname === 'archive.org') return new Response('{}', { status: 404 });
     throw new Error(`Unexpected outbound request: ${u.origin}${u.pathname}`);
   },
-});
+};
+const mf = new Miniflare(options);
 const fetch = (path, init) => mf.dispatchFetch(`https://glyph.test${path}`, init);
 try {
   const cold = await fetch('/v1/audio/deezer/1', { headers: { range: 'bytes=5-9' } });
@@ -115,3 +116,39 @@ try {
 } finally {
   await mf.dispose();
 }
+
+// A second private instance exercises the same streaming adapter and its warm cache.
+const privateToken = 'private-instance-bearer-at-least-32-characters';
+const privateMf = new Miniflare({ ...options, bindings: { ...options.bindings, GLYPH_SERVER_BEARER: privateToken } });
+try {
+  const call = (path, headers = {}) => privateMf.dispatchFetch(`https://glyph.test${path}`, { headers });
+  const health = await call('/v1/health');
+  assert.equal((await health.json()).server_auth_required, true);
+  const before = calls.length;
+  for (const path of ['/v1/audio/deezer/1','/v1/download/jamendo/42','/v1/upstream?url=https://upload.wikimedia.org/a.jpg','/v1/profile','/v1/sync/export','/v1/access']) {
+    const denied = await call(path);
+    assert.equal(denied.status,401,path);
+    assert.equal((await denied.json()).code,'server_auth_required');
+  }
+  assert.equal(calls.length,before,'denied clients must never contact upstream');
+  const auth = { 'x-glyph-server-authorization': `Bearer ${privateToken}` };
+  assert.equal((await call('/v1/access',auth)).status,200);
+  const first = await call('/v1/audio/deezer/1',auth);
+  assert.equal(await first.text(),sample);
+  let hit = false;
+  for (let i=0;i<20;i++) {
+    const response = await call('/v1/audio/deezer/1',auth);
+    hit ||= response.headers.get('x-glyph-cache') === 'HIT';
+    await response.arrayBuffer();
+    if(hit) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.ok(hit,'private media should still cache');
+  const cachedDenied = await call('/v1/audio/deezer/1');
+  assert.equal(cachedDenied.status,401,'cached media still requires credentials');
+  await cachedDenied.arrayBuffer();
+  const invalid = await call('/v1/access',{'x-glyph-server-authorization':'Bearer wrong'});
+  assert.equal(invalid.status,401);
+  await invalid.arrayBuffer();
+  console.log('Private Worker: health discovery, invalid/missing token, cache gate and authorized playback passed.');
+} finally { await privateMf.dispose(); }

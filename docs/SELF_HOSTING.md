@@ -184,10 +184,19 @@ and the pairing flow let the user remove a device first.
 
 ### Other limits
 
-`glyph-server remote limits` shows and changes the general limits on the
-native server. On the Worker these are the `wrangler.toml` variables
-(`RATE_LIMIT_PER_MIN`, `YOUTUBE_DAILY_BUDGET_UNITS`); change them there and
-deploy.
+`glyph-server remote limits` shows and changes the general limits, e.g.
+`glyph-server remote limits --rate 120 --import-pages 3`.
+`glyph-server remote companion off|on` switches the yt-dlp companion
+(YouTube); while off, YouTube search is empty and YouTube audio answers 403.
+On the Worker, `--audio-days 15 --audio-max-gb 10` set how long and how much
+companion audio stays in R2 (oldest songs go first). The R2 lifecycle rule
+`expire-audio` on `audio/` (15 days) is the backstop; raise it too if you set
+more days.
+
+On the native server they are saved in its config file. On the Worker they
+are saved in D1 (table `server_settings`, migration 0007) and override the
+`wrangler.toml` variables; each Cloudflare location picks a change up within
+30 seconds.
 
 ## 7. Built-in limits
 
@@ -239,3 +248,35 @@ imprint. Back up D1 if accounts matter to you (`npx wrangler d1 export glyph
 The standalone binary (`glyph-server-native`) serves the music API but no
 accounts yet: `/v1/health` reports `accounts: false` and the app hides the
 account page. Accounts need the Worker with D1 for now.
+
+## Optional shared server access
+
+A self-hosted server stays public by default. To require a separate shared bearer
+for app access, run `glyph-server access --config /path/to/server.toml` and enter
+a random 32-256 character token twice. Only its SHA-256 hash is stored in the
+private config. Restart the server to apply. `glyph-server access --disable`
+removes this requirement (environment overrides must also be removed).
+
+For Docker/scripts set `GLYPH_SERVER_BEARER` in the server environment. For a
+Worker use `npx wrangler secret put GLYPH_SERVER_BEARER`, then deploy. Do not put
+the token in wrangler.toml or shell arguments. Use HTTPS, except on loopback.
+
+`GET /v1/health` stays public and advertises `server_auth_required: true`.
+In the app, enter the server URL: its health response reveals the access-token
+field only when required. Paste the token and choose Apply. It is stored per
+server URL in the OS keychain, excluded from settings sync/backup, and sent as
+`X-Glyph-Server-Authorization: Bearer <token>`. This independent header leaves
+`Authorization: Bearer <account-token>` available for personal account sessions.
+The shared bearer never grants admin access or access to another user's account.
+Custom clients need the server header on every API, media, image and download
+request; query strings and cookies are not accepted. The server checks access
+before reading media caches or contacting providers. Browser account pages on a
+private server also need this header (e.g. via an operator-managed access proxy).
+The app uses its direct account/password endpoints; it does not bypass the gate.
+
+To rotate: configure a new bearer, restart/redeploy, then enter the new token in
+the app. The public Glyph service does not enable this optional gate.
+
+Device lists store only an approximate region/country from Cloudflare edge metadata, refreshed with device activity. Raw IPs and coordinates are not persisted. Other hosts without trusted geographic metadata display location unavailable.
+
+Profile avatar/banner uploads are decoded on the server with format, byte, dimension and allocation limits and always re-encoded as static WebP before storage. Client conversion is only an upload optimization; MIME headers and image signatures alone are never trusted. The server strips metadata, caps avatar dimensions at 512 pixels and banners at 1500x500, and reduces dimensions further if its encoded output exceeds 512 KiB.

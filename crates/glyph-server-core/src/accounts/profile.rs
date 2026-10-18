@@ -14,7 +14,7 @@
 //!   playlist's cover.
 
 use super::store::{Profile, User};
-use super::{hex, image, is_sha256_hex, json_body, method, sniff_image, store_err, Accounts};
+use super::{hex, image, is_sha256_hex, json_body, method, store_err, Accounts};
 use crate::error::ApiErr;
 use crate::server::{Request, Response};
 use crate::traits::{Method, Services};
@@ -56,6 +56,9 @@ pub struct ProfilePlaylist {
     pub songs: u32,
     /// sha256 of the cover (`.../images/{cover}`).
     pub cover: Option<String>,
+    /// First songs, for the app's cover mosaic when there is no cover.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview: Vec<serde_json::Value>,
 }
 
 /// What a viewer sees (`GET /v1/profiles/{handle}`).
@@ -164,9 +167,9 @@ impl Accounts {
                     if req.body.len() > max {
                         return Err(ApiErr::new(413, "payload_too_large", format!("image larger than {} KB", max / 1024)));
                     }
-                    let ct = sniff_image(&req.body).ok_or_else(|| ApiErr::bad_request("JPEG, PNG, WebP or GIF only"))?;
-                    let sha = hex(&Sha256::digest(&req.body));
-                    blobs.put(&blob_key(&a.user.id, &sha), req.body.clone(), ct).await.map_err(store_err)?;
+                    let bytes = normalize_image(&req.body, banner)?;
+                    let sha = hex(&Sha256::digest(&bytes));
+                    blobs.put(&blob_key(&a.user.id, &sha), bytes, "image/webp").await.map_err(store_err)?;
                     Some(sha)
                 } else {
                     None
@@ -210,6 +213,7 @@ impl Accounts {
                             name: v["name"].as_str().unwrap_or_default().to_string(),
                             songs: v["tracks"].as_array().map_or(0, |t| t.len() as u32),
                             cover: v["cover"].as_str().filter(|s| is_sha256_hex(s)).map(String::from),
+                            preview: v["tracks"].as_array().map(|t| t.iter().take(12).cloned().collect()).unwrap_or_default(),
                         });
                     }
                 }
@@ -262,5 +266,48 @@ impl Accounts {
         Ok(items.iter().filter(|i| !i.deleted).filter_map(|i| i.value.as_deref()).any(|v| {
             serde_json::from_str::<serde_json::Value>(v).ok().is_some_and(|v| v["cover"].as_str() == Some(sha))
         }))
+    }
+}
+
+/// Decode untrusted uploads with bounded resources, discard metadata/animation,
+/// and encode our own canonical WebP. Never trust MIME or a magic-byte check.
+fn normalize_image(bytes: &[u8], banner: bool) -> Result<Vec<u8>, ApiErr> {
+    let invalid = || ApiErr::bad_request("invalid or oversized image");
+    let mut reader = ::image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|_| invalid())?;
+    if !matches!(reader.format(), Some(::image::ImageFormat::Png | ::image::ImageFormat::Jpeg | ::image::ImageFormat::WebP | ::image::ImageFormat::Gif)) { return Err(invalid()); }
+    let mut limits = ::image::Limits::default();
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| invalid())?;
+    let mut picture = if banner { decoded.thumbnail(1500, 500) } else { decoded.thumbnail(512, 512) };
+    loop {
+        let rgba = picture.to_rgba8();
+        let mut output = Vec::new();
+        ::image::codecs::webp::WebPEncoder::new_lossless(&mut output)
+            .encode(&rgba, rgba.width(), rgba.height(), ::image::ExtendedColorType::Rgba8).map_err(|_| invalid())?;
+        if output.len() <= MAX_AVATAR { return Ok(output); }
+        if picture.width().max(picture.height()) <= 64 { return Err(invalid()); }
+        picture = picture.thumbnail((picture.width()*3/4).max(1), (picture.height()*3/4).max(1));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    #[test]
+    fn rejects_spoofed_images_and_reencodes_valid_uploads() {
+        assert!(normalize_image(b"RIFF0000WEBPfake", false).is_err());
+        assert!(normalize_image(b"\x89PNG\r\n\x1a\nfake", false).is_err());
+        let source = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(800, 600, ::image::Rgba([40,80,120,128])));
+        let mut png = std::io::Cursor::new(Vec::new());
+        source.write_to(&mut png, ::image::ImageFormat::Png).unwrap();
+        let output = normalize_image(png.get_ref(), false).unwrap();
+        assert_eq!(&output[8..12], b"WEBP");
+        let decoded = ::image::load_from_memory(&output).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (512,384));
+        assert_eq!(decoded.get_pixel(0,0).0[3],128);
+        assert!(output.len() <= MAX_AVATAR);
     }
 }

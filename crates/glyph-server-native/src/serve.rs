@@ -35,14 +35,22 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     config.ytdlp_path = crate::platform::resolve_ytdlp(s.ytdlp_path.as_deref());
     // Clients get /v1/audio/... instead of short-lived provider URLs.
     config.proxy_audio = s.proxy_audio;
+    config.server_bearer_hash = s.server_bearer_hash.clone();
     config.import_max_pages = s.import_max_pages;
+    config.companion_enabled = !companion_off_flag(s).exists();
     config.admin_password_hash = s
         .admin_password_hash
         .clone()
         .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
     let services = Services {
         http: Arc::new(ReqwestClient::new()),
-        cache: Arc::new(LruDiskCache::new(s.cache_entries, s.cache_dir.clone())),
+        cache: if companion_mode() {
+            // As the Worker's companion it keeps nothing: the Worker caches
+            // everything on Cloudflare (Cache API, KV, R2).
+            Arc::new(NoCache) as Arc<dyn glyph_server_core::Cache>
+        } else {
+            Arc::new(LruDiskCache::new(s.cache_entries, s.cache_dir.clone()))
+        },
         limiter: Arc::new(MemoryRateLimiter::new(rt.clone())),
         rt,
         cmds: Arc::new(TokioCommands),
@@ -50,6 +58,7 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     };
     Server::new(services).with_host(Arc::new(NativeHost {
         config_path: s.config_path.clone(),
+        companion_flag: companion_off_flag(s),
         logs,
         started: Instant::now(),
         update_repo: s.update_repo.clone(),
@@ -57,7 +66,38 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
 }
 
 /// Serve until `shutdown` completes.
+/// Marker file: while it exists the companion answers 403
+/// (`glyph-server companion off` / `on`). Next to the cache, so a Docker
+/// volume keeps it across restarts.
+/// Companion of a Cloudflare Worker (YTDLP_SERVICE_TOKEN set).
+fn companion_mode() -> bool {
+    std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32)
+}
+
+struct NoCache;
+
+#[async_trait::async_trait]
+impl glyph_server_core::Cache for NoCache {
+    async fn get(&self, _key: &str) -> Option<Vec<u8>> {
+        None
+    }
+    async fn put(&self, _key: &str, _value: Vec<u8>, _ttl_s: u64) {}
+}
+
+pub fn companion_off_flag(s: &Settings) -> std::path::PathBuf {
+    let dir = s.cache_dir.clone().unwrap_or_else(|| s.config_path.parent().map(std::path::Path::to_path_buf).unwrap_or_default());
+    dir.join("companion.off")
+}
+
+static COMPANION_OFF: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Checked per request, so switching needs no restart.
+fn companion_disabled() -> bool {
+    COMPANION_OFF.get().is_some_and(|p| p.exists())
+}
+
 pub async fn run(s: Settings, logs: Arc<LogBuffer>, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), String> {
+    let _ = COMPANION_OFF.set(companion_off_flag(&s));
     if s.admin_password_hash.is_some() && !glyph_server_core::admin::auth::is_valid_hash(s.admin_password_hash.as_deref().unwrap_or("")) {
         tracing::warn!("admin.password_hash is not a valid Argon2id hash: the admin API stays OFF (run `glyph-server setup`)");
     }
@@ -180,14 +220,18 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     if path_only == "/internal/ytdlp" || path_only.starts_with("/internal/audio/") {
         return companion(&st.server, &path_only, &headers, method, &body).await;
     }
+    if let Err(resp) = st.server.check_access(&Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local)) {
+        let mut out = Response::builder().status(resp.status);
+        for (k,v) in &resp.headers { out = out.header(k.as_str(),v.as_str()); }
+        return out.body(Body::from(resp.bytes().unwrap_or_default().to_vec())).unwrap();
+    }
+    if std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32) && path_only != "/v1/health" {
+        return plain(StatusCode::NOT_FOUND, "not found");
+    }
     // Audio/cover streaming happens here, not in the core router (streamed bytes,
     // byte ranges and provider-side redirects).
     if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
         return media(&st.server, &path_only, &headers, method, Some(ip)).await;
-    }
-    // A companion must not expose the ordinary unauthenticated search routes as a bypass.
-    if std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32) && path_only != "/v1/health" {
-        return plain(StatusCode::NOT_FOUND, "not found");
     }
 
     let resp = st
@@ -385,6 +429,9 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     let mut diff = expected.len() ^ supplied.len();
     for (i,b) in expected.bytes().enumerate() { diff |= usize::from(b ^ supplied.get(i).copied().unwrap_or(0)); }
     if diff != 0 { return plain(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    // Switched off with `glyph-server companion off` (only the Worker, which
+    // holds the token, learns about it).
+    if companion_disabled() { return plain(StatusCode::FORBIDDEN, "companion disabled"); }
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
     let Ok(_permit) = slots.clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later") };
@@ -426,6 +473,46 @@ mod tests {
             h.insert(HeaderName::try_from(*k).unwrap(), HeaderValue::try_from(*v).unwrap());
         }
         h
+    }
+
+    #[tokio::test]
+    async fn companion_never_exposes_public_audio_routes() {
+        struct Restore(Option<String>);
+        impl Drop for Restore { fn drop(&mut self) { match &self.0 { Some(v) => std::env::set_var("YTDLP_SERVICE_TOKEN",v), None => std::env::remove_var("YTDLP_SERVICE_TOKEN") } } }
+        let _restore = Restore(std::env::var("YTDLP_SERVICE_TOKEN").ok());
+        let token = "test-companion-secret-with-at-least-32-characters";
+        std::env::set_var("YTDLP_SERVICE_TOKEN",token);
+        let settings = Settings::resolve(Default::default(), None, "test-nonexistent.toml".into());
+        let state = AppState { server: build_server(&settings,LogBuffer::new()),trust_proxy:false,tls:false };
+        let peer = "127.0.0.1:5000".parse().unwrap();
+        for path in ["/v1/audio/youtube/abcdefghijk", "/v1/download/jamendo/42", "/v1/search?q=test"] {
+            let request = axum::http::Request::builder().uri(path).body(Body::empty()).unwrap();
+            assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::NOT_FOUND,"{path}");
+        }
+        let request = axum::http::Request::builder().uri("/v1/health").body(Body::empty()).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::OK);
+        let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
+        let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
+
+        // `glyph-server companion off`: 403 for the Worker, `on` restores it.
+        let flag = std::env::temp_dir().join(format!("glyph-companion-off-{}", std::process::id()));
+        let flag = COMPANION_OFF.get_or_init(|| flag).clone();
+        std::fs::write(&flag, b"off\n").unwrap();
+        let authed = || axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),authed()).await.status(),StatusCode::FORBIDDEN);
+        std::fs::remove_file(&flag).unwrap();
+        assert_eq!(handle(State(state),ConnectInfo(peer),authed()).await.status(),StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn companion_switch_lives_next_to_the_cache() {
+        let mut s = Settings::resolve(Default::default(), None, "conf/server.toml".into());
+        s.cache_dir = Some("/cache".into());
+        assert_eq!(companion_off_flag(&s), std::path::PathBuf::from("/cache").join("companion.off"));
+        s.cache_dir = None;
+        assert_eq!(companion_off_flag(&s), std::path::PathBuf::from("conf").join("companion.off"));
     }
 
     #[test]

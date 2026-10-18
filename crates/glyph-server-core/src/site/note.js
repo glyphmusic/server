@@ -89,7 +89,7 @@ function glyphNote(canvas, rowH) {
       swirl: (stream % 2 === 0 ? 0.9 : -0.9) * (0.75 + 0.5 * rnd(stream, 7)),
       delay: stream * 0.07 + rnd(i, 4) * 0.6,
       dur: 0.85 + rnd(i, 5) * 0.35,
-      glitch: 0, alt: ch,
+      glitch: 0, alt: ch, ox: 0, oy: 0, vx: 0, vy: 0,
     });
     i++;
   }));
@@ -98,6 +98,12 @@ function glyphNote(canvas, rowH) {
   const ctx = canvas.getContext("2d");
   const start = performance.now();
   const FLICKER = ".-+#0";
+  // Cursor in canvas px; characters near it are pushed out of a bubble.
+  let mouse = null;
+  const track = e => { const r = canvas.getBoundingClientRect(); mouse = [e.clientX - r.left, e.clientY - r.top]; };
+  canvas.addEventListener("pointermove", track);
+  canvas.addEventListener("pointerdown", track);
+  canvas.addEventListener("pointerleave", () => { mouse = null; });
 
   function frame(now) {
     const dpr = window.devicePixelRatio || 1;
@@ -130,6 +136,38 @@ function glyphNote(canvas, rowH) {
       p.alt = FLICKER[Math.floor(Math.random() * FLICKER.length)];
       p.glitch = t + 0.12 + Math.random() * 0.2;
     }
+    // Physics on the offsets from each char's home: a spring pulls it home,
+    // the cursor clears a bubble, and chars push each other apart so the
+    // displaced ones spread out instead of clumping on the bubble's rim.
+    if (!still) {
+      const R = rowH * 4.5, gap = cellW * 0.95, g = new Map();
+      for (const p of ps) {
+        const e = easeInOut(Math.min(1, Math.max(0, (t - p.delay) / p.dur)));
+        const [hx, hy] = at(p, e);
+        p.x = hx + p.ox + cellW / 2; p.y = hy + p.oy + cellH / 2;
+        p.vx -= p.ox * 0.06; p.vy -= p.oy * 0.06;
+        if (mouse) {
+          const dx = p.x - mouse[0], dy = p.y - mouse[1], d = Math.hypot(dx, dy) || 0.01;
+          if (d < R) { const f = (R - d) / R * 2.2; p.vx += dx / d * f; p.vy += dy / d * f; }
+        }
+        const k = Math.floor(p.x / gap) + "," + Math.floor(p.y / gap);
+        (g.get(k) || g.set(k, []).get(k)).push(p);
+      }
+      for (const p of ps) {
+        const gx = Math.floor(p.x / gap), gy = Math.floor(p.y / gap);
+        for (let ix = -1; ix <= 1; ix++) for (let iy = -1; iy <= 1; iy++) {
+          for (const q of g.get((gx + ix) + "," + (gy + iy)) || []) {
+            if (q === p || t < settled) continue;
+            const dx = p.x - q.x, dy = p.y - q.y, d = Math.hypot(dx, dy);
+            if (d < gap && d > 0.001) { const f = (gap - d) / gap * 0.5; p.vx += dx / d * f; p.vy += dy / d * f; }
+          }
+        }
+      }
+      for (const p of ps) {
+        p.vx *= 0.78; p.vy *= 0.78;
+        p.ox += p.vx; p.oy += p.vy;
+      }
+    }
     for (const p of ps) {
       const raw = Math.min(1, Math.max(0, (t - p.delay) / p.dur));
       if (raw <= 0) continue;
@@ -137,7 +175,8 @@ function glyphNote(canvas, rowH) {
       const trail = raw < 1 ? [[0.07, 0.18], [0.035, 0.4], [0, 1]] : [[0, 1]];
       const glitching = p.glitch > t;
       for (const [back, alpha] of trail) {
-        const [x, y] = at(p, Math.max(0, e - back));
+        const [x0, y0] = at(p, Math.max(0, e - back));
+        const x = x0 + p.ox, y = y0 + p.oy;
         ctx.globalAlpha = alpha;
         ctx.fillStyle = p.pink || glitching ? "#ff5fd2" : "#f5f5f5";
         ctx.fillText(glitching ? p.alt : p.ch, x, y);

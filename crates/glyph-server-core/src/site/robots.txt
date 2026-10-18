@@ -1,0 +1,14 @@
+# Glyph -- https://{ORIGIN_HOST}
+# Pages are open to every crawler, AI crawlers included. Shared playlist
+# pages carry a noindex tag; their audio, the API and account pages are off
+# limits.
+User-agent: *
+Allow: /
+Disallow: /v1/
+Disallow: /admin/
+Disallow: /account/
+Disallow: /internal/
+Disallow: /embed/
+Disallow: /p/*/listen/
+
+Sitemap: {ORIGIN}/sitemap.xml

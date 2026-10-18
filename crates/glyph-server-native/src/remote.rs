@@ -60,6 +60,17 @@ pub enum RemoteCmd {
         /// Max pages per playlist import
         #[arg(long)]
         import_pages: Option<u32>,
+        /// Days companion audio stays in R2 (Worker)
+        #[arg(long)]
+        audio_days: Option<u32>,
+        /// Max GB of companion audio in R2 (Worker)
+        #[arg(long)]
+        audio_max_gb: Option<u32>,
+    },
+    /// Switch the yt-dlp companion (YouTube) on or off; no argument shows it
+    Companion {
+        #[command(subcommand)]
+        cmd: Option<SwitchCmd>,
     },
     /// Accounts: device limits are set here, never by the app
     Accounts {
@@ -114,6 +125,13 @@ pub enum AccountsCmd {
         /// Number (1-100) or `default`
         limit: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SwitchCmd {
+    On,
+    Off,
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -411,10 +429,16 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { rate, youtube_budget, import_pages } => {
+        RemoteCmd::Limits { rate, youtube_budget, import_pages, audio_days, audio_max_gb } => {
             let c = Client::connect(a.server).await?;
             let mut l: Limits = c.get("limits").await?;
-            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() {
+            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() {
+                if let Some(v) = audio_days {
+                    l.audio_cache_days = v;
+                }
+                if let Some(v) = audio_max_gb {
+                    l.audio_cache_max_gb = v;
+                }
                 if let Some(v) = rate {
                     l.rate_limit_per_min = v;
                 }
@@ -430,6 +454,27 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             println!("Requests per minute per client  {}", l.rate_limit_per_min);
             println!("YouTube units per day           {}", l.youtube_daily_budget_units);
             println!("Pages per playlist import       {}", l.import_max_pages);
+            println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
+            println!("Companion audio in R2 (days)    {}", l.audio_cache_days);
+            println!("Companion audio in R2 (max GB)  {}", l.audio_cache_max_gb);
+            Ok(())
+        }
+        RemoteCmd::Companion { cmd } => {
+            let c = Client::connect(a.server).await?;
+            let mut l: Limits = c.get("limits").await?;
+            let want = match cmd {
+                Some(SwitchCmd::On) => Some(true),
+                Some(SwitchCmd::Off) => Some(false),
+                Some(SwitchCmd::Status) | None => None,
+            };
+            if let Some(on) = want {
+                l.companion_enabled = on;
+                l = c.put("limits", &l).await?;
+            }
+            println!(
+                "companion {}",
+                if l.companion_enabled { "on" } else { "off (YouTube answers 403 Forbidden)" }
+            );
             Ok(())
         }
         RemoteCmd::Accounts { cmd } => {

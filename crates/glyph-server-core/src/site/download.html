@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Download Glyph</title>
+<meta name="description" content="Download Glyph for Windows, macOS or Linux.">
+<link rel="canonical" href="https://glyph.my/download">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Glyph">
+<meta property="og:title" content="Download Glyph">
+<meta property="og:description" content="Glyph for Windows, macOS and Linux. Free, no ads, legal sources only.">
+<meta property="og:url" content="https://glyph.my/download">
+<meta property="og:image" content="https://glyph.my/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://glyph.my/og.png">
+<meta name="theme-color" content="#0a0a09">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/icon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+/*BASE*/
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
+nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
+nav .brand { font-weight: 700; text-decoration: none; }
+/*BRAND*/
+nav .links { display: flex; gap: 3ch; }
+nav .links a { color: var(--dim); text-decoration: none; }
+nav .links a:hover { color: var(--fg); }
+
+main { padding: 32px 0 64px; }
+h1 { font-size: clamp(24px, 4vw, 36px); line-height: 1.2; margin: 0 0 8px; }
+.ver { color: var(--dim); margin: 0 0 28px; }
+.ver b { color: var(--fg); font-weight: 600; }
+.main-dl { display: flex; flex-wrap: wrap; gap: 2ch; align-items: center; margin-bottom: 12px; }
+.status { color: var(--dim); min-height: 1.6em; margin: 0 0 40px; }
+.status.ok { color: var(--pink); }
+
+.plats { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.plat { display: grid; grid-template-columns: 1fr auto auto; gap: 2ch; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.plat .name b { font-weight: 600; }
+.plat .name span { display: block; color: var(--dim); font-size: 12px; }
+.plat .size { color: var(--dim); font-size: 12px; }
+.plat.mine .name b::before { content: "> "; color: var(--pink); }
+.plat .act { padding: 6px 2ch; }
+.plat .act[aria-disabled="true"] { opacity: .35; pointer-events: none; }
+.notes { margin-top: 36px; color: var(--dim); font-size: 12px; }
+.notes p { margin: 0 0 8px; }
+.notes code { color: var(--fg); }
+footer { border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
+footer a { color: var(--dim); }
+
+@media (max-width: 560px) {
+  .plat { grid-template-columns: 1fr auto; }
+  .plat .size { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a class="brand" href="/">glyph</a>
+  <div class="links">
+    <a href="/#features">features</a>
+    <a href="https://github.com/glyphmusic/desktop">github</a>
+  </div>
+</nav>
+
+<main>
+  <h1>download glyph</h1>
+  <p class="ver" id="ver">looking up the latest release...</p>
+  <div class="main-dl"><a class="act" id="dl-main" href="https://github.com/glyphmusic/desktop/releases/latest">download</a></div>
+  <p class="status" id="status" aria-live="polite"></p>
+
+  <pre class="rule" data-rule="all platforms"></pre>
+  <div class="plats" id="plats"></div>
+
+  <div class="notes">
+    <p>Each file has a <code>.sha256</code> next to it on the release, to check the download.</p>
+    <p>Windows: unzip and run <code>glyph.exe</code>. macOS and Linux: unpack the <code>.tar.gz</code> and run <code>glyph</code>.</p>
+    <p>Glyph updates itself from the same releases.</p>
+  </div>
+</main>
+
+<footer>
+  <span>glyph · mit / apache-2.0</span>
+  <span><a href="https://github.com/glyphmusic/desktop/releases">all releases</a></span>
+</footer>
+</div>
+
+<script>
+document.querySelectorAll("[data-rule]").forEach(el => {
+  const b = document.createElement("b");
+  b.textContent = el.dataset.rule;
+  el.append("-- ", b, " " + "-".repeat(200));
+});
+
+// Release assets are `glyph-{version}-{target}.zip|.tar.gz` (see the app's
+// updater). The links point straight at the files, so the browser downloads
+// them and the page stays open.
+(async () => {
+  const REPO = "glyphmusic/desktop";
+  const PLATS = [
+    { os: "windows", target: "x86_64-pc-windows-msvc", name: "windows", sub: "x64 · zip" },
+    { os: "macos", target: "aarch64-apple-darwin", name: "macos", sub: "apple silicon · tar.gz" },
+    { os: "macos-intel", target: "x86_64-apple-darwin", name: "macos", sub: "intel · tar.gz" },
+    { os: "linux", target: "x86_64-unknown-linux-gnu", name: "linux", sub: "x64 · tar.gz" },
+    { os: "linux-arm", target: "aarch64-unknown-linux-gnu", name: "linux", sub: "arm64 · tar.gz" },
+  ];
+  const ua = navigator.userAgent;
+  const mine = /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? (/aarch64|arm64/i.test(ua) ? "linux-arm" : "linux") : "";
+  const $ = id => document.getElementById(id);
+  const mb = n => (n / 1048576).toFixed(1) + " MB";
+
+  let rel = null;
+  try {
+    const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: "application/vnd.github+json" } });
+    if (r.ok) rel = await r.json();
+  } catch (_) {}
+
+  const assetFor = t => rel && rel.assets.find(a => a.name.includes(`-${t}.`) && /\.(zip|tar\.gz)$/.test(a.name));
+  if (rel) {
+    const date = new Date(rel.published_at).toISOString().slice(0, 10);
+    $("ver").innerHTML = "";
+    $("ver").append("latest: ", Object.assign(document.createElement("b"), { textContent: rel.tag_name }), " · " + date);
+  } else {
+    $("ver").textContent = "could not reach github; the buttons open the release page instead.";
+  }
+
+  const startText = a => `downloading ${a.name} (${mb(a.size)})...`;
+  for (const p of PLATS) {
+    const a = assetFor(p.target);
+    const row = document.createElement("div");
+    row.className = "plat" + (p.os === mine ? " mine" : "");
+    const name = document.createElement("div");
+    name.className = "name";
+    name.append(Object.assign(document.createElement("b"), { textContent: p.name }), Object.assign(document.createElement("span"), { textContent: p.sub }));
+    const size = Object.assign(document.createElement("div"), { className: "size", textContent: a ? mb(a.size) : "" });
+    const btn = document.createElement("a");
+    btn.className = "act alt";
+    btn.textContent = "download";
+    if (a) {
+      btn.href = a.browser_download_url;
+      btn.setAttribute("download", a.name);
+      btn.addEventListener("click", () => { $("status").textContent = startText(a); $("status").className = "status ok"; });
+    } else if (rel) {
+      btn.setAttribute("aria-disabled", "true");
+      btn.textContent = "not in this release";
+    } else {
+      btn.href = `https://github.com/${REPO}/releases/latest`;
+    }
+    row.append(name, size, btn);
+    $("plats").append(row);
+  }
+
+  const main = PLATS.find(p => p.os === mine);
+  const ma = main && assetFor(main.target);
+  const btn = $("dl-main");
+  if (ma) {
+    btn.textContent = `download for ${main.name}${main.os === "macos" ? " (apple silicon)" : ""}`;
+    btn.href = ma.browser_download_url;
+    btn.setAttribute("download", ma.name);
+    btn.addEventListener("click", () => { $("status").textContent = startText(ma); $("status").className = "status ok"; });
+  } else if (rel) {
+    btn.textContent = "pick your platform below";
+    btn.href = "#plats";
+  }
+})();
+</script>
+</body>
+</html>

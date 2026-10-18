@@ -14,6 +14,8 @@ use std::time::Instant;
 
 pub struct NativeHost {
     pub config_path: PathBuf,
+    /// `companion.off` marker, also written by `glyph-server companion off`.
+    pub companion_flag: PathBuf,
     pub logs: Arc<LogBuffer>,
     pub started: Instant,
     pub update_repo: String,
@@ -55,7 +57,14 @@ impl AdminHost for NativeHost {
         cfg.rate_limit_per_min = Some(l.rate_limit_per_min);
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
         cfg.import_max_pages = Some(l.import_max_pages);
-        save(&self.config_path, &cfg).map(|_| ()).map_err(HostError::Failed)
+        save(&self.config_path, &cfg).map_err(HostError::Failed)?;
+        let switched = if l.companion_enabled {
+            std::fs::remove_file(&self.companion_flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+        } else {
+            std::fs::write(&self.companion_flag, b"off
+")
+        };
+        switched.map_err(|e| HostError::Failed(format!("could not switch the companion: {e}")))
     }
 
     async fn logs(&self, max_lines: usize, after: Option<u64>) -> Result<LogsResponse, HostError> {
@@ -80,6 +89,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = NativeHost {
             config_path: dir.path().join("server.toml"),
+            companion_flag: dir.path().join("companion.off"),
             logs: LogBuffer::new(),
             started: Instant::now(),
             update_repo: "x/y".into(),
@@ -87,9 +97,14 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2 })
+        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, audio_cache_days: 15, audio_cache_max_gb: 10 })
             .await
             .unwrap();
+        assert!(host.companion_flag.exists());
+        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, audio_cache_days: 15, audio_cache_max_gb: 10 })
+            .await
+            .unwrap();
+        assert!(!host.companion_flag.exists());
         let cfg = load_file(&host.config_path, true).unwrap();
         assert_eq!(cfg.keys.youtube_api_key.as_deref(), Some("AIzaSECRET"));
         assert_eq!(cfg.rate_limit_per_min, Some(7));

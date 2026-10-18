@@ -97,6 +97,9 @@ fn limits_of(svc: &Services) -> Limits {
         rate_limit_per_min: svc.config.rate_limit_per_min,
         youtube_daily_budget_units: svc.config.youtube_daily_budget_units,
         import_max_pages: svc.config.import_max_pages,
+        companion_enabled: svc.config.companion_enabled,
+        audio_cache_days: svc.config.audio_cache_days,
+        audio_cache_max_gb: svc.config.audio_cache_max_gb,
     }
 }
 
@@ -248,11 +251,20 @@ impl Server {
                 if !(1..=50).contains(&l.import_max_pages) {
                     return Err(ApiErr::bad_request("import_max_pages must be between 1 and 50"));
                 }
+                if !(1..=365).contains(&l.audio_cache_days) {
+                    return Err(ApiErr::bad_request("audio_cache_days must be between 1 and 365"));
+                }
+                if !(1..=1000).contains(&l.audio_cache_max_gb) {
+                    return Err(ApiErr::bad_request("audio_cache_max_gb must be between 1 and 1000"));
+                }
                 self.host.persist_limits(&l).await.map_err(host_err)?;
                 self.update_config(|c| {
                     c.rate_limit_per_min = l.rate_limit_per_min;
                     c.youtube_daily_budget_units = l.youtube_daily_budget_units;
                     c.import_max_pages = l.import_max_pages;
+                    c.companion_enabled = l.companion_enabled;
+                    c.audio_cache_days = l.audio_cache_days;
+                    c.audio_cache_max_gb = l.audio_cache_max_gb;
                 });
                 Ok(Response::json(200, &l))
             }

@@ -22,5 +22,9 @@ hmac = "0.12"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 rsa = { version = "0.9", default-features = false, features = ["sha2", "std"] }
 
+# Reads shared playlist codes (deflate) for the /p/ page and its player.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
 [dev-dependencies]
 rand = "0.8"

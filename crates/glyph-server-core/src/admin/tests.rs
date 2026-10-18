@@ -302,6 +302,13 @@ fn limits_get_set_and_validate() {
     let bad = r#"{"rate_limit_per_min":0,"youtube_daily_budget_units":5000,"import_max_pages":3}"#;
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", bad, tok)).0, 400);
     assert_eq!(t.server.services().config.rate_limit_per_min, 30);
+    // Old clients omit the companion switch: it stays on.
+    assert!(t.server.services().config.companion_enabled);
+    let off = r#"{"rate_limit_per_min":30,"youtube_daily_budget_units":5000,"import_max_pages":3,"companion_enabled":false}"#;
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", off, tok)).0, 200);
+    assert!(!t.server.services().config.companion_enabled);
+    let (_, v, _) = call(&t, req(Method::Get, "/admin/v1/limits", "", tok));
+    assert_eq!(v["companion_enabled"], false);
 }
 
 #[test]

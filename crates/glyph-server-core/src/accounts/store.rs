@@ -55,6 +55,7 @@ pub struct Passkey {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Device {
+    pub approximate_location: Option<String>,
     pub id: String,
     pub user_id: String,
     pub name: String,
@@ -175,7 +176,7 @@ pub trait AccountStore: MaybeSendSync {
     /// Insert a new device only while the user has fewer than `limit`
     /// (atomic, so parallel sign-ins cannot pass the limit). `false`: full.
     async fn add_device(&self, device: &Device, limit: u8) -> StoreResult<bool>;
-    async fn touch_device(&self, id: &str, last_seen: u64) -> StoreResult<()>;
+    async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()>;
     /// `false` when no such device belongs to the user.
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool>;
 
@@ -368,9 +369,10 @@ impl AccountStore for MemStore {
         m.devices.insert(device.id.clone(), device.clone());
         Ok(true)
     }
-    async fn touch_device(&self, id: &str, last_seen: u64) -> StoreResult<()> {
+    async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()> {
         if let Some(d) = self.m.lock().unwrap().devices.get_mut(id) {
             d.last_seen = last_seen;
+            if let Some(location) = approximate_location { d.approximate_location = Some(location.to_string()); }
         }
         Ok(())
     }

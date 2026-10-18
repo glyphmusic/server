@@ -30,6 +30,12 @@ fn first_string(v: Option<serde_json::Value>) -> String {
 }
 
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    search_page(svc, q, 0).await
+}
+
+/// One page of 10 results (`page` 0 = first).
+pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Candidate>> {
+    let page_no = (page + 1).to_string();
     // Strip Lucene operators from user input; keep it a plain phrase query.
     let clean: String = q.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
     if clean.trim().is_empty() {
@@ -44,6 +50,7 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
             ("fl[]", "title"),
             ("fl[]", "creator"),
             ("rows", "10"),
+            ("page", &page_no),
             ("output", "json"),
         ],
     );

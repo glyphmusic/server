@@ -14,12 +14,21 @@ routes = [
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
 ]
 
-# Same as the dashboard (Settings > Observability): only invocation logs.
+# Keep production diagnostics in sync with the Cloudflare dashboard.
 [observability.logs]
-enabled = false
+enabled = true
 invocation_logs = true
+head_sampling_rate = 1.0
 
 [observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
+[observability.issues]
+enabled = true
+
+# Auth must run before every request. The targeted in-Worker media cache remains on.
+[cache]
 enabled = false
 
 [build]
@@ -45,6 +54,10 @@ migrations_dir = "migrations"
 binding = "GLYPH_COVERS"
 bucket_name = "glyph-covers"
 
+# The same bucket also keeps audio fetched through the yt-dlp companion
+# (prefix `audio/`), so each song leaves the companion machine once. Optional:
+#   npx wrangler r2 bucket lifecycle add glyph-covers expire-audio audio/ --expire-days 15
+
 [vars]
 RATE_LIMIT_PER_MIN = "60"
 # Passkeys are bound to ACCOUNT_RP_ID (the origin's host or a parent of it);
@@ -68,3 +81,5 @@ YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 #   YTDLP_SERVICE_URL   HTTPS base URL, no trailing /internal path
 #   YTDLP_SERVICE_TOKEN Shared random secret, at least 32 characters
 # For `wrangler dev`, put the same names in crates/glyph-server-worker/.dev.vars
+
+# Optional private-instance access (off by default): wrangler secret put GLYPH_SERVER_BEARER

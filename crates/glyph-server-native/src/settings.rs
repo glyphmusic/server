@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_bearer_hash: Option<String>,
     /// Public URL clients use, e.g. `https://glyph.example.com` (doctor checks it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
@@ -139,6 +141,7 @@ pub struct TlsSettings {
 #[derive(Debug)]
 pub struct Settings {
     pub bind: String,
+    pub server_bearer_hash: Option<String>,
     pub public_url: Option<String>,
     pub cache_dir: Option<PathBuf>,
     pub cache_entries: usize,
@@ -286,6 +289,7 @@ impl Settings {
         let default_bind = if tls.is_some() { "0.0.0.0:443" } else { "0.0.0.0:8787" };
         Self {
             bind: cli_bind.or_else(|| env("GLYPH_BIND")).or(file.bind).unwrap_or_else(|| default_bind.into()),
+            server_bearer_hash: env("GLYPH_SERVER_BEARER").map(|t| glyph_server_core::access::token_hash(&t)).or(file.server_bearer_hash),
             public_url: env("GLYPH_PUBLIC_URL").or(file.public_url),
             cache_dir: env("GLYPH_CACHE_DIR").map(PathBuf::from).or(file.cache_dir),
             cache_entries: env("GLYPH_CACHE_ENTRIES").and_then(|v| v.parse().ok()).or(file.cache_entries).unwrap_or(10_000),
