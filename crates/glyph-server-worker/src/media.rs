@@ -360,6 +360,9 @@ pub async fn handle(
     }
     let headers = Headers::new();
     headers.set("content-type", &content_type)?;
+    for name in ["etag", "last-modified"] {
+        if let Some(value) = upstream.headers().get(name)? { headers.set(name, &value)?; }
+    }
     headers.set("cache-control", "public, max-age=3600")?;
     headers.set("x-content-type-options", "nosniff")?;
     headers.set("content-security-policy", "default-src 'none'; sandbox")?;

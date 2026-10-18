@@ -65,9 +65,65 @@ impl HttpClient for ReqwestClient {
 /// drained into a sink so a chatty tool cannot fill its pipe buffer.
 pub struct TokioCommands;
 
+fn fast_audio_args(args: &[String]) -> Option<Vec<String>> {
+    if !glyph_server_core::media::valid_command(args) || args.get(3).map(String::as_str) != Some("--get-url") { return None; }
+    let mut fast = args.to_vec();
+    let separator = fast.iter().position(|a| a == "--")?;
+    // Audio-only direct files do not need video manifests or next-page data.
+    fast.splice(separator..separator, ["--extractor-args".into(), "youtube:skip=hls,dash;player_skip=initial_data".into()]);
+    Some(fast)
+}
+
+pub(crate) fn usable_audio_url(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else { return false; };
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(line) = lines.next() else { return false; };
+    if lines.next().is_some() { return false; }
+    url::Url::parse(line).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some_and(|host| host.ends_with(".googlevideo.com")))
+}
+
+#[cfg(test)]
+mod audio_command_tests {
+    use super::*;
+    #[test]
+    fn fast_path_is_only_for_fixed_audio_commands() {
+        let args: Vec<String> = ["--ignore-config", "--no-warnings", "--no-playlist-reverse", "--get-url", "--no-playlist", "-f", glyph_server_core::media::AUDIO_FORMAT, "--", "https://www.youtube.com/watch?v=abcdefghijk"].into_iter().map(str::to_string).collect();
+        let fast = fast_audio_args(&args).unwrap();
+        assert_eq!(&fast[7..9], &["--extractor-args", "youtube:skip=hls,dash;player_skip=initial_data"]);
+        assert_eq!(&fast[9..], &args[7..]);
+        let mut metadata = args.clone(); metadata[3] = "--dump-json".into();
+        assert!(fast_audio_args(&metadata).is_none());
+        assert!(usable_audio_url(b"https://a.googlevideo.com/audio\n"));
+        assert!(!usable_audio_url(b"https://example.com/audio\n"));
+        assert!(!usable_audio_url(b"https://a.googlevideo.com/a\nhttps://a.googlevideo.com/b\n"));
+    }
+}
+
 #[async_trait]
 impl CommandRunner for TokioCommands {
     async fn run(&self, program: &str, args: &[String], timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
+        let started = std::time::Instant::now();
+        if fast_audio_args(args).is_some() && super::ytdlp_pool::enabled() {
+            if let Some(id) = args.last().and_then(|url| url.strip_prefix("https://www.youtube.com/watch?v=")) {
+                if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_millis(timeout_ms.min(15_000)), super::ytdlp_pool::resolve(program, id)).await {
+                    return Ok(output);
+                }
+            }
+        }
+        if let Some(fast) = fast_audio_args(args) {
+            let remaining = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+            if let Ok(output) = Self::run_once(program, &fast, remaining.min(15_000)).await {
+                if usable_audio_url(&output) { return Ok(output); }
+            }
+        }
+        let remaining = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        if remaining == 0 { return Err(CommandError::Timeout); }
+        Self::run_once(program, args, remaining).await
+    }
+}
+
+impl TokioCommands {
+    async fn run_once(program: &str, args: &[String], timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
         use tokio::io::AsyncReadExt;
         let mut child = tokio::process::Command::new(program)
             .args(args)

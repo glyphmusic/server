@@ -7,6 +7,7 @@ mod doctor;
 mod host;
 mod logbuf;
 mod platform;
+mod ytdlp_pool;
 mod remote;
 mod serve;
 mod service;

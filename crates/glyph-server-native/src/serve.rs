@@ -82,6 +82,31 @@ pub fn companion_off_flag(s: &Settings) -> std::path::PathBuf {
 
 static COMPANION_OFF: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+/// Hover warmups, clicks and encoders for the same video share extraction.
+/// The cache is checked again after acquiring the per-video gate.
+async fn audio_url(svc: &Services, provider: glyph_protocol::ProviderId, id: &str) -> Result<String, glyph_server_core::providers::ProviderError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, Weak};
+    static GATES: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    if provider != glyph_protocol::ProviderId::YouTube {
+        return glyph_server_core::media::audio_url(svc, provider, id).await;
+    }
+    let gate = {
+        let mut gates = GATES.get_or_init(Default::default).lock().unwrap();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        match gates.get(id).and_then(Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(id.to_string(), Arc::downgrade(&gate));
+                gate
+            }
+        }
+    };
+    let _guard = gate.lock().await;
+    glyph_server_core::media::audio_url(svc, provider, id).await
+}
+
 /// Checked per request, so switching needs no restart.
 fn companion_disabled() -> bool {
     COMPANION_OFF.get().is_some_and(|p| p.exists())
@@ -93,6 +118,7 @@ pub async fn run(s: Settings, logs: Arc<LogBuffer>, shutdown: impl Future<Output
         tracing::warn!("admin.password_hash is not a valid Argon2id hash: the admin API stays OFF (run `glyph-server setup`)");
     }
     let server = build_server(&s, logs);
+    if let Some(program) = server.services().config.ytdlp_path.clone() { crate::ytdlp_pool::warm(program); }
     let enabled = server.services().config.enabled_providers();
     let state = AppState { server, trust_proxy: s.trust_proxy, tls: s.tls.is_some() };
     let app = Router::new().fallback(handle).with_state(state);
@@ -256,7 +282,7 @@ const MAX_AUDIO_BYTES: u64 = 32 * 1024 * 1024;
 /// the machine (yt-dlp runs here too).
 fn audio_slots() -> &'static Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+    SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8)))
 }
 
 /// `(provider, id)` of a media path; `None` for anything that is not a
@@ -317,7 +343,7 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
             _ => return plain(StatusCode::FORBIDDEN, "download not allowed for this track"),
         }
     } else {
-        match media::audio_url(&svc, provider, &id).await {
+        match audio_url(&svc, provider, &id).await {
             Ok(u) => u,
             Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio source unavailable"),
         }
@@ -346,7 +372,7 @@ async fn retry_stale_youtube(
         return out;
     }
     glyph_server_core::media::forget_audio_url(svc, id).await;
-    match glyph_server_core::media::audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
+    match audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
         Ok(url) => fetch_upstream_audio(&url, range, permit).await,
         Err(_) => out,
     }
@@ -403,12 +429,15 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         return plain(StatusCode::BAD_GATEWAY, "upstream did not return audio");
     }
     let content_range = resp.headers().get("content-range").cloned();
+    let validators: Vec<_> = ["etag", "last-modified"].into_iter().filter_map(|key|
+        resp.headers().get(key).cloned().map(|value| (key, value))).collect();
     let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     let mut out = Response::builder()
         .status(if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
         .header("content-type", content_type)
         .header("cache-control", "no-store")
         .header("accept-ranges", "bytes");
+    for (key, value) in validators { out = out.header(key, value); }
     if let Some(n) = total {
         out = out.header("content-length", n);
     }
@@ -443,7 +472,8 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     // holds the token, learns about it).
     if companion_disabled() { return plain(StatusCode::FORBIDDEN, "companion disabled"); }
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let slots = if path.starts_with("/internal/audio/") { audio_slots() }
+        else { SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))) };
     let Ok(_permit) = slots.clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later") };
     let svc = server.services();
     if let Some(id) = path.strip_prefix("/internal/audio/") {
@@ -461,7 +491,7 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
             }
             return companion_variant(&svc, id, variant, _permit, background).await;
         }
-        let url = match glyph_server_core::media::audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {
+        let url = match audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {
             Ok(u) => u, Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio lookup failed"),
         };
         let mut permit = Some(_permit);
@@ -525,7 +555,7 @@ async fn companion_variant(svc: &Arc<Services>, id: &str, variant: glyph_server_
     let Ok(_encoder) = ENCODERS.get_or_init(|| tokio::sync::Semaphore::new(3)).try_acquire() else {
         return plain(StatusCode::TOO_MANY_REQUESTS, "audio encoder busy; retry later");
     };
-    let url = match glyph_server_core::media::audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
+    let url = match audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
         Ok(url) => url, Err(_) => return plain(StatusCode::BAD_GATEWAY,"audio lookup failed"),
     };
     let mut slot = Some(permit);
@@ -596,6 +626,39 @@ fn plain(status: StatusCode, msg: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn url_resolution_coalesces_duplicates_but_runs_different_songs_in_parallel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Commands { calls: AtomicUsize, barrier: Option<tokio::sync::Barrier> }
+        #[async_trait::async_trait]
+        impl glyph_server_core::CommandRunner for Commands {
+            async fn run(&self, _: &str, _: &[String], _: u64) -> Result<Vec<u8>, glyph_server_core::CommandError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(barrier) = &self.barrier { barrier.wait().await; }
+                else { tokio::time::sleep(std::time::Duration::from_millis(30)).await; }
+                Ok(b"https://test.googlevideo.com/audio\n".to_vec())
+            }
+        }
+        let settings = Settings::resolve(Default::default(), None, "test-nonexistent.toml".into());
+        let base = build_server(&settings, LogBuffer::new()).services();
+        let mut config = base.config.clone(); config.ytdlp_path = Some("fake-yt-dlp".into());
+        let commands = Arc::new(Commands { calls: AtomicUsize::new(0), barrier: None });
+        let mut svc = Services { http: base.http.clone(), cache: Arc::new(LruDiskCache::new(16, None)),
+            limiter: base.limiter.clone(), rt: base.rt.clone(), config, cmds: commands.clone() };
+        let (a,b) = tokio::join!(audio_url(&svc, glyph_protocol::ProviderId::YouTube, "sametest001"),
+            audio_url(&svc, glyph_protocol::ProviderId::YouTube, "sametest001"));
+        assert_eq!(a.unwrap(), b.unwrap());
+        assert_eq!(commands.calls.load(Ordering::SeqCst), 1);
+        let commands = Arc::new(Commands { calls: AtomicUsize::new(0), barrier: Some(tokio::sync::Barrier::new(2)) });
+        svc.cmds = commands.clone();
+        let (a,b) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(audio_url(&svc, glyph_protocol::ProviderId::YouTube, "parallel001"),
+                audio_url(&svc, glyph_protocol::ProviderId::YouTube, "parallel002"))
+        }).await.expect("different videos must not share one global extraction lock");
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(commands.calls.load(Ordering::SeqCst), 2);
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
