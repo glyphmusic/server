@@ -460,6 +460,14 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         if let Some((_, quality)) = headers.iter().find(|(k,_)| k == "x-glyph-audio-quality") {
             let Some(variant) = glyph_server_core::media::AudioVariant::parse(quality) else { return plain(StatusCode::BAD_REQUEST, "invalid audio quality"); };
             let background = headers.iter().any(|(k,v)| k == "x-glyph-audio-background" && v == "1");
+            if background {
+                // Finish bounded preparation even when the Worker's short
+                // background-request lifetime ends. Output remains cached for
+                // its next attempt instead of restarting the full download.
+                let (svc, id) = (svc.clone(), id.to_string());
+                return tokio::spawn(async move { companion_variant(&svc, &id, variant, _permit, true).await })
+                    .await.unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "background encoder failed"));
+            }
             return companion_variant(&svc, id, variant, _permit, background).await;
         }
         let url = match glyph_server_core::media::audio_url(&svc, glyph_protocol::ProviderId::YouTube, id).await {

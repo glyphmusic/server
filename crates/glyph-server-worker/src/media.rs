@@ -304,6 +304,16 @@ pub async fn handle(
         }
         headers.set("accept-ranges", "bytes")?;
         headers.set("cache-control", "no-store")?;
+        if let Some((id, _)) = &variant {
+            let (env, id) = (env.clone(), id.clone());
+            let days = svc.config.audio_cache_days;
+            let cap = u64::from(svc.config.audio_cache_max_gb) * 1_000_000_000;
+            ctx.wait_until(async move {
+                if super::variants::warm(env, id, days, cap).await.is_err() {
+                    worker::console_error!("background audio preparation deferred");
+                }
+            });
+        }
         let mut partial = upstream;
         return Ok(Response::from_stream(partial.stream()?)?.with_status(206).with_headers(headers));
     }

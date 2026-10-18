@@ -17,7 +17,8 @@ pub fn norm_key(key: &str) -> String {
         return key.to_string();
     }
     let digest = Sha256::digest(key.as_bytes());
-    let mut s = String::from(&key[..40.min(key.len())].replace(|c: char| !c.is_ascii(), "_"));
+    // By chars: a byte slice could split a multi-byte char and panic.
+    let mut s: String = key.chars().take(40).map(|c| if c.is_ascii() { c } else { '_' }).collect();
     s.push('~');
     for b in digest.iter().take(16) {
         s.push_str(&format!("{b:02x}"));
@@ -131,6 +132,13 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn long_key_with_multibyte_char_at_cut_does_not_panic() {
+        let key = format!("{}é{}", "a".repeat(39), "b".repeat(300));
+        let k = norm_key(&key);
+        assert!(k.starts_with(&format!("{}_~", "a".repeat(39))));
+    }
 
     #[test]
     fn long_keys_are_hashed_and_stable() {
