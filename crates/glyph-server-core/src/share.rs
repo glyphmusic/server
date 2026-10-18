@@ -83,7 +83,7 @@ pub fn clean_name(name: Option<String>) -> String {
 }
 
 pub fn clean_kind(kind: Option<&str>) -> String {
-    if kind == Some("album") { "album" } else { "playlist" }.to_string()
+    match kind { Some("album") => "album", Some("track") => "track", Some("artist") => "artist", _ => "playlist" }.to_string()
 }
 
 fn escape(s: &str) -> String {
@@ -246,7 +246,7 @@ pub fn embed_link(link: &str) -> String {
 }
 
 fn kind_of(p: &SharedPlaylist, l: Lang) -> &'static str {
-    tr(l, if p.kind == "album" { "album" } else { "playlist" })
+    match (p.kind.as_str(), l) { ("artist", Lang::De) => "Künstler", ("artist", _) => "Artist", ("track", _) => "Song", _ => tr(l, if p.kind == "album" { "album" } else { "playlist" }) }
 }
 
 /// The name, or "Playlist" / "Album".
@@ -342,7 +342,7 @@ fn card_meta(p: &SharedPlaylist, songs: &[glyph_protocol::Track], link: &str, l:
     let (origin, _) = split_link(link);
     let title = escape(&title_of(p, l));
     let desc = escape(&description(p, songs, l));
-    let og_type = if p.kind == "album" { "music.album" } else { "music.playlist" };
+    let og_type = match p.kind.as_str() { "album" => "music.album", "track" => "music.song", "artist" => "profile", _ => "music.playlist" };
     let enc: String = url::form_urlencoded::byte_serialize(link.as_bytes()).collect();
     let mut ld = serde_json::json!({
         "@context": "https://schema.org",
@@ -540,9 +540,11 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
     let html = format!(
         r#"{head}{BG}{titlebar}
 <main class="list"><aside class="left">{art}<div class="info"><span class="kind mono">[{kind}]</span><h1 class="title">{title}</h1><div class="subrow">{by}<span class="meta mono">{meta}</span></div></div>
-{actions}<div class="acts2"><button class="ib" id="cp" type="button" data-tip="{copy}" aria-label="{copy}" data-link="{base}">{link_ic}</button><a class="ib" href="/download" data-tip="{dl}" aria-label="{dl}">{dl_ic}</a></div></aside>
+<a class="pill" id="open-app" href="glyph://p/{share_id}">{open_app}</a>{actions}<div class="acts2"><button class="ib" id="cp" type="button" data-tip="{copy}" aria-label="{copy}" data-link="{base}">{link_ic}</button><a class="ib" href="/download" data-tip="{dl}" aria-label="{dl}">{dl_ic}</a></div></aside>
 <section class="songs-col">{rows}</section></main>
 {bar}{js}</body></html>"#,
+        share_id = escape(split_link(link).1),
+        open_app = if l == Lang::De { "In Glyph öffnen" } else { "Open in Glyph" },
         head = head(l, &format!("{title} · Glyph"), &card_meta(p, &songs, link, l), "page"),
         art = art(p, songs.len(), &base),
         kind = kind_of(p, l).to_uppercase(),
@@ -553,7 +555,7 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
         dl_ic = ic("download"),
         rows = song_rows(&songs, &base, l),
         bar = if count > 0 { player_bar(l) } else { String::new() },
-        js = scripts(r#"location.pathname.replace(/\/$/,"")"#, count, 44),
+        js = format!("{}<script>if(!/bot|crawler|spider|preview/i.test(navigator.userAgent))location.href=document.getElementById('open-app').href;</script>", scripts(r#"location.pathname.replace(/\/$/,"")"#, count, 44)),
     );
     // Links die with their account: never cache them.
     localized(crate::site::html_response_csp(200, html, "no-store", PLAYER_CSP, false), l)
@@ -637,6 +639,8 @@ mod tests {
             assert_eq!(clean_code(bad), None, "{bad}");
         }
         assert_eq!(clean_kind(Some("album")), "album");
+        assert_eq!(clean_kind(Some("track")), "track");
+        assert_eq!(clean_kind(Some("artist")), "artist");
         assert_eq!(clean_kind(Some("x")), "playlist");
     }
 
@@ -646,6 +650,9 @@ mod tests {
         let r = page(Some((&p, "https://glyph.my/p/AbC123xy")), Lang::En);
         let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert!(html.contains("Road &lt;trip&gt;") && !html.contains("<trip>") && html.contains("@gisela"));
+        assert!(html.contains("glyph://p/AbC123xy"));
+        assert!(html.contains("Open in Glyph"));
+        assert!(html.contains("location.href=document.getElementById('open-app').href"));
         assert_eq!(page(None, Lang::En).status, 404);
     }
 

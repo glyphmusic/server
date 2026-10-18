@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: glyphmusic/desktop
-          ref: v0.2.0
+          ref: ${{ github.ref_name }}
           path: glyph
       - uses: dtolnay/rust-toolchain@stable
         with:

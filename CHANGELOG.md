@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 — 2026-10-18
+
+- Reuse three prestarted yt-dlp extractors in parallel, coalesce duplicate video lookups, and separate audio transfer capacity from metadata requests. Keep a bounded CLI fallback.
+- Preserve upstream ETags and modification dates so clients can check downloaded audio revisions without blocking playback.
+
+- Reuse resolved YouTube URLs in bounded companion memory, avoiding repeated yt-dlp extraction on seeks and audio refills without storing audio on disk.
+
+- Signed-in sharing copies short Glyph links for songs, artists and playlists, with rich previews and desktop deep links. Shared playlists open as a preview with an explicit Add to library action.
+
+- Avoid a Worker crash when a long cache key contains Unicode characters at the truncation boundary.
+- Start background quality preparation for partial audio responses and let companion encodes finish after a request disconnects.
 
 - Match YouTube by ISRC when available, then retry artist/title without the audio suffix if necessary (fixes Blender's LUVME falling back to a preview).
 - Prepare two quality variants concurrently in the background, keeping an encoder available for foreground work.

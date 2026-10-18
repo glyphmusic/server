@@ -4,12 +4,22 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { Miniflare } = require('miniflare');
+const { readFileSync, readdirSync } = require('node:fs');
+async function schema(mf) {
+  const db = await mf.getD1Database('GLYPH_DB');
+  const dir = new URL('../migrations/', import.meta.url);
+  for (const name of readdirSync(dir).filter(n => n.endsWith('.sql')).sort()) {
+    const sql = readFileSync(new URL(name, dir), 'utf8').replace(/--[^\n]*/g, '');
+    for (const statement of sql.split(';').map(s => s.trim()).filter(Boolean)) await db.prepare(statement).run();
+  }
+}
 const calls = [];
 const token = 'test-only-companion-token-32-characters';
 const sample = '0123456789abcdefghijklmnopqrstuvwxyz';
 let delayedComplete = false;
 const options = {
   modules: true,
+  d1Databases: ['GLYPH_DB'],
   scriptPath: fileURLToPath(new URL('../build/index.js', import.meta.url)),
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'], fallthrough: true }],
   compatibilityDate: '2025-01-01',
@@ -33,7 +43,7 @@ const options = {
         }});
         return new Response(body, { headers: { 'content-type': 'audio/mpeg', 'content-length': String(sample.length) } });
       }
-      return new Response(sample, { headers: { 'content-type': 'audio/mpeg', 'content-length': String(sample.length) } });
+      return new Response(sample, { headers: { 'content-type': 'audio/mpeg', 'content-length': String(sample.length), etag: '"test-audio-v1"', 'last-modified': 'Sun, 18 Oct 2026 12:00:00 GMT' } });
     }
     if (u.hostname === 'companion.example') {
       assert.equal(request.headers.get('authorization'), `Bearer ${token}`);
@@ -50,6 +60,7 @@ const options = {
   },
 };
 const mf = new Miniflare(options);
+await schema(mf);
 const fetch = (path, init) => mf.dispatchFetch(`https://glyph.test${path}`, init);
 try {
   const cold = await fetch('/v1/audio/deezer/1', { headers: { range: 'bytes=5-9' } });
@@ -72,6 +83,8 @@ try {
   assert.equal(calls.length, before);
   const head = await fetch('/v1/audio/deezer/1', { method: 'HEAD' });
   assert.equal(head.status, 200);
+  assert.equal(head.headers.get('etag'), '"test-audio-v1"');
+  assert.equal(head.headers.get('last-modified'), 'Sun, 18 Oct 2026 12:00:00 GMT');
   assert.equal(await head.text(), '');
   const invalid = await fetch('/v1/audio/deezer/1', { headers: { range: 'bytes=999-' } });
   assert.equal(invalid.status, 416);
@@ -120,6 +133,7 @@ try {
 // A second private instance exercises the same streaming adapter and its warm cache.
 const privateToken = 'private-instance-bearer-at-least-32-characters';
 const privateMf = new Miniflare({ ...options, bindings: { ...options.bindings, GLYPH_SERVER_BEARER: privateToken } });
+await schema(privateMf);
 try {
   const call = (path, headers = {}) => privateMf.dispatchFetch(`https://glyph.test${path}`, { headers });
   const health = await call('/v1/health');
