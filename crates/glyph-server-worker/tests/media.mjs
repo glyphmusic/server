@@ -48,6 +48,12 @@ const options = {
     if (u.hostname === 'companion.example') {
       assert.equal(request.headers.get('authorization'), `Bearer ${token}`);
       if (u.pathname.startsWith('/internal/audio/')) return new Response(sample, { headers: { 'content-type': 'audio/mp4', 'content-length': String(sample.length) } });
+      if (u.pathname === '/internal/resolve') {
+        const input = await request.json();
+        assert.equal(input.youtube_only, true);
+        if (input.track.id === 'missing') return Response.json({ matched: input.track, source: { kind: 'preview', provider: 'deezer', url: 'https://cdn-preview.dzcdn.net/1.mp3' }, confidence: 1 });
+        return Response.json({ matched: { ...input.track, source: 'youtube', id: 'abcdefghijk' }, source: { kind: 'embed', provider: 'youtube', embed_id: 'abcdefghijk' }, confidence: 1 });
+      }
       if (u.pathname === '/internal/ytdlp') {
         const { args } = await request.json();
         assert.ok(args.includes('--dump-json'));
@@ -119,6 +125,20 @@ try {
   const yt = await fetch('/v1/audio/youtube/abcdefghijk');
   assert.equal(await yt.text(), sample);
   assert.ok(calls.includes('https://companion.example/internal/audio/abcdefghijk'));
+  const wanted = { id: 'dz-test', source: 'deezer', title: 'Test', artist: 'Artist', duration_ms: 20000 };
+  const lookup = await fetch('/v1/download', { method: 'POST', body: JSON.stringify({ track: wanted, priority: ['youtube'], youtube_only: true }) });
+  assert.equal(lookup.status, 200);
+  const download = await lookup.json();
+  assert.equal(download.provider, 'youtube');
+  assert.equal(download.url, '/v1/download/youtube/abcdefghijk');
+  const downloaded = await fetch(download.url, { headers: { range: 'bytes=5-9' } });
+  assert.equal(downloaded.status, 206);
+  assert.equal(downloaded.headers.get('content-range'), `bytes 5-9/${sample.length}`);
+  assert.equal(await downloaded.text(), sample.slice(5, 10));
+  // A companion that ignores the new flag must not leak a preview fallback.
+  const missing = await fetch('/v1/download', { method: 'POST', body: JSON.stringify({ track: { ...wanted, id: 'missing', title: 'Missing' }, youtube_only: true }) });
+  assert.equal(missing.status, 200);
+  assert.equal(await missing.json(), null);
   const search = await fetch('/v1/search?q=Artist%20Test');
   assert.match(await search.text(), /"provider":"youtube"/);
   assert.ok(calls.includes('https://companion.example/internal/ytdlp'));
@@ -139,7 +159,7 @@ try {
   const health = await call('/v1/health');
   assert.equal((await health.json()).server_auth_required, true);
   const before = calls.length;
-  for (const path of ['/v1/audio/deezer/1','/v1/download/jamendo/42','/v1/upstream?url=https://upload.wikimedia.org/a.jpg','/v1/profile','/v1/sync/export','/v1/access']) {
+  for (const path of ['/v1/download/youtube/abcdefghijk','/v1/audio/deezer/1','/v1/download/jamendo/42','/v1/upstream?url=https://upload.wikimedia.org/a.jpg','/v1/profile','/v1/sync/export','/v1/access']) {
     const denied = await call(path);
     assert.equal(denied.status,401,path);
     assert.equal((await denied.json()).code,'server_auth_required');

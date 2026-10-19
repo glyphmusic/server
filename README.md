@@ -32,7 +32,7 @@ device limit and every server-side limit.
 | `POST /v1/cover` | Track -> cover URL (provider metadata lookup stays on the server) |
 | `GET /v1/upstream?url=` | Worker-only allowlisted cover/artist metadata and image proxy |
 | `GET /v1/audio/:provider/:id` | Streaming audio, byte ranges; edge-cached on Workers, direct on the binary |
-| `POST /v1/download` | Track -> explicitly permitted download reference, or null |
+| `POST /v1/download` | Track or ResolveRequest -> download stream reference, or null |
 | `GET /v1/download/:provider/:id` | Streaming proxy for permitted downloads |
 | `POST /v1/share` | Signed in: `{code, name?, songs?, kind?}` -> `{id, url}` short playlist link |
 | `GET /v1/share/:id` | `{code, name, songs, kind, author}`; `DELETE` (owner) removes it |
@@ -55,6 +55,17 @@ provider URL and can seek normally. SoundCloud keeps its official embed.
 Deezer preview signatures are refreshed from the track API on every resolve,
 including cached mappings; cached search previews are never used for playback.
 Preview resolution is bounded by `provider_timeout_ms`.
+
+For YouTube, download lookup uses the same resolver and companion stream as playback;
+only the client stores the offline file. `quality=low|standard|high` works on
+`/v1/download/youtube/<id>` as on the playback endpoint. Other providers retain
+their existing explicit download checks.
+
+`ResolveRequest.youtube_only` (optional, default false) requires YouTube for
+playback and download lookup. It uses a separate mapping cache, adds targeted
+search variants, and allows up to 45 seconds for the companion search (55 seconds
+for the Worker's remote call). A miss returns no source, never another provider
+or a short preview. Older clients can continue sending a plain Track to download lookup.
 
 ## Providers and keys
 

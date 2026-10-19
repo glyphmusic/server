@@ -323,7 +323,7 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
     let Some((provider, id)) = audio_target(path) else {
         return plain(StatusCode::BAD_REQUEST, "invalid audio path");
     };
-    if provider == glyph_protocol::ProviderId::YouTube && !is_download {
+    if provider == glyph_protocol::ProviderId::YouTube {
         if let Some(raw) = request.query.get("quality") {
             let Some(variant) = media::AudioVariant::parse(raw) else { return plain(StatusCode::BAD_REQUEST,"invalid audio quality"); };
             // High already means the best original source. Keep standalone
@@ -337,7 +337,7 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
             }
         }
     }
-    let url = if is_download {
+    let url = if is_download && provider != glyph_protocol::ProviderId::YouTube {
         match media::download_url(&svc, provider, &id).await {
             Ok(Some(u)) => u,
             _ => return plain(StatusCode::FORBIDDEN, "download not allowed for this track"),
@@ -354,7 +354,7 @@ async fn media(server: &Server, path: &str, headers: &[(String, String)], method
     };
     let mut permit = Some(permit);
     let out = fetch_upstream_audio(&url, range, &mut permit).await;
-    if provider == glyph_protocol::ProviderId::YouTube && !is_download {
+    if provider == glyph_protocol::ProviderId::YouTube {
         return retry_stale_youtube(&svc, &id, range, out, &mut permit).await;
     }
     out

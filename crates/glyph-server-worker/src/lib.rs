@@ -301,7 +301,7 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
             if resp.status_code() != 200 { return None; }
             serde_json::from_slice(&resp.bytes().await.ok()?).ok()
         };
-        glyph_server_core::traits::with_timeout(&WorkerRuntime, 25_000, work).await.flatten()
+        glyph_server_core::traits::with_timeout(&WorkerRuntime, if req.youtube_only { 55_000 } else { 25_000 }, work).await.flatten()
     }
 }
 

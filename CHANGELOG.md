@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.2.4 — 2026-10-19
+## 0.2.5 - 2026-10-19
+
+- Add persistent native r-dlp workers through GLYPH_RDLP_PATH, retaining the existing yt-dlp extraction fallback.
+- Route YouTube downloads through the same companion streaming, quality and stale-URL recovery paths as playback.
+- Honor the client youtube_only flag, allow bounded additional search variants, and reject other sources and previews in this mode.
+- Accept both legacy track bodies and resolve request bodies at the download endpoint.
+- Build against desktop protocol v0.2.4.
+
+## 0.2.4 â€” 2026-10-19
 
 - Retry higher-priority full sources when a Deezer preview or a previous miss is cached; refresh outdated resolver mappings.
 - Read artists from YouTube video titles, tolerate nullable channel metadata, and continue text searches after transient ISRC lookup failures.

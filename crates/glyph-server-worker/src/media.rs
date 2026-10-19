@@ -133,7 +133,7 @@ pub async fn handle(
     } else {
         upstream = None;
     }
-    let variant = if let Some(id) = core.path.strip_prefix("/v1/audio/youtube/") {
+    let variant = if let Some(id) = core.path.strip_prefix("/v1/audio/youtube/").or_else(|| core.path.strip_prefix("/v1/download/youtube/")) {
         if !media::valid_video_id(id) { return Response::error("invalid video id",400); }
         if !svc.config.companion_enabled { return Response::error("companion disabled",403); }
         match core.query.get("quality") {
@@ -160,7 +160,7 @@ pub async fn handle(
     init.with_headers(headers);
     let cache_req = worker::Request::new_with_init(key.as_str(), &init)?;
     let cache = worker::Cache::default();
-    let companion_audio = core.path.starts_with("/v1/audio/youtube/");
+    let companion_audio = core.path.starts_with("/v1/audio/youtube/") || core.path.starts_with("/v1/download/youtube/");
     if companion_audio && !svc.config.companion_enabled {
         return Response::error("companion disabled", 403);
     }
@@ -204,7 +204,7 @@ pub async fn handle(
         if !media::valid_id(id) {
             return Response::error("invalid track id", 400);
         }
-        if is_download {
+        if is_download && provider != ProviderId::YouTube {
             let raw = match media::download_url(&svc, provider, id).await {
                 Ok(Some(u)) => u,
                 _ => return Response::error("download not allowed", 403),

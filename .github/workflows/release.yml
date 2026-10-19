@@ -29,7 +29,7 @@ jobs:
         with:
           repository: glyphmusic/desktop
           # Pin the desktop protocol and site assets used by this server release.
-          ref: v0.2.3
+          ref: v0.2.4
           path: glyph
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -394,8 +394,28 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 Ok(Response::json(200, &serde_json::json!({ "url": cover })))
             }
             Route::Download => {
-                let track: glyph_protocol::Track = parse_body(&req)?;
-                let resolved = resolver::resolve(svc, ResolveRequest { track: track.clone(), priority: vec![] }).await;
+                #[derive(serde::Deserialize)]
+                #[serde(untagged)]
+                enum Input { Resolve(ResolveRequest), Track(glyph_protocol::Track) }
+                let request = match parse_body::<Input>(&req)? {
+                    Input::Resolve(r) => r,
+                    Input::Track(track) => ResolveRequest { youtube_only: false, track, priority: vec![] },
+                };
+                if request.track.title.trim().is_empty() || request.track.artist.trim().is_empty() {
+                    return Err(ApiErr::bad_request("track.title and track.artist are required"));
+                }
+                let youtube_only = request.youtube_only;
+                let track = request.track.clone();
+                let resolved = resolver::resolve(svc, request).await;
+                if matches!(resolved.source.as_ref(), Some(glyph_protocol::PlaybackSource::Embed { provider: ProviderId::YouTube, .. } | glyph_protocol::PlaybackSource::Stream { provider: ProviderId::YouTube, .. })) {
+                    if let Some(matched) = &resolved.matched {
+                        if crate::media::valid_video_id(&matched.id) {
+                            return Ok(Response::json(200, &serde_json::json!({"provider":ProviderId::YouTube,
+                                "url":crate::media::audio_path(ProviderId::YouTube, &matched.id).replace("/v1/audio/", "/v1/download/")})));
+                        }
+                    }
+                }
+                if youtube_only { return Ok(Response::json(200, &serde_json::Value::Null)); }
                 for provider in [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive] {
                     for t in std::iter::once(&track).chain(resolved.matched.iter()) {
                         let id = if t.source == provider { Some(&t.id) } else { t.external_ids.get(&provider) };
@@ -650,10 +670,26 @@ mod tests {
     }
 
     #[test]
+    fn youtube_download_resolves_metadata_tracks_to_a_proxy_stream() {
+        let h = crate::testutil::harness_with_ytdlp(Default::default());
+        h.cmds.on("ytsearch", r#"{"id":"abcdefghijk","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
+        let track = track("dz1", ProviderId::Deezer, "Get Lucky", "Daft Punk", 369);
+        for body in [serde_json::to_vec(&track).unwrap(), serde_json::to_vec(&ResolveRequest {
+            youtube_only: true, track: track.clone(), priority: vec![ProviderId::YouTube],
+        }).unwrap()] {
+            let response = block_on(server(&h).handle(Request::new(Method::Post, "/v1/download", vec![], body, None)));
+            assert_eq!(response.status, 200);
+            let value: serde_json::Value = serde_json::from_slice(response.bytes().unwrap()).unwrap();
+            assert_eq!(value["provider"], "youtube");
+            assert_eq!(value["url"], "/v1/download/youtube/abcdefghijk");
+        }
+    }
+
+    #[test]
     fn resolve_endpoint_roundtrip() {
         let h = harness(Default::default());
         h.http.on("audius.co", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
-        let body = serde_json::to_vec(&ResolveRequest {
+        let body = serde_json::to_vec(&ResolveRequest { youtube_only: false,
             track: track("x", ProviderId::Deezer, "Get Lucky", "Daft Punk", 369),
             priority: vec![],
         })

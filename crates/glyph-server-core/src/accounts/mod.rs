@@ -552,7 +552,7 @@ impl Accounts {
         let n: usize = n.parse().map_err(|_| ApiErr::not_found("no such song"))?;
         let p = self.shared(id).await?;
         let track = crate::share::songs(&p.code).into_iter().take(crate::share::MAX_LISTED).nth(n).ok_or_else(|| ApiErr::not_found("no such song"))?;
-        let mut resolved = crate::resolver::resolve(svc, glyph_protocol::ResolveRequest { track, priority: vec![] }).await;
+        let mut resolved = crate::resolver::resolve(svc, glyph_protocol::ResolveRequest { youtube_only: false, track, priority: vec![] }).await;
         if svc.config.proxy_audio {
             crate::media::proxy_playback(&mut resolved);
         }

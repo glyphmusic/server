@@ -99,7 +99,7 @@ fn cache_key(want: &Track, prio: &[ProviderId]) -> String {
     format!("resolve:v3:{ident}:{}", p.join(""))
 }
 
-async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Track, PlaybackSource, f32)> {
+async fn try_provider(svc: &Services, p: ProviderId, want: &Track, extended: bool) -> Option<(Track, PlaybackSource, f32)> {
     if !svc.config.provider_enabled(p) || is_skipped(svc, p).await {
         return None;
     }
@@ -125,7 +125,14 @@ async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Tr
         if let Some(isrc) = want.isrc.as_ref().filter(|s| !s.trim().is_empty()) { queries.push(isrc.clone()); }
         queries.push(format!("{base} audio"));
     }
-    queries.push(base);
+    queries.push(base.clone());
+    if extended && p == ProviderId::YouTube {
+        queries.push(format!("{base} official audio"));
+        queries.push(format!("{} {}", crate::merge::normalize_artist(&want.artist), normalize_title(&want.title)));
+        queries.push(format!("{} - {}", want.artist, want.title));
+    }
+    let mut seen = std::collections::HashSet::new();
+    queries.retain(|q| seen.insert(q.clone()));
     for query in queries {
         let cands = match search_provider(svc, p, query.trim()).await {
             Ok(cands) => cands,
@@ -192,8 +199,8 @@ fn ttl(resp: &ResolveResponse) -> u64 {
 
 pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let want = &req.track;
-    let prio = effective_priority(&req.priority);
-    let key = cache_key(want, &prio);
+    let prio = if req.youtube_only { vec![ProviderId::YouTube] } else { effective_priority(&req.priority) };
+    let key = if req.youtube_only { format!("{}:youtube-only", cache_key(want, &prio)) } else { cache_key(want, &prio) };
     // Only full sources are final mappings. A preview or an old miss must
     // retry the higher-priority providers, including on the companion.
     if let Some(hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
@@ -202,18 +209,22 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         }
     }
 
-    if let Some(remote) = svc.cmds.resolve(&req).await {
+    if let Some(mut remote) = svc.cmds.resolve(&req).await {
+        // Older companions may ignore the new flag; still enforce it here.
+        if req.youtube_only && !matches!(remote.source.as_ref(), Some(PlaybackSource::Stream { provider: ProviderId::YouTube, .. } | PlaybackSource::Embed { provider: ProviderId::YouTube, .. })) {
+            remote = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
+        }
         cache::put_json(&*svc.cache, &key, &remote, ttl(&remote)).await;
         return remote;
     }
     let mut found = None;
     for p in &prio {
-        if let Some(r) = try_provider(svc, *p, want).await {
+        if let Some(r) = with_timeout(&*svc.rt, if req.youtube_only { 45_000 } else { 65_000 }, try_provider(svc, *p, want, req.youtube_only)).await.flatten() {
             found = Some(r);
             break;
         }
     }
-    if found.is_none() {
+    if found.is_none() && !req.youtube_only {
         found = with_timeout(&*svc.rt, svc.config.provider_timeout_ms, try_preview(svc, want)).await.flatten();
     }
     let (resp, ttl) = match found {
@@ -264,7 +275,7 @@ mod tests {
         let h = harness(all_secrets());
         let companion = std::sync::Arc::new(Companion(Default::default()));
         let svc = Services { http: h.svc.http.clone(), cache: h.svc.cache.clone(), limiter: h.svc.limiter.clone(), rt: h.svc.rt.clone(), cmds: companion.clone(), config: h.svc.config.clone() };
-        let req = || ResolveRequest { track: want(), priority: vec![] };
+        let req = || ResolveRequest { youtube_only: false, track: want(), priority: vec![] };
         let first = block_on(resolve(&svc, req()));
         assert_eq!(first.matched.unwrap().id, "yt1");
         // No provider was asked here; the second call is a cache hit.
@@ -282,7 +293,7 @@ mod tests {
             provider: Deezer, url: "https://cdn/expired.mp3".into(),
         }), confidence: 1.0, youtube_hint: None };
         block_on(cache::put_json(&*svc.cache, &cache_key(&want(), &[YouTube]), &preview, 30 * DAY));
-        let result = block_on(resolve(&svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        let result = block_on(resolve(&svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
         assert_eq!(*companion.0.lock().unwrap(), 1);
     }
@@ -293,8 +304,28 @@ mod tests {
         let miss = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
         block_on(cache::put_json(&*h.svc.cache, &cache_key(&want(), &[YouTube]), &miss, HOUR));
         h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
-        let result = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+    }
+
+    #[test]
+    fn youtube_only_does_not_return_other_sources_or_previews() {
+        let h = setup();
+        h.http.on("audius.co", 200, r#"{"data":[{"id":"a","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        h.http.on("api.deezer.com", 200, r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/preview.mp3"}"#);
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: true, track: want(), priority: vec![Audius] }));
+        assert!(result.source.is_none());
+        assert_eq!(h.http.call_count("http"), 0);
+    }
+
+    #[test]
+    fn youtube_only_tries_additional_search_variants() {
+        let h = setup();
+        h.cmds.on("official audio", r#"{"id":"abcdefghijk","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: true, track: want(), priority: vec![Audius] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+        assert_eq!(h.cmds.call_count("official audio"), 1);
+        assert_eq!(h.http.call_count("http"), 0);
     }
 
     #[test]
@@ -336,7 +367,7 @@ mod tests {
             r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#,
         );
         h.cmds.on("ytsearch", "{}");
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
         let m = r.matched.unwrap();
         assert_eq!((m.source, m.id.as_str()), (Audius, "au1"));
         assert_eq!(m.external_ids.get(&Spotify).unwrap(), "sp1");
@@ -361,13 +392,13 @@ mod tests {
                 r#"{"id":"topic","title":"Get Lucky","channel":"Daft Punk - Topic","duration":370.0}"#,
             ),
         );
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
         match r.source {
             Some(PlaybackSource::Embed { provider: YouTube, ref embed_id }) => assert_eq!(embed_id, "topic"),
             ref o => panic!("{o:?}"),
         }
         let calls = h.cmds.call_count("ytsearch");
-        let r2 = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
+        let r2 = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
         assert_eq!(r2, r);
         assert_eq!(h.cmds.call_count("ytsearch"), calls, "second resolve must hit the cache");
     }
@@ -377,7 +408,7 @@ mod tests {
         let h = setup();
         h.http.on("audius.co/v1/tracks/search", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
         h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk","duration":369.0}"#);
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube, Audius] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![YouTube, Audius] }));
         assert_eq!(r.matched.unwrap().source, YouTube);
     }
 
@@ -386,7 +417,7 @@ mod tests {
         let h = setup();
         let mut w = want();
         w.external_ids.insert(Audius, "known".into());
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: w, priority: vec![] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: w, priority: vec![] }));
         let m = r.matched.unwrap();
         assert_eq!((m.source, m.id.as_str(), r.confidence), (Audius, "known", 1.0));
         assert!(h.http.calls.lock().unwrap().is_empty());
@@ -407,11 +438,11 @@ mod tests {
         block_on(cache::put_json(&*h.svc.cache, &cache_key(&track, &DEFAULT_PRIORITY), &stale, 30 * DAY));
         h.http.on("api.deezer.com/track/1", 200,
             r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/fresh.mp3"}"#);
-        let first = block_on(resolve(&h.svc, ResolveRequest { track: track.clone(), priority: vec![] }));
+        let first = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: track.clone(), priority: vec![] }));
         assert!(matches!(first.source, Some(PlaybackSource::Preview { url, .. }) if url == "https://cdn/fresh.mp3"));
         h.http.rules.lock().unwrap().iter_mut().find(|r| r.0 == "api.deezer.com/track/1").unwrap().2 =
             r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/newer.mp3"}"#.into();
-        let second = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![] }));
+        let second = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track, priority: vec![] }));
         assert!(matches!(second.source, Some(PlaybackSource::Preview { url, .. }) if url == "https://cdn/newer.mp3"));
         assert_eq!(h.http.calls.lock().unwrap().iter().filter(|url| url.contains("api.deezer.com/track/1")).count(), 2);
     }
@@ -425,7 +456,7 @@ mod tests {
             confidence: 1.0, youtube_hint: None };
         block_on(cache::put_json(&*h.svc.cache, &cache_key(&track, &[YouTube]), &preview, 30 * DAY));
         h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369.0}"#);
-        let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track, priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
         assert_eq!(h.cmds.call_count("ytsearch10:GBDUW1300001"), 1);
     }
@@ -437,7 +468,7 @@ mod tests {
         h.cmds.on("ytsearch10:Daft Punk Get Lucky", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
         let mut track = want();
         track.isrc = None;
-        let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track, priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
     }
 
@@ -447,7 +478,7 @@ mod tests {
         *h.cmds.failed.lock().unwrap() = Some("ytsearch10:GBDUW1300001".into());
         h.cmds.on("ytsearch10:Daft Punk Get Lucky audio",
             r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
-        let result = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
         assert_eq!(h.cmds.call_count("ytsearch10:Daft Punk Get Lucky audio"), 1);
     }
@@ -474,12 +505,12 @@ mod tests {
         h.cmds.on("ytsearch", "{}");
         h.http.on("track/isrc:GBDUW1300001", 200,
             r#"{"id":1,"title":"Get Lucky","duration":369,"preview":"https://cdn/prev.mp3","artist":{"name":"Daft Punk"}}"#);
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
         assert!(matches!(r.source, Some(PlaybackSource::Preview { provider: Deezer, .. })));
 
         let h = setup();
         h.http.on("audius.co", 200, r#"{"data":[]}"#);
-        let r = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![] }));
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
         assert!(r.matched.is_none() && r.source.is_none());
         assert_eq!(r.confidence, 0.0);
     }
