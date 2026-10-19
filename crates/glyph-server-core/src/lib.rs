@@ -37,8 +37,8 @@ pub use config::{Config, Secrets};
 pub use error::ApiErr;
 pub use server::{Body, Request, Response, Server};
 pub use traits::{
-    Cache, CommandError, CommandRunner, HttpClient, HttpError, HttpRequest, HttpResponse, Method,
-    NoCommands, RateDecision, RateLimiter, Runtime, Services,
+    Cache, CommandError, CommandRunner, HttpClient, HttpError, HttpRequest, HttpResponse, LyricsLookup,
+    LyricsQuery, Method, NoCommands, RateDecision, RateLimiter, Runtime, Services,
 };
 
 /// Version reported by `/v1/health` when the host does not override it.

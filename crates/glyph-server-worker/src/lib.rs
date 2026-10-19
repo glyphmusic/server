@@ -303,6 +303,32 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
         };
         glyph_server_core::traits::with_timeout(&WorkerRuntime, if req.youtube_only { 55_000 } else { 25_000 }, work).await.flatten()
     }
+
+    /// LRCLIB rate-limits Cloudflare egress, so the companion (home
+    /// connection) answers first; only a missing/broken companion lets the
+    /// Worker look lyrics up itself.
+    async fn lyrics(&self, query: &glyph_server_core::LyricsQuery) -> Option<glyph_server_core::LyricsLookup> {
+        use glyph_server_core::LyricsLookup;
+        let body = serde_json::to_vec(query).ok()?;
+        let headers = Headers::new();
+        headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
+        headers.set("content-type", "application/json").ok()?;
+        let mut init = RequestInit::new();
+        init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
+            .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+        let url = format!("{}/internal/lyrics", self.url.trim_end_matches('/'));
+        let request = worker::Request::new_with_init(&url, &init).ok()?;
+        let work = async {
+            let mut resp = Fetch::Request(request).send().await.ok()?;
+            match resp.status_code() {
+                200 => Some(LyricsLookup::Found(serde_json::from_slice(&resp.bytes().await.ok()?).ok()?)),
+                404 => Some(LyricsLookup::None),
+                // Busy or broken companion: try the local lookup.
+                _ => None,
+            }
+        };
+        glyph_server_core::traits::with_timeout(&WorkerRuntime, 20_000, work).await.flatten()
+    }
 }
 
 /// Secrets and updates are managed with wrangler / Cloudflare. Limits and the

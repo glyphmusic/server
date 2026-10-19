@@ -1,9 +1,8 @@
-# Glyph Server 0.2.5
+# Glyph Server 0.2.6
 
-- Add persistent native r-dlp workers through GLYPH_RDLP_PATH, retaining the existing yt-dlp extraction fallback.
-- Route YouTube downloads through the same companion streaming, quality and stale-URL recovery paths as playback.
-- Honor the client youtube_only flag, allow bounded additional search variants, and reject other sources and previews in this mode.
-- Accept both legacy track bodies and resolve request bodies at the download endpoint.
+- Serve lyrics from the companion first (`POST /internal/lyrics`) and fall back to the Worker's own lookup, so LRCLIB's rate limit on data-centre addresses no longer breaks lyrics.
+- Answer `/v1/lyrics` with "no lyrics" (404) when the upstream is rate-limited or down, instead of a 502/503; a failed lookup is retried after five minutes, a confirmed miss after an hour.
+- Answer `/v1/similar` with an empty list (200) when Last.fm is not configured or fails, instead of a 503/502.
 - Build against desktop protocol v0.2.4.
 
 Cloudflare deployments require D1 migrations through 0013_audio_variant_jobs.sql.

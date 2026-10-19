@@ -237,7 +237,7 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
 
-    if path_only == "/internal/ytdlp" || path_only == "/internal/resolve" || path_only.starts_with("/internal/audio/") {
+    if path_only == "/internal/ytdlp" || path_only == "/internal/resolve" || path_only == "/internal/lyrics" || path_only.starts_with("/internal/audio/") {
         return companion(&st.server, &path_only, &headers, method, &body).await;
     }
     if let Err(resp) = st.server.check_access(&Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local)) {
@@ -475,8 +475,10 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     // Resolves mostly wait on provider APIs; their yt-dlp steps still pass
     // the command slots below.
     static RESOLVE_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    static LYRICS_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let slots = if path.starts_with("/internal/audio/") { audio_slots() }
         else if path == "/internal/resolve" { RESOLVE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
+        else if path == "/internal/lyrics" { LYRICS_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
         else { SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))) };
     let Ok(_permit) = slots.clone().try_acquire_owned() else { return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later") };
     let svc = server.services();
@@ -504,6 +506,20 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         return retry_stale_youtube(&svc, id, range, out, &mut permit).await;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
+    if path == "/internal/lyrics" {
+        // LRCLIB rate-limits Cloudflare egress; this machine may ask instead.
+        let Ok(query) = serde_json::from_slice::<glyph_server_core::LyricsQuery>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid lyrics request") };
+        if query.title.trim().is_empty() || query.artist.trim().is_empty() { return plain(StatusCode::BAD_REQUEST, "title and artist required"); }
+        let lookup = glyph_server_core::providers::lrclib::lyrics(&svc, &query.title, &query.artist, query.album.as_deref(), query.duration_ms).await;
+        let body = match lookup {
+            Ok(Some(l)) => serde_json::to_vec(&l).unwrap(),
+            // The Worker caches this as "no lyrics" for this song.
+            Ok(None) => return plain(StatusCode::NOT_FOUND, "no lyrics"),
+            // Ask the Worker's own lookup as a last resort instead of hiding trouble.
+            Err(_) => return plain(StatusCode::SERVICE_UNAVAILABLE, "lyrics upstream failed"),
+        };
+        return Response::builder().header("content-type", "application/json").header("cache-control", "no-store").body(Body::from(body)).unwrap();
+    }
     if path == "/internal/resolve" {
         // The Worker's whole resolve miss path runs here (CPU-limited there).
         let Ok(req) = serde_json::from_slice::<glyph_protocol::ResolveRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid resolve request") };
@@ -704,6 +720,16 @@ mod tests {
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
+
+        // `/internal/lyrics` follows the same private contract: token required,
+        // title and artist must be present; bad input never reaches LRCLIB.
+        let request = axum::http::Request::builder().uri("/internal/lyrics").method("POST").body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
+        let request = axum::http::Request::builder().uri("/internal/lyrics").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
+        let blank = serde_json::json!({"title":"  ","artist":"A"}).to_string();
+        let request = axum::http::Request::builder().uri("/internal/lyrics").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from(blank)).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
 
         // `glyph-server companion off`: 403 for the Worker, `on` restores it.

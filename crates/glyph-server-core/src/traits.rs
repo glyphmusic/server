@@ -204,6 +204,32 @@ pub trait CommandRunner: MaybeSendSync {
     async fn resolve(&self, _req: &glyph_protocol::ResolveRequest) -> Option<glyph_protocol::ResolveResponse> {
         None
     }
+
+    /// Look lyrics up on the companion machine. Cloudflare egress is
+    /// rate-limited by LRCLIB, so the Worker asks this machine (home
+    /// connection) first and only falls back to its own lookup on `None`.
+    async fn lyrics(&self, _query: &LyricsQuery) -> Option<LyricsLookup> {
+        None
+    }
+}
+
+/// Lyrics request passed to the companion (`POST /internal/lyrics`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LyricsQuery {
+    pub title: String,
+    pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+/// What the companion answered. `None` from the trait means "no companion or
+/// it failed"; [`LyricsLookup::None`] is a definitive "this song has no lyrics".
+#[derive(Debug, Clone)]
+pub enum LyricsLookup {
+    Found(glyph_protocol::LyricsResponse),
+    None,
 }
 
 /// Used where no process can be spawned (Cloudflare Workers).

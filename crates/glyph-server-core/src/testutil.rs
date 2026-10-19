@@ -81,6 +81,18 @@ pub struct MockCommands {
     pub missing: Mutex<Option<String>>,
     /// Argument substring for a transient extraction failure.
     pub failed: Mutex<Option<String>>,
+    /// Lyrics answer of the mocked companion: unset = no companion at all,
+    /// `Some(None)` = "this song has no lyrics".
+    pub lyrics_answer: Mutex<Option<Option<glyph_protocol::LyricsResponse>>>,
+}
+
+impl MockCommands {
+    /// Makes the mocked companion answer lyrics with `answer` (`None` = it
+    /// knows the song has none). Without a call there is no companion.
+    pub fn companion_lyrics(&self, answer: Option<glyph_protocol::LyricsResponse>) -> &Self {
+        *self.lyrics_answer.lock().unwrap() = Some(answer);
+        self
+    }
 }
 
 impl MockCommands {
@@ -112,6 +124,14 @@ impl CommandRunner for MockCommands {
             }
         }
         Ok(b"{}".to_vec())
+    }
+
+    async fn lyrics(&self, _query: &LyricsQuery) -> Option<LyricsLookup> {
+        let guard = self.lyrics_answer.lock().unwrap();
+        match guard.as_ref()? {
+            Some(l) => Some(LyricsLookup::Found(l.clone())),
+            None => Some(LyricsLookup::None),
+        }
     }
 }
 

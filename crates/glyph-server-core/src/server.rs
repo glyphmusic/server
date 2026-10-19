@@ -437,9 +437,15 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 if let Some(hit) = cache::get_json::<SimilarResponse>(&*svc.cache, &key).await {
                     return Ok(Response::json(200, &hit));
                 }
-                let tracks = lastfm::similar(svc, artist, title).await.map_err(upstream_err)?;
+                // Radio is a bonus feature: a missing Last.fm key or a short
+                // upstream outage answers with an empty list instead of a 5xx,
+                // and the client keeps its own fallbacks.
+                let (tracks, ttl) = match lastfm::similar(svc, artist, title).await {
+                    Ok(t) => (t, DAY),
+                    Err(_) => (Vec::new(), SIMILAR_TROUBLE_TTL),
+                };
                 let resp = SimilarResponse { tracks };
-                cache::put_json(&*svc.cache, &key, &resp, DAY).await;
+                cache::put_json(&*svc.cache, &key, &resp, ttl).await;
                 Ok(Response::json(200, &resp))
             }
             Route::Import => {
@@ -456,6 +462,15 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
     }
 }
 
+/// How long a failed lyrics lookup is remembered. Short: a rate-limited
+/// minute must not hide lyrics for an hour.
+const LYRICS_TROUBLE_TTL: u64 = 300;
+
+/// How long an empty radio answer is remembered after a provider problem.
+const SIMILAR_TROUBLE_TTL: u64 = 600;
+
+/// Tries the companion first (home connection, not rate-limited by LRCLIB),
+/// then the local lookup. Upstream trouble yields "no lyrics", never a 5xx.
 async fn lyrics(svc: &Arc<Services>, req: &Request) -> Result<Response, ApiErr> {
     {
         let title = req.query.required("title")?;
@@ -464,15 +479,33 @@ async fn lyrics(svc: &Arc<Services>, req: &Request) -> Result<Response, ApiErr> 
         let dur = req.query.duration_ms("duration")?;
         let key = format!("lyrics:{}:{}:{}", plain_words(artist), plain_words(title), dur.unwrap_or(0) / 2000);
         let cached: Option<Option<LyricsResponse>> = cache::get_json(&*svc.cache, &key).await;
-        let found = match cached {
-            Some(v) => v,
+        let (found, ttl) = match cached {
+            Some(v) => (v, 0),
             None => {
-                let v = lrclib::lyrics(svc, title, artist, album, dur).await.map_err(upstream_err)?;
-                // Misses are cached shortly so repeated plays do not hammer LRCLIB.
-                cache::put_json(&*svc.cache, &key, &v, if v.is_some() { 7 * DAY } else { HOUR }).await;
-                v
+                let query = crate::traits::LyricsQuery {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    album: album.map(str::to_string),
+                    duration_ms: dur,
+                };
+                match svc.cmds.lyrics(&query).await {
+                    Some(crate::traits::LyricsLookup::Found(l)) => (Some(l), 7 * DAY),
+                    // The companion answered: no lyrics for this song.
+                    Some(crate::traits::LyricsLookup::None) => (None, HOUR),
+                    None => match lrclib::lyrics(svc, title, artist, album, dur).await {
+                        Ok(Some(l)) => (Some(l), 7 * DAY),
+                        // Misses are cached shortly so repeated plays do not hammer LRCLIB.
+                        Ok(None) => (None, HOUR),
+                        // Rate limits and outages are expected for data-centre
+                        // addresses; stay quiet and retry soon.
+                        Err(_) => (None, LYRICS_TROUBLE_TTL),
+                    },
+                }
             }
         };
+        if ttl > 0 {
+            cache::put_json(&*svc.cache, &key, &found, ttl).await;
+        }
         match found {
             Some(l) => Ok(Response::json(200, &l)),
             None => Err(ApiErr::not_found("no lyrics found")),
@@ -485,15 +518,6 @@ pub(crate) fn parse_body<T: serde::de::DeserializeOwned>(req: &Request) -> Resul
         return Err(ApiErr::new(413, "payload_too_large", "request body too large"));
     }
     serde_json::from_slice(&req.body).map_err(|_| ApiErr::bad_request("request body is not valid JSON for this endpoint"))
-}
-
-fn upstream_err(e: providers::ProviderError) -> ApiErr {
-    use providers::ProviderError::*;
-    match e {
-        NotConfigured => ApiErr::new(503, "not_configured", "this server instance has no key for that provider"),
-        Quota => ApiErr::new(503, "quota_exhausted", "upstream quota exhausted, try later"),
-        other => ApiErr::new(502, "upstream_error", format!("upstream failure: {other}")),
-    }
 }
 
 #[allow(dead_code)]
@@ -656,16 +680,61 @@ mod tests {
     }
 
     #[test]
-    fn similar_requires_key_and_never_leaks_it() {
+    fn lyrics_rate_limits_answer_no_lyrics_instead_of_5xx() {
+        // LRCLIB blocks data-centre ranges (429/5xx): the client must see a
+        // missing-lyrics answer, never a 502/503 that also pollutes logs.
+        for status in [429u16, 500, 503] {
+            let h = harness(Default::default());
+            h.http.on("lrclib.net", status, "{}");
+            let s = server(&h);
+            let r = block_on(s.handle(get("/v1/lyrics?title=T&artist=A&duration=200")));
+            assert_eq!(r.status, 404, "upstream {status} must not surface as 5xx");
+        }
+    }
+
+    #[test]
+    fn lyrics_prefer_the_companion_and_skip_the_local_lookup() {
+        let h = harness(Default::default());
+        h.http.on("lrclib.net", 429, "{}");
+        h.cmds.companion_lyrics(Some(glyph_protocol::LyricsResponse {
+            provider: ProviderId::LrcLib,
+            synced: vec![glyph_protocol::LyricLine { time_ms: 1_000, text: "from companion".into() }],
+            plain: None,
+            instrumental: false,
+        }));
+        let s = server(&h);
+        let r = block_on(s.handle(get("/v1/lyrics?title=T&artist=A&duration=200")));
+        assert_eq!(r.status, 200);
+        assert_eq!(json_of(&r)["synced"][0]["text"], "from companion");
+        // The rate-limited local provider was never asked.
+        assert!(h.http.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lyrics_companion_trouble_falls_back_to_the_local_lookup() {
+        let h = harness(Default::default());
+        h.http.on("lrclib.net/api/get", 404, "{}");
+        h.http.on("lrclib.net/api/search", 429, "{}");
+        let s = server(&h);
+        // No companion answer and a rate-limited lookup: still not a 5xx.
+        let r = block_on(s.handle(get("/v1/lyrics?title=T&artist=A&duration=200")));
+        assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn similar_without_key_is_an_empty_list_not_an_error() {
+        // Radio is optional: an unconfigured provider and a broken upstream
+        // both answer with an empty list so the client never sees a 5xx.
         let h = harness(Default::default());
         let r = block_on(server(&h).handle(get("/v1/similar?artist=a&title=t")));
-        assert_eq!(r.status, 503);
-        assert_eq!(json_of(&r)["code"], "not_configured");
+        assert_eq!(r.status, 200);
+        assert_eq!(json_of(&r)["tracks"].as_array().unwrap().len(), 0);
 
         let h = harness(all_secrets());
         h.http.on("audioscrobbler", 500, "LF_SECRET in body?");
         let r = block_on(server(&h).handle(get("/v1/similar?artist=a&title=t")));
-        assert_eq!(r.status, 502);
+        assert_eq!(r.status, 200);
+        assert_eq!(json_of(&r)["tracks"].as_array().unwrap().len(), 0);
         assert!(!String::from_utf8_lossy(r.bytes().unwrap()).contains("LF_SECRET"));
     }
 
