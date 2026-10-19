@@ -271,48 +271,54 @@ impl Server {
         let svc = self.services();
         let ip = req.client_ip.as_deref().unwrap_or("unknown");
         let ip_key = format!("ip:{ip}");
-        check_ban(&svc, &ip_key).await?;
         let namespace = if media { "media" } else { "api" };
         let base = svc.config.rate_limit_per_min.max(1).saturating_mul(if media { 20 } else { 1 });
-        // Fixed IP ceiling: adding or rotating an install ID never raises it.
-        check_quota(&svc, &format!("{namespace}:{ip_key}"), &ip_key, base.saturating_mul(8)).await?;
-        let identity = match &self.accounts {
-            Some(a) => a.abuse_identity(&svc, req).await,
-            None => None,
-        };
-        if let Some((user, device)) = identity {
-            for key in [format!("user:{user}"), format!("device:{device}")] {
-                check_ban(&svc, &key).await?;
-                check_quota(&svc, &format!("{namespace}:{key}"), &key, base.saturating_mul(4)).await?;
+        let has_bearer = req.header("authorization").is_some_and(|h| h.starts_with("Bearer "));
+        if self.accounts.is_some() && has_bearer {
+            // Fixed IP ceiling: adding or rotating an install ID never raises it.
+            check_rules(&svc, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))]).await?;
+            if let Some(a) = &self.accounts {
+                if let Some((user, device)) = a.abuse_identity(&svc, req).await {
+                    let u_key = format!("user:{user}");
+                    let d_key = format!("device:{device}");
+                    let lim = base.saturating_mul(4);
+                    check_rules(&svc, &[
+                        (format!("{namespace}:{u_key}"), u_key, lim),
+                        (format!("{namespace}:{d_key}"), d_key, lim),
+                    ]).await?;
+                    return Ok(true);
+                }
             }
-            Ok(true)
-        } else {
-            check_quota(&svc, &format!("{namespace}:guest:{ip}"), &ip_key, base).await?;
+            let mut rules = vec![(format!("{namespace}:guest:{ip}"), ip_key, base)];
             if let Some(id) = req.header(INSTALL_ID_HEADER).filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
                 let key = format!("install:{id}");
-                check_ban(&svc, &key).await?;
-                check_quota(&svc, &format!("{namespace}:{key}"), &key, base).await?;
+                rules.push((format!("{namespace}:{key}"), key, base));
             }
+            check_rules(&svc, &rules).await?;
+            Ok(false)
+        } else {
+            let mut rules = vec![
+                (format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8)),
+                (format!("{namespace}:guest:{ip}"), ip_key, base),
+            ];
+            if let Some(id) = req.header(INSTALL_ID_HEADER).filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
+                let key = format!("install:{id}");
+                rules.push((format!("{namespace}:{key}"), key, base));
+            }
+            check_rules(&svc, &rules).await?;
             Ok(false)
         }
     }
 }
 
-async fn check_ban(svc: &Services, key: &str) -> Result<(), ApiErr> {
-    if let Some(retry) = svc.limiter.blocked(key).await {
+async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<(), ApiErr> {
+    if let Err((banned, retry)) = svc.limiter.admit_rules(rules, 60).await {
         let mut e = ApiErr::rate_limited(retry);
-        e.body.code = "temporarily_blocked".into();
-        e.body.message = "temporary abuse protection; retry later".into();
+        if banned {
+            e.body.code = "temporarily_blocked".into();
+            e.body.message = "temporary abuse protection; retry later".into();
+        }
         return Err(e);
-    }
-    Ok(())
-}
-
-async fn check_quota(svc: &Services, key: &str, principal: &str, limit: u32) -> Result<(), ApiErr> {
-    if let RateDecision::Limited { retry_after_s } = svc.limiter.check(key, limit, 60).await {
-        svc.limiter.penalize(principal).await;
-        check_ban(svc, principal).await?;
-        return Err(ApiErr::rate_limited(retry_after_s));
     }
     Ok(())
 }

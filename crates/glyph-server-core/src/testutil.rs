@@ -79,6 +79,8 @@ pub struct MockCommands {
     pub calls: Mutex<Vec<String>>,
     /// Argument substring for which the program is reported as missing.
     pub missing: Mutex<Option<String>>,
+    /// Argument substring for a transient extraction failure.
+    pub failed: Mutex<Option<String>>,
 }
 
 impl MockCommands {
@@ -97,6 +99,9 @@ impl CommandRunner for MockCommands {
     async fn run(&self, program: &str, args: &[String], _timeout_ms: u64) -> Result<Vec<u8>, CommandError> {
         let joined = args.join(" ");
         self.calls.lock().unwrap().push(format!("{program} {joined}"));
+        if self.failed.lock().unwrap().as_deref().is_some_and(|m| joined.contains(m)) {
+            return Err(CommandError::Failed);
+        }
         if self.missing.lock().unwrap().as_deref().is_some_and(|m| joined.contains(m)) {
             return Err(CommandError::Unavailable);
         }

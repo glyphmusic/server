@@ -96,7 +96,7 @@ fn cache_key(want: &Track, prio: &[ProviderId]) -> String {
         ),
     };
     let p: Vec<&str> = prio.iter().map(|p| p.badge()).collect();
-    format!("resolve:v2:{ident}:{}", p.join(""))
+    format!("resolve:v3:{ident}:{}", p.join(""))
 }
 
 async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Track, PlaybackSource, f32)> {
@@ -127,7 +127,10 @@ async fn try_provider(svc: &Services, p: ProviderId, want: &Track) -> Option<(Tr
     }
     queries.push(base);
     for query in queries {
-        let cands = search_provider(svc, p, query.trim()).await.ok()?;
+        let cands = match search_provider(svc, p, query.trim()).await {
+            Ok(cands) => cands,
+            Err(_) => continue,
+        };
         let Some((cand, s)) = best(want, &cands) else { continue; };
         let pb = match &cand.playback {
             Some(pb) => pb.clone(),
@@ -191,34 +194,10 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let want = &req.track;
     let prio = effective_priority(&req.priority);
     let key = cache_key(want, &prio);
+    // Only full sources are final mappings. A preview or an old miss must
+    // retry the higher-priority providers, including on the companion.
     if let Some(hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
-        if matches!(hit.source, Some(PlaybackSource::Preview { .. })) {
-            // A preview is a temporary fallback, never a successful full-source
-            // mapping. Retry full providers before refreshing its signed URL.
-            let remote = svc.cmds.resolve(&req).await;
-            if let Some(remote) = remote.as_ref().filter(|r| r.source.is_some()) {
-                cache::put_json(&*svc.cache, &key, remote, ttl(remote)).await;
-                return remote.clone();
-            }
-            // The companion already searched every provider without luck.
-            for p in prio.iter().filter(|_| remote.is_none()) {
-                if let Some((m, pb, c)) = try_provider(svc, *p, want).await {
-                    let upgraded = ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None };
-                    cache::put_json(&*svc.cache, &key, &upgraded, 30 * DAY).await;
-                    return upgraded;
-                }
-            }
-            // Even old persistent cache entries may contain expired signatures.
-            if let Some(matched) = hit.matched.as_ref() {
-                if let Some(Ok(c)) = with_timeout(
-                    &*svc.rt, svc.config.provider_timeout_ms, deezer::by_id(svc, &matched.id),
-                ).await {
-                    if let Some(source) = c.playback {
-                        return ResolveResponse { source: Some(source), ..hit };
-                    }
-                }
-            }
-        } else {
+        if hit.source.as_ref().is_some_and(|source| !matches!(source, PlaybackSource::Preview { .. })) {
             return hit;
         }
     }
@@ -292,6 +271,30 @@ mod tests {
         assert_eq!(h.http.call_count("http"), 0);
         block_on(resolve(&svc, req()));
         assert_eq!(*companion.0.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn cached_deezer_preview_is_upgraded_by_the_companion() {
+        let h = harness(all_secrets());
+        let companion = std::sync::Arc::new(Companion(Default::default()));
+        let svc = Services { http: h.svc.http.clone(), cache: h.svc.cache.clone(), limiter: h.svc.limiter.clone(), rt: h.svc.rt.clone(), cmds: companion.clone(), config: h.svc.config.clone() };
+        let preview = ResolveResponse { matched: Some(want()), source: Some(PlaybackSource::Preview {
+            provider: Deezer, url: "https://cdn/expired.mp3".into(),
+        }), confidence: 1.0, youtube_hint: None };
+        block_on(cache::put_json(&*svc.cache, &cache_key(&want(), &[YouTube]), &preview, 30 * DAY));
+        let result = block_on(resolve(&svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+        assert_eq!(*companion.0.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn cached_miss_does_not_hide_recovered_youtube() {
+        let h = setup();
+        let miss = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
+        block_on(cache::put_json(&*h.svc.cache, &cache_key(&want(), &[YouTube]), &miss, HOUR));
+        h.cmds.on("ytsearch", r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
+        let result = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
     }
 
     #[test]
@@ -436,6 +439,17 @@ mod tests {
         track.isrc = None;
         let result = block_on(resolve(&h.svc, ResolveRequest { track, priority: vec![YouTube] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+    }
+
+    #[test]
+    fn youtube_retries_text_after_isrc_search_fails() {
+        let h = setup();
+        *h.cmds.failed.lock().unwrap() = Some("ytsearch10:GBDUW1300001".into());
+        h.cmds.on("ytsearch10:Daft Punk Get Lucky audio",
+            r#"{"id":"yt1","title":"Get Lucky","channel":"Daft Punk - Topic","duration":369}"#);
+        let result = block_on(resolve(&h.svc, ResolveRequest { track: want(), priority: vec![YouTube] }));
+        assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
+        assert_eq!(h.cmds.call_count("ytsearch10:Daft Punk Get Lucky audio"), 1);
     }
 
     #[test]

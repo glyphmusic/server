@@ -141,13 +141,7 @@ pub async fn handle(
                 let Some(quality)=media::AudioVariant::parse(raw) else { return Response::error("invalid audio quality",400); };
                 if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
                     match super::variants::cached(&db,bucket,id,quality,range.as_deref(),req.method()==worker::Method::Head,svc.config.audio_cache_days).await {
-                        Ok(Some(hit)) => {
-                            let env=env.clone();let id=id.to_string();
-                            let days=svc.config.audio_cache_days;
-                            let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
-                            ctx.wait_until(async move { if super::variants::warm(env,id,days,cap).await.is_err(){worker::console_error!("audio quality preparation deferred");} });
-                            return Ok(hit);
-                        },
+                        Ok(Some(hit)) => return Ok(hit),
                         Ok(None) => {},
                         Err(_) => worker::console_error!("audio chunk cache lookup failed; using companion"),
                     }
@@ -313,18 +307,7 @@ pub async fn handle(
         }
         headers.set("accept-ranges", "bytes")?;
         headers.set("cache-control", "no-store")?;
-        if let Some((id, _)) = &variant {
-            let (env, id) = (env.clone(), id.clone());
-            let days = svc.config.audio_cache_days;
-            let cap = u64::from(svc.config.audio_cache_max_gb) * 1_000_000_000;
-            ctx.wait_until(async move {
-                if super::variants::warm(env, id, days, cap).await.is_err() {
-                    worker::console_error!("background audio preparation deferred");
-                }
-            });
-        }
-        let mut partial = upstream;
-        return Ok(Response::from_stream(partial.stream()?)?.with_status(206).with_headers(headers));
+        return Ok(upstream.with_status(206).with_headers(headers));
     }
     if upstream.status_code() != 200 {
         let status = match upstream.status_code() {
@@ -411,15 +394,11 @@ pub async fn handle(
                 let mut copy=full.cloned()?;
                 let days=svc.config.audio_cache_days;
                 let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
-                let warm_env=env.clone();
                 ctx.wait_until(async move {
                     if let Ok(bytes)=copy.bytes().await {
                         if Some(bytes.len() as u64)!=length{return;}
-                        if super::variants::store(&db,&bucket,&id,quality,bytes,days,cap).await.is_err(){
+                        if super::variants::store(&db,&bucket,&id,quality,bytes,days,cap,None).await.is_err(){
                             worker::console_error!("audio variant caching failed; bytes remain reserved");
-                        }
-                        if super::variants::warm(warm_env,id,days,cap).await.is_err(){
-                            worker::console_error!("audio quality preparation deferred");
                         }
                     }
                 });

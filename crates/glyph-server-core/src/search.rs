@@ -52,7 +52,9 @@ pub async fn search_provider_page(svc: &Services, id: ProviderId, q: &str, page:
     }
     let ckey = if page == 0 { format!("search:{}:{}", id.badge(), query_key(q)) } else { format!("search:{}:{}:p{page}", id.badge(), query_key(q)) };
     if let Some(hit) = cache::get_json::<Vec<Candidate>>(&*svc.cache, &ckey).await {
-        return Ok(hit);
+        // An empty YouTube result may be a temporary extractor failure. It
+        // must not suppress another lookup when retrying a Deezer preview.
+        if id != ProviderId::YouTube || !hit.is_empty() { return Ok(hit); }
     }
     let timeout = if id == ProviderId::YouTube { svc.config.provider_timeout_ms.max(22_000) } else { svc.config.provider_timeout_ms };
     let res = match with_timeout(&*svc.rt, timeout, providers::search(svc, id, q, page)).await {
@@ -60,7 +62,8 @@ pub async fn search_provider_page(svc: &Services, id: ProviderId, q: &str, page:
         None => Err(ProviderError::Timeout),
     };
     match &res {
-        Ok(v) => cache::put_json(&*svc.cache, &ckey, v, providers::search_ttl(id)).await,
+        Ok(v) if id != ProviderId::YouTube || !v.is_empty() => cache::put_json(&*svc.cache, &ckey, v, providers::search_ttl(id)).await,
+        Ok(_) => {},
         // One slow YouTube request must not disable every song for ten minutes.
         Err(ProviderError::Timeout | ProviderError::Network) if id == ProviderId::YouTube => {},
         Err(_) => mark_skipped(svc, id).await,
@@ -119,6 +122,18 @@ mod tests {
     use crate::testutil::*;
     use futures::executor::block_on;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn empty_youtube_search_is_retried_after_extractor_recovers() {
+        let h = harness_with_ytdlp(all_secrets());
+        let key = format!("search:YT:{}", query_key("Song"));
+        block_on(cache::put_json(&*h.svc.cache, &key, &Vec::<Candidate>::new(), 900));
+        assert!(block_on(search_provider(&h.svc, ProviderId::YouTube, "Song")).unwrap().is_empty());
+        h.cmds.on("ytsearch10:", r#"{"id":"yt1","title":"Song","channel":"Artist - Topic","duration":200}"#);
+        let hits = block_on(search_provider(&h.svc, ProviderId::YouTube, "Song")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(h.cmds.call_count("ytsearch10:Song"), 2);
+    }
 
     fn setup() -> Harness {
         let mut s = all_secrets();

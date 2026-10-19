@@ -154,6 +154,24 @@ pub trait RateLimiter: MaybeSendSync {
     async fn blocked(&self, key: &str) -> Option<u64>;
     /// Record a rejected request; repeated violations trigger a temporary ban.
     async fn penalize(&self, key: &str);
+    /// Check `(quota_key, principal, limit)` rules in order for `window_s`.
+    /// Returns `Err((true, retry_after_s))` if `principal` is blocked, or
+    /// `Err((false, retry_after_s))` if rate-limited.
+    async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64)> {
+        for (quota_key, principal, limit) in rules {
+            if let Some(retry) = self.blocked(principal).await {
+                return Err((true, retry));
+            }
+            if let RateDecision::Limited { retry_after_s } = self.check(quota_key, *limit, window_s).await {
+                self.penalize(principal).await;
+                if let Some(retry) = self.blocked(principal).await {
+                    return Err((true, retry));
+                }
+                return Err((false, retry_after_s));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

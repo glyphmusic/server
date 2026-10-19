@@ -96,15 +96,56 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+std::thread_local! {
+    static FAST_CACHE: std::cell::RefCell<std::collections::HashMap<String, (u64, Vec<u8>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 #[async_trait(?Send)]
 impl Cache for CacheApi {
     async fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let now = self.rt.now_ms();
+        if let Some(v) = FAST_CACHE.with(|c| {
+            let mut m = c.borrow_mut();
+            match m.get(key) {
+                Some((exp, v)) if *exp > now => Some(v.clone()),
+                Some(_) => { m.remove(key); None }
+                None => None,
+            }
+        }) {
+            return Some(v);
+        }
+        // Ephemeral circuit-breakers and 15m provider search caches stay in isolate
+        // memory to avoid 12+ Cache API HTTP subrequests during a parallel /v1/search.
+        if key.starts_with("skip:") || key.starts_with("search:") {
+            return None;
+        }
         let cache = worker::Cache::default();
         let mut resp = cache.get(Self::url(key), false).await.ok()??;
-        resp.bytes().await.ok()
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() <= 65_536 {
+            FAST_CACHE.with(|c| {
+                let mut m = c.borrow_mut();
+                if m.len() >= 128 { m.retain(|_, (exp, _)| *exp > now); }
+                if m.len() < 128 { m.insert(key.to_string(), (now + 300_000, bytes.clone())); }
+            });
+        }
+        Some(bytes)
     }
     async fn put(&self, key: &str, value: Vec<u8>, ttl_s: u64) {
-        let _ = &self.rt;
+        let now = self.rt.now_ms();
+        let in_mem_only = key.starts_with("skip:") || key.starts_with("search:");
+        if value.len() <= 65_536 {
+            let mem_ttl_ms = if in_mem_only { ttl_s * 1000 } else { ttl_s.min(300) * 1000 };
+            FAST_CACHE.with(|c| {
+                let mut m = c.borrow_mut();
+                if m.len() >= 128 { m.retain(|_, (exp, _)| *exp > now); }
+                if m.len() >= 128 { m.clear(); }
+                m.insert(key.to_string(), (now + mem_ttl_ms, value.clone()));
+            });
+        }
+        if in_mem_only {
+            return;
+        }
         let cache = worker::Cache::default();
         let Ok(resp) = worker::Response::from_bytes(value) else { return };
         let headers = Headers::new();
@@ -206,7 +247,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
-            store: Arc::new(accounts::D1Store { db }),
+            store: Arc::new(accounts::D1Store::new(db)),
             blobs: env.bucket("GLYPH_COVERS").ok().map(|bucket| Arc::new(accounts::R2Blobs { bucket, db: env.d1("GLYPH_DB").ok() }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
             entropy: Arc::new(accounts::WebCrypto),
             origin: origin.trim_end_matches('/').to_string(),
@@ -277,11 +318,20 @@ const SETTINGS_CACHE_KEY: &str = "admin:limits";
 /// Each Cloudflare location re-reads D1 at most this often.
 const SETTINGS_CACHE_S: u64 = 30;
 
+std::thread_local! {
+    static LOCAL_LIMITS: std::cell::RefCell<Option<(u64, Option<Limits>)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Saved limits, or `None` when nothing was saved (wrangler.toml applies).
 async fn saved_limits(env: &Env) -> Option<Limits> {
+    let now = worker::js_sys::Date::now() as u64;
+    if let Some((_, cached)) = LOCAL_LIMITS.with(|c| c.borrow().clone()).filter(|(exp, _)| *exp > now) {
+        return cached;
+    }
     let rt: Arc<dyn Runtime> = Arc::new(WorkerRuntime);
     let cache = CacheApi { rt };
     if let Some(hit) = glyph_server_core::cache::get_json::<Option<Limits>>(&cache, SETTINGS_CACHE_KEY).await {
+        LOCAL_LIMITS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, hit.clone())));
         return hit;
     }
     let db = env.d1("GLYPH_DB").ok()?;
@@ -293,6 +343,7 @@ async fn saved_limits(env: &Env) -> Option<Limits> {
         // Table missing (migration not applied yet) or D1 down: defaults, uncached.
         Err(_) => return None,
     };
+    LOCAL_LIMITS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, limits.clone())));
     glyph_server_core::cache::put_json(&cache, SETTINGS_CACHE_KEY, &limits, SETTINGS_CACHE_S).await;
     limits
 }
@@ -319,6 +370,8 @@ impl AdminHost for WorkerHost {
                 "could not save limits (run: npx wrangler d1 migrations apply glyph --remote)".into(),
             ))?;
         // This location sees the change at once, the others within SETTINGS_CACHE_S.
+        let now = worker::js_sys::Date::now() as u64;
+        LOCAL_LIMITS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, Some(l.clone()))));
         glyph_server_core::cache::put_json(self.cache.as_ref(), SETTINGS_CACHE_KEY, &Some(l.clone()), SETTINGS_CACHE_S).await;
         if let Some(bucket) = &self.bucket {
             if !audio_cache::inventory(db, bucket).await.map_err(|_| HostError::Failed("limits saved; storage inventory pending".into()))? {

@@ -32,9 +32,20 @@ fn opt(v: &Option<String>) -> JsValue {
 
 pub struct D1Store {
     pub db: D1Database,
+    cached_device: std::cell::RefCell<Option<(String, Device)>>,
+    cached_user: std::cell::RefCell<Option<User>>,
 }
 
 impl D1Store {
+    pub fn new(db: D1Database) -> Self {
+        Self { db, cached_device: std::cell::RefCell::new(None), cached_user: std::cell::RefCell::new(None) }
+    }
+
+    fn clear_cache(&self) {
+        *self.cached_device.borrow_mut() = None;
+        *self.cached_user.borrow_mut() = None;
+    }
+
     fn stmt(&self, sql: &str, args: &[JsValue]) -> StoreResult<D1PreparedStatement> {
         self.db.prepare(sql).bind(args).map_err(err)
     }
@@ -48,6 +59,7 @@ impl D1Store {
     }
 
     async fn run(&self, sql: &str, args: &[JsValue]) -> StoreResult<usize> {
+        self.clear_cache();
         let stmt = self.stmt(sql, args)?;
         let r = if sql.trim_start().starts_with("DELETE ") {
             stmt.run().await
@@ -58,6 +70,7 @@ impl D1Store {
     }
 
     async fn batch(&self, stmts: Vec<D1PreparedStatement>) -> StoreResult<Vec<worker::D1Result>> {
+        self.clear_cache();
         super::storage::guarded(&self.db, 32*1024*1024, self.db.batch(stmts)).await.map_err(err)
     }
 }
@@ -188,7 +201,14 @@ const ITEM_COLS: &str = "kind, key, value, updated_at, device_id, deleted, rev";
 #[async_trait(?Send)]
 impl AccountStore for D1Store {
     async fn user(&self, id: &str) -> StoreResult<Option<User>> {
-        Ok(self.first::<UserRow>(&format!("SELECT {USER_COLS} FROM users WHERE id = ?1"), &[s(id)]).await?.map(Into::into))
+        if let Some(u) = self.cached_user.borrow().as_ref().filter(|u| u.id == id) {
+            return Ok(Some(u.clone()));
+        }
+        let u: Option<User> = self.first::<UserRow>(&format!("SELECT {USER_COLS} FROM users WHERE id = ?1"), &[s(id)]).await?.map(Into::into);
+        if let Some(u) = &u {
+            *self.cached_user.borrow_mut() = Some(u.clone());
+        }
+        Ok(u)
     }
 
     async fn user_by_handle(&self, handle: &str) -> StoreResult<Option<User>> {
@@ -364,7 +384,23 @@ impl AccountStore for D1Store {
     }
 
     async fn device_by_access(&self, hash: &str) -> StoreResult<Option<Device>> {
-        Ok(self.first::<DeviceRow>(&format!("SELECT {DEVICE_COLS} FROM devices WHERE access_hash = ?1"), &[s(hash)]).await?.map(Into::into))
+        if let Some((_, d)) = self.cached_device.borrow().as_ref().filter(|(h, _)| h == hash) {
+            return Ok(Some(d.clone()));
+        }
+        let h = s(hash);
+        let r = self.db.batch(vec![
+            self.stmt(&format!("SELECT {DEVICE_COLS} FROM devices WHERE access_hash = ?1"), &[h.clone()])?,
+            self.stmt(&format!("SELECT {USER_COLS} FROM users WHERE id = (SELECT user_id FROM devices WHERE access_hash = ?1)"), &[h])?,
+        ]).await.map_err(err)?;
+        let d: Option<Device> = r.first().and_then(|x| x.results::<DeviceRow>().ok()).and_then(|mut v| v.pop()).map(Into::into);
+        let u: Option<User> = r.get(1).and_then(|x| x.results::<UserRow>().ok()).and_then(|mut v| v.pop()).map(Into::into);
+        if let Some(d) = &d {
+            *self.cached_device.borrow_mut() = Some((hash.to_string(), d.clone()));
+        }
+        if let Some(u) = u {
+            *self.cached_user.borrow_mut() = Some(u);
+        }
+        Ok(d)
     }
 
     async fn device_by_refresh(&self, hash: &str) -> StoreResult<Option<Device>> {
@@ -419,7 +455,8 @@ impl AccountStore for D1Store {
     }
 
     async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()> {
-        self.run("UPDATE devices SET last_seen = ?1, approximate_location = COALESCE(?3, approximate_location) WHERE id = ?2", &[n(last_seen), s(id), opt(&approximate_location.map(str::to_string))]).await.map(|_| ())
+        self.stmt("UPDATE devices SET last_seen = ?1, approximate_location = COALESCE(?3, approximate_location) WHERE id = ?2", &[n(last_seen), s(id), opt(&approximate_location.map(str::to_string))])?
+            .run().await.map_err(err).map(|_| ())
     }
 
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool> {
@@ -501,7 +538,7 @@ impl AccountStore for D1Store {
 
     async fn purge_tombstones(&self, user_id: &str, before: u64) -> StoreResult<()> {
         let (uid, b) = (s(user_id), n(before));
-        self.batch(vec![
+        self.db.batch(vec![
             self.stmt(
                 "UPDATE users SET purged_rev = max(purged_rev, coalesce(
                    (SELECT max(rev) FROM sync_items WHERE user_id = ?1 AND deleted = 1 AND updated_at < ?2), 0))
@@ -511,6 +548,7 @@ impl AccountStore for D1Store {
             self.stmt("DELETE FROM sync_items WHERE user_id = ?1 AND deleted = 1 AND updated_at < ?2", &[uid, b])?,
         ])
         .await
+        .map_err(err)
         .map(|_| ())
     }
 

@@ -47,6 +47,7 @@ pub async fn guarded<T>(db: &D1Database, envelope: u64, work: impl Future<Output
 pub async fn maintain(db: &D1Database) -> worker::Result<()> {
     let now = JsValue::from_f64(worker::Date::now().as_millis() as f64);
     let queries = [
+        "DELETE FROM d1_storage_reservations WHERE token IN (SELECT token FROM d1_storage_reservations WHERE created<=?1-300000 LIMIT 1000)",
         "DELETE FROM audio_variant_jobs WHERE track_id IN (SELECT track_id FROM audio_variant_jobs WHERE expires<=?1 LIMIT 1000)",
         "DELETE FROM abuse_limits WHERE key IN (SELECT key FROM abuse_limits WHERE expires<=?1 LIMIT 1000)",
         "DELETE FROM logins WHERE id IN (SELECT id FROM logins WHERE expires<=?1 LIMIT 1000)",

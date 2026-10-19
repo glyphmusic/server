@@ -20,7 +20,17 @@ pub struct Window { pub part: usize, pub offset: u64, pub length: u64 }
 impl Manifest {
     pub fn build(id: &str, quality: AudioVariant, bytes: &[u8]) -> Option<Self> {
         if !media::valid_video_id(id) || bytes.is_empty() || bytes.len() as u64 > MAX_BYTES { return None; }
-        let digest: String = Sha256::digest(bytes).iter().map(|b|format!("{b:02x}")).collect();
+        let mut hasher = Sha256::new();
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        if bytes.len() <= 65_536 {
+            hasher.update(bytes);
+        } else {
+            let mid = bytes.len() / 2;
+            hasher.update(&bytes[..16_384]);
+            hasher.update(&bytes[mid..mid + 16_384]);
+            hasher.update(&bytes[bytes.len() - 16_384..]);
+        }
+        let digest: String = hasher.finalize().iter().map(|b|format!("{b:02x}")).collect();
         let parts = bytes.chunks(CHUNK_BYTES as usize).enumerate().map(|(i,b)| Part {
             key:format!("audio/youtube/{id}/{}/{digest}/{i:04}",quality.name()),size:b.len() as u64,
         }).collect();

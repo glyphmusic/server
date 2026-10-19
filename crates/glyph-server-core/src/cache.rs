@@ -73,6 +73,11 @@ pub struct MinTtlCache {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Cache for MinTtlCache {
     async fn get(&self, key: &str) -> Option<Vec<u8>> {
+        // Short-lived keys (search<=55m, skip=10m, token<=58m) are never stored
+        // when min_ttl_s >= 3600; skip the L2 roundtrip on L1 misses.
+        if self.min_ttl_s >= HOUR && (key.starts_with("search:") || key.starts_with("skip:") || key.starts_with("token:")) {
+            return None;
+        }
         self.inner.get(key).await
     }
     async fn put(&self, key: &str, value: Vec<u8>, ttl_s: u64) {

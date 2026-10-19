@@ -20,9 +20,9 @@ struct Entry {
     #[serde(default)]
     title: String,
     #[serde(default)]
-    channel: String,
+    channel: Option<String>,
     #[serde(default)]
-    uploader: String,
+    uploader: Option<String>,
     #[serde(default)]
     thumbnail: Option<String>,
     /// Full dump lists every size; flat search usually has none.
@@ -137,7 +137,7 @@ pub async fn video_info(svc: &Services, video_id: &str) -> PResult<Option<(Strin
     args.push(format!("https://www.youtube.com/watch?v={video_id}"));
     let entries = run(svc, &bin, &args, DETAIL_TIMEOUT_MS).await?;
     Ok(entries.into_iter().find(|e| e.id == video_id && !e.title.is_empty() && e.live_status.as_deref() != Some("is_live")).map(|e| {
-        let channel = if e.channel.is_empty() { e.uploader } else { e.channel };
+        let channel = e.channel.filter(|s| !s.is_empty()).or(e.uploader).unwrap_or_default();
         let ms = e.duration.filter(|s| *s > 0.0).map(|s| (s * 1000.0) as u64);
         (e.title, channel, ms)
     }))
@@ -159,11 +159,22 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         }
     }
 
-    // Durations are missing in flat mode; one call for all ids at once.
+    // Durations are missing in flat mode only on older yt-dlp or non-video entries;
+    // never fetch full 200 KB video dumps inside the CPU-capped Worker runtime.
     let mut detail: Vec<Entry> = Vec::new();
-    let missing: Vec<_> = flat.iter().filter(|e| e.duration.filter(|d| *d > 0.0).is_none())
-        .map(|e| &e.id).filter(|id| ids.contains(id)).collect();
-    if !missing.is_empty() {
+    let missing: Vec<_> = flat
+        .iter()
+        .filter(|e| {
+            !e.title.is_empty()
+                && (e.channel.as_ref().is_some_and(|s| !s.is_empty()) || e.uploader.as_ref().is_some_and(|s| !s.is_empty()))
+                && !e.live_status.as_deref().is_some_and(|s| s != "not_live")
+                && e.availability.as_deref() != Some("private")
+                && e.duration.filter(|d| *d > 0.0).is_none()
+        })
+        .map(|e| &e.id)
+        .filter(|id| ids.contains(id))
+        .collect();
+    if !cfg!(target_arch = "wasm32") && !missing.is_empty() {
         let mut args = base_args();
         args.push("--dump-json".into());
         args.push("--skip-download".into());
@@ -184,27 +195,25 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         }
         // Prefer the full metadata; fall back to the flat entry.
         let full = detail.iter().find(|d| d.id == e.id);
-        fn non_empty(s: &str) -> Option<&str> {
-    (!s.is_empty()).then_some(s)
-}
         let channel = full
-            .and_then(|d| non_empty(&d.channel))
-            .or_else(|| non_empty(&e.channel))
-            .or_else(|| non_empty(&e.uploader))
+            .and_then(|d| d.channel.as_deref().filter(|s| !s.is_empty()))
+            .or_else(|| e.channel.as_deref().filter(|s| !s.is_empty()))
+            .or_else(|| full.and_then(|d| d.uploader.as_deref().filter(|s| !s.is_empty())))
+            .or_else(|| e.uploader.as_deref().filter(|s| !s.is_empty()))
             .unwrap_or_default();
         let is_topic = channel.ends_with(" - Topic");
-        let artist = channel.trim_end_matches(" - Topic").trim().to_string();
-        if artist.is_empty() {
-            continue;
-        }
+        let mut artist = channel.trim_end_matches(" - Topic").trim_end_matches("VEVO").trim().to_string();
         let raw_title = full.map(|d| d.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(&e.title);
         let mut title = raw_title.to_string();
-        // "Artist - Title" -> "Title" when the prefix is the channel/artist.
+        // Match the desktop parser: an upload channel need not be the artist.
         if let Some((a, rest)) = raw_title.split_once(" - ") {
-            if crate::merge::artists_match(a, &artist) {
-                title = rest.to_string();
+            if !a.trim().is_empty() && !rest.trim().is_empty()
+                && (!is_topic || crate::merge::artists_match(a, &artist)) {
+                artist = a.trim().to_string();
+                title = rest.trim().to_string();
             }
         }
+        if artist.is_empty() { continue; }
         let low = raw_title.to_lowercase();
         let mut bonus = 0.0;
         if is_topic {
@@ -231,6 +240,22 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn search_reads_artist_from_title_and_accepts_nullable_channels() {
+        let h = harness_with_ytdlp(all_secrets());
+        h.cmds.on("ytsearch10:", concat!(
+            r#"{"id":"album","title":"Daft Punk - Get Lucky (Album Version / Audio)","channel":"TheStruckFernVEVO","duration":372}"#,
+            "\n",
+            r#"{"id":"nullable","title":"Daft Punk - Get Lucky","channel":null,"uploader":null,"duration":369}"#,
+        ));
+        let hits = block_on(search(&h.svc, "Daft Punk Get Lucky audio")).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].track.artist, "Daft Punk");
+        assert_eq!(hits[1].track.artist, "Daft Punk");
+        let want = track("sp1", ProviderId::Spotify, "Get Lucky", "Daft Punk", 369);
+        assert!(crate::resolver::score(&want, &hits[0]) >= crate::resolver::ACCEPT_SCORE);
+    }
 
     #[test]
     fn durations() {

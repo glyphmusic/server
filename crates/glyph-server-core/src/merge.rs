@@ -99,7 +99,18 @@ pub fn normalize_artist(artist: &str) -> String {
 }
 
 fn contains_words(hay: &str, needle: &str) -> bool {
-    !needle.is_empty() && format!(" {hay} ").contains(&format!(" {needle} "))
+    if needle.is_empty() || needle.len() > hay.len() {
+        return false;
+    }
+    let hb = hay.as_bytes();
+    for (i, _) in hay.match_indices(needle) {
+        let left_ok = i == 0 || hb[i - 1] == b' ';
+        let right_ok = i + needle.len() == hb.len() || hb[i + needle.len()] == b' ';
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn artists_match(a: &str, b: &str) -> bool {
@@ -196,6 +207,7 @@ pub fn dedupe(mut tracks: Vec<Track>) -> Vec<Track> {
 #[derive(Default)]
 pub struct Merger {
     pub seen: Vec<Track>,
+    norm: Vec<(String, String)>,
 }
 
 impl Merger {
@@ -203,7 +215,20 @@ impl Merger {
     pub fn absorb(&mut self, batch: Vec<Track>) -> Vec<Track> {
         let mut touched: Vec<usize> = Vec::new();
         for t in batch {
-            if let Some(i) = self.seen.iter().position(|s| is_same_track(s, &t)) {
+            let nt = normalize_title(&t.title);
+            let na = normalize_artist(&t.artist);
+            let matched = self.seen.iter().enumerate().position(|(idx, s)| {
+                if isrc_eq(&s.isrc, &t.isrc) {
+                    return true;
+                }
+                let (st, sa) = &self.norm[idx];
+                !nt.is_empty()
+                    && *st == nt
+                    && !sa.is_empty()
+                    && (sa == &na || contains_words(sa, &na) || contains_words(&na, sa))
+                    && durations_match(s.duration_ms, t.duration_ms)
+            });
+            if let Some(i) = matched {
                 let before = self.seen[i].clone();
                 merge_into(&mut self.seen[i], &t);
                 if self.seen[i] != before && !touched.contains(&i) {
@@ -211,6 +236,7 @@ impl Merger {
                 }
             } else {
                 self.seen.push(t);
+                self.norm.push((nt, na));
                 touched.push(self.seen.len() - 1);
             }
         }

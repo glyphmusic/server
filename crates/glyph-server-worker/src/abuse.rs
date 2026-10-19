@@ -11,6 +11,8 @@ pub struct D1Limiter {
 }
 #[derive(serde::Deserialize)]
 struct Row { count: u32, expires: u64 }
+#[derive(serde::Deserialize)]
+struct QuotaRow { key: String, count: u32, expires: u64 }
 fn num(n: u64) -> JsValue { JsValue::from_f64(n as f64) }
 fn key(k: &str) -> JsValue { JsValue::from_str(&glyph_server_core::access::token_hash(k)) }
 
@@ -30,10 +32,7 @@ impl RateLimiter for D1Limiter {
              count=CASE WHEN expires<=?3 THEN 1 ELSE MIN(count+1,?4) END, \
              expires=CASE WHEN expires<=?3 THEN ?2 ELSE expires END RETURNING count,expires"
         ).bind(&[key(k), num(until), num(now), num(u64::from(limit)+1)]) else { return denied; };
-        let Ok(cleanup) = db.prepare("DELETE FROM abuse_limits WHERE key IN (SELECT key FROM abuse_limits WHERE expires<=?1 LIMIT 64)")
-            .bind(&[num(now)]) else { return denied; };
-        let Ok(results) = super::storage::guarded(db, 64*1024, db.batch(vec![cleanup, stmt])).await else { return denied; };
-        let Some(row) = results.last().and_then(|r| r.results::<Row>().ok()).and_then(|mut r| r.pop()) else { return denied; };
+        let Ok(Some(row)) = stmt.first::<Row>(None).await else { return denied; };
         if row.count > limit {
             RateDecision::Limited { retry_after_s: row.expires.saturating_sub(now).div_ceil(1000).max(1) }
         } else { RateDecision::Allowed }
@@ -60,8 +59,72 @@ impl RateLimiter for D1Limiter {
             let now = self.rt.now_ms();
             if let Ok(stmt) = db.prepare("INSERT INTO abuse_limits(key,count,expires) VALUES (?1,0,?2) ON CONFLICT(key) DO UPDATE SET expires=CASE WHEN expires<=?3 THEN ?2 ELSE expires END")
                 .bind(&[key(&format!("ban:{k}")), num(now.saturating_add(900_000)), num(now)]) {
-                let _ = super::storage::guarded(db, 64*1024, stmt.run()).await;
+                let _ = stmt.run().await;
             }
         }
+    }
+
+    async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64)> {
+        if rules.is_empty() { return Ok(()); }
+        let Some(db) = &self.db else { return Err((true, 60)); };
+        let now = self.rt.now_ms();
+        let until = now.saturating_add(window_s.max(1).saturating_mul(1000));
+        let mut principals: Vec<&str> = Vec::with_capacity(rules.len());
+        for (_, p, _) in rules {
+            if !principals.contains(&p.as_str()) {
+                principals.push(p.as_str());
+            }
+        }
+        let ban_placeholders: Vec<String> = (1..=principals.len()).map(|i| format!("?{i}")).collect();
+        let ban_sql = format!(
+            "SELECT count,expires FROM abuse_limits WHERE key IN ({}) AND expires>?{} ORDER BY expires DESC LIMIT 1",
+            ban_placeholders.join(","),
+            principals.len() + 1
+        );
+        let mut ban_args: Vec<JsValue> = principals.iter().map(|p| key(&format!("ban:{p}"))).collect();
+        ban_args.push(num(now));
+        let Ok(ban_stmt) = db.prepare(&ban_sql).bind(&ban_args) else { return Err((true, 60)); };
+
+        let mut values_sql = Vec::with_capacity(rules.len());
+        let mut quota_args = Vec::with_capacity(rules.len() + 2);
+        quota_args.push(num(until));
+        quota_args.push(num(now));
+        for (i, (quota_key, _, _)) in rules.iter().enumerate() {
+            values_sql.push(format!("(?{},1,?1)", i + 3));
+            quota_args.push(key(quota_key));
+        }
+        let upsert_sql = format!(
+            "INSERT INTO abuse_limits(key,count,expires) VALUES {} \
+             ON CONFLICT(key) DO UPDATE SET \
+             count=CASE WHEN expires<=?2 THEN 1 ELSE MIN(count+1,2147483647) END, \
+             expires=CASE WHEN expires<=?2 THEN ?1 ELSE expires END RETURNING key,count,expires",
+            values_sql.join(",")
+        );
+        let Ok(upsert_stmt) = db.prepare(&upsert_sql).bind(&quota_args) else { return Err((false, 60)); };
+
+        let Ok(results) = db.batch(vec![ban_stmt, upsert_stmt]).await else { return Err((true, 60)); };
+        if results.len() != 2 { return Err((true, 60)); }
+        let Ok(mut bans) = results[0].results::<Row>() else { return Err((true, 60)); };
+        if let Some(row) = bans.pop() {
+            let left = row.expires.saturating_sub(now);
+            if left > 0 {
+                return Err((true, left.div_ceil(1000)));
+            }
+        }
+        let Ok(rows) = results[1].results::<QuotaRow>() else { return Err((false, 60)); };
+        if rows.len() != rules.len() { return Err((false, 60)); }
+        // SQLite RETURNING order is unspecified; associate quotas by their key.
+        for (quota_key, principal, limit) in rules {
+            let hash = glyph_server_core::access::token_hash(quota_key);
+            let Some(row) = rows.iter().find(|row| row.key == hash) else { return Err((false, 60)); };
+            if row.count > *limit {
+                self.penalize(principal).await;
+                if let Some(retry) = self.blocked(principal).await {
+                    return Err((true, retry));
+                }
+                return Err((false, row.expires.saturating_sub(now).div_ceil(1000).max(1)));
+            }
+        }
+        Ok(())
     }
 }

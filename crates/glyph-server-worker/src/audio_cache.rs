@@ -36,12 +36,12 @@ struct Inventory { cursor: Option<String>, ready: u32, scan_id: u64 }
 /// One persisted inventory page. Hourly scans recount actual objects, not just
 /// the ledger. New writes pause while a scan is incomplete; reads continue.
 pub async fn inventory(db: &D1Database, bucket: &Bucket) -> worker::Result<bool> {
-    super::storage::guarded(db, 4*1024*1024, inventory_inner(db, bucket)).await
-}
-async fn inventory_inner(db: &D1Database, bucket: &Bucket) -> worker::Result<bool> {
     let state = db.prepare("SELECT cursor,ready,scan_id FROM audio_cache_inventory WHERE id=1").first::<Inventory>(None).await?
         .ok_or_else(|| worker::Error::RustError("storage inventory missing".into()))?;
     if state.ready == 1 { return Ok(true); }
+    super::storage::guarded(db, 4*1024*1024, inventory_inner(db, bucket, state)).await
+}
+async fn inventory_inner(db: &D1Database, bucket: &Bucket, state: Inventory) -> worker::Result<bool> {
     let mut list = bucket.list().limit(1000).include(vec![worker::Include::CustomMetadata]);
     if let Some(cursor) = &state.cursor { list = list.cursor(cursor.clone()); }
     let page = list.execute().await?;
@@ -64,7 +64,7 @@ async fn inventory_inner(db: &D1Database, bucket: &Bucket) -> worker::Result<boo
 
 pub async fn touch(db: &D1Database, key: &str) {
     if let Ok(stmt) = db.prepare("UPDATE audio_cache SET hits=MIN(hits+1,2147483647),last_access=?1 WHERE key=?2 AND state='ready'")
-        .bind(&[n(now()),s(key)]) { let _ = super::storage::guarded(db, 64*1024, stmt.run()).await; }
+        .bind(&[n(now()),s(key)]) { let _ = stmt.run().await; }
 }
 
 /// Bounded eviction; maintenance resumes until no victim remains. Protected
