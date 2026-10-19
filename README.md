@@ -19,6 +19,21 @@ Two ways to run the same code (`glyph-server-core`):
 the Cloudflare setup, your own domain, accounts and sync, the admin CLI, the
 device limit and every server-side limit.
 
+## Install the Glyph CLI
+
+```sh
+npm install --global glyph-server
+glyph help
+glyph version all
+glyph check companion
+```
+
+Node.js 22+; no Rust toolchain is required. `glyph-server` remains an alias.
+Use `glyph setup cloudflare` to create **your own** deployment with the bundled
+Worker, migrations and your Cloudflare account. R2 storage is optional. To host a
+native server instead, use `glyph setup` and `glyph serve`. See
+[npm/README.md](npm/README.md) for all version, check, Docker and update commands.
+
 ## API (v1)
 
 | Endpoint | Description |
@@ -196,7 +211,7 @@ Optional disk cache: `GLYPH_CACHE_DIR` / `cache_dir`. Behind a reverse proxy set
 from remote peers are ignored. The local proxy must overwrite incoming client-IP
 and HTTPS headers; for `X-Forwarded-For` it must supply the actual client IP first.
 
-Updates: `glyph-server --check-update` and `glyph-server self-update` use the GitHub releases
+Updates: `glyph-server --check-update` and `glyph update` use the GitHub releases
 of `GLYPH_SERVER_REPO` (default `glyphmusic/server`), expect the asset
 `glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus `SHA256SUMS.txt` (or a legacy `.sha256`), verify the
 checksum, and replace the running binary. No telemetry.
@@ -206,10 +221,48 @@ Docker: `docker build -t glyph-server .` then
 
 ## Development
 
+### Optional account-only API
+
+API access is public by default. On a server with accounts enabled (currently
+the Cloudflare Worker with `GLYPH_DB` and `PUBLIC_ORIGIN`), enable the signed-in
+account requirement through the authenticated admin CLI:
+
+```
+glyph remote limits --require-account true
+glyph remote limits --require-account false
+```
+
+The setting is persisted with the other server limits. Worker locations pick up
+remote changes within 30 seconds. Alternatively set Worker variable
+`REQUIRE_ACCOUNT="true"`; explicitly saved admin settings take precedence.
+Native configuration accepts `require_account` / `GLYPH_REQUIRE_ACCOUNT`, but
+without an account backend protected requests fail closed with HTTP 503; the
+admin API refuses to enable this mode on such a server.
+
+When enabled, every `/v1/*` API (including audio, downloads and warm caches)
+requires a valid, unexpired account access token in `Authorization: Bearer ...`.
+Guests, forged tokens and revoked sessions receive HTTP 401 `account_required`.
+Account login/registration/refresh, GET health and OPTIONS remain reachable;
+public website/share pages retain their existing behavior. Admin and companion
+endpoints keep their own authentication. The independent shared server access
+token still applies when configured. Health advertises `account_required: true`.
+
+### Tests
+
 ```
 cargo test --workspace
 cargo check -p glyph-server-worker --target wasm32-unknown-unknown
 ```
+
+The real encoder regression test additionally requires `GLYPH_FFMPEG_PATH`
+pointing to an FFmpeg executable:
+
+```
+cargo test -p glyph-server-native real_encoder_streams -- --ignored
+```
+
+It verifies audio delivery before source EOF, decoding with Glyph's Symphonia
+decoder, completed byte ranges, and the fallback for tail-indexed MP4 input.
 
 Worker streaming integration tests (local workerd, mocked providers):
 
@@ -220,8 +273,9 @@ npm ci
 npm test
 ```
 
-`glyph-protocol` is a path dependency on `../glyph` for now; switch it in the workspace
-`Cargo.toml` to `git = "https://github.com/glyphmusic/glyph", tag = "protocol-v1"` for releases.
+The shared `glyph-protocol` snapshot is included in `release-protocol/`: this
+repository builds by itself. Maintainers can refresh the snapshot from an adjacent
+desktop checkout with `node scripts/snapshot-protocol.mjs`.
 
 Provider metadata uses official APIs; YouTube extraction uses the separately
 configured yt-dlp helper. Provider keys and companion tokens stay in secrets/env.
@@ -236,8 +290,8 @@ MIT OR Apache-2.0, see `LICENSE-MIT` and `LICENSE-APACHE`.
 D1 and R2 have independent storage budgets. Configure both with the native CLI:
 
 ```sh
-glyph-server remote limits --server https://api.glyph.my --d1-max-mb 500 --r2-max-gb 10
-glyph-server remote limits --server https://api.glyph.my
+glyph remote limits --server https://api.glyph.my --d1-max-mb 500 --r2-max-gb 10
+glyph remote limits --server https://api.glyph.my
 ```
 
 `--audio-max-gb` remains an alias for `--r2-max-gb`. The JSON field
@@ -304,17 +358,21 @@ For Worker/companion YouTube audio, `?quality=low|standard|high` selects 48 kbps
 96 kbps AAC, or the best source AAC (normally around 128 kbps). High remuxes M4A
 without another lossy encode; other supported containers are converted to AAC.
 FFmpeg is required on the companion (`GLYPH_FFMPEG_PATH` can override its path).
-The companion Dockerfile already includes it. Two encoders maximum, one FFmpeg
-thread each, a 45-second timeout and a 32 MiB media ceiling bound the work.
-MP4 fast-start lets the player decode from its first range instead of fetching
-the end of the file to find the index. The first request may have encoding latency.
+The companion Dockerfile already includes it. Three encoders maximum (at most two
+background jobs), one FFmpeg thread each, a 90-second overall deadline and a
+32 MiB media ceiling bound the work. Requests for the same track and quality
+share one encode, including its already-produced prefix. Low/Standard output is
+fragmented MP4: download, encoding and playback overlap rather than waiting for
+the complete song. MP4 inputs with their index at the end require a bounded
+temporary input file; encoding output still streams. Only successful complete
+representations enter the memory/R2 caches. Cold streams have no Content-Length;
+completed cached representations support exact byte ranges.
 
-The requested variant is generated first and cached as content-addressed 1 MiB
-R2 objects. Background preparation then attempts all three qualities (Low first),
-with shared 90-second job leases and one background encoder maximum. Cold tracks
-may need preparation time; a busy companion, full storage or the Worker's bounded
-background lifetime can defer completion until a later request. Direct requests
-for another quality work independently. Every variant byte counts toward the
+The requested variant is generated and cached as content-addressed 1 MiB R2
+objects; another quality is prepared when requested. Cold tracks may need
+preparation time; a busy companion, full storage or the Worker's bounded
+background lifetime can defer cache persistence until a later request. Direct
+requests for another quality work independently. Every variant byte counts toward the
 same R2 ceiling. A D1 manifest is published
 only after all chunks have uploaded. Each playback range reads only the needed
 part of the relevant chunks from R2. Different qualities never mix MP4 byte
@@ -327,6 +385,14 @@ format. Standalone native servers honor the same quality parameter, using a
 bounded 64 MiB, eight-entry, ten-minute memory cache rather than R2 for encoded
 Low/Standard audio. Native High retains the original source and works without
 FFmpeg.
+
+Resolver misses use a shared 23-second deadline (50 seconds for YouTube-only
+requests), including any companion call. Provider lookups overlap while answers
+are considered in configured priority order. Non-YouTube providers wait at most
+four seconds; normal YouTube fallback waits at most 18 seconds, leaving time for
+the preview fallback. YouTube-only lookups retain a 45-second provider budget.
+Audio proxy connections are pooled across requests. Cache popularity statistics
+are written in the Worker background rather than delaying cached playback.
 
 D1 limits currently accept 64–4000 MB; the Rust Worker's size metadata uses a
 32-bit `usize`, so larger app ceilings would be misleading on wasm32. Provider

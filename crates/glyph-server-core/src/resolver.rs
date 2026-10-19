@@ -209,32 +209,50 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
         }
     }
 
-    if let Some(mut remote) = svc.cmds.resolve(&req).await {
-        // Older companions may ignore the new flag; still enforce it here.
-        if req.youtube_only && !matches!(remote.source.as_ref(), Some(PlaybackSource::Stream { provider: ProviderId::YouTube, .. } | PlaybackSource::Embed { provider: ProviderId::YouTube, .. })) {
-            remote = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
+    // One deadline includes companion, provider lookups and preview fallback.
+    // A companion timeout must not start another full resolver budget.
+    let budget = if req.youtube_only { 50_000 } else { 23_000 };
+    let work = async {
+        if let Some(mut remote) = svc.cmds.resolve(&req).await {
+            if req.youtube_only && !matches!(remote.source.as_ref(), Some(PlaybackSource::Stream { provider: ProviderId::YouTube, .. } | PlaybackSource::Embed { provider: ProviderId::YouTube, .. })) {
+                remote = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
+            }
+            return remote;
         }
-        cache::put_json(&*svc.cache, &key, &remote, ttl(&remote)).await;
-        return remote;
-    }
-    let mut found = None;
-    for p in &prio {
-        if let Some(r) = with_timeout(&*svc.rt, if req.youtube_only { 45_000 } else { 65_000 }, try_provider(svc, *p, want, req.youtube_only)).await.flatten() {
-            found = Some(r);
-            break;
+        // Poll providers together, but consume in priority order. Lower-priority
+        // answers cannot displace a matching preferred provider. Each preferred
+        // provider has a bounded wait; known IDs still bypass text search.
+        use futures::{stream::FuturesOrdered, StreamExt};
+        let mut pending = FuturesOrdered::new();
+        for p in &prio {
+            // Leave room for preview fallback inside the shared deadline.
+            let timeout = if *p == ProviderId::YouTube {
+                if req.youtube_only { 45_000 } else { 18_000 }
+            } else { svc.config.provider_timeout_ms.min(4_000) };
+            pending.push_back(with_timeout(&*svc.rt, timeout, try_provider(svc, *p, want, req.youtube_only)));
         }
-    }
-    if found.is_none() && !req.youtube_only {
-        found = with_timeout(&*svc.rt, svc.config.provider_timeout_ms, try_preview(svc, want)).await.flatten();
-    }
-    let (resp, ttl) = match found {
-        Some((m, pb, c)) => {
-            let ttl = if matches!(pb, PlaybackSource::Preview { .. }) { 5 * cache::MINUTE } else { 30 * DAY };
-            (ResolveResponse { matched: Some(m), source: Some(pb), confidence: c, youtube_hint: None }, ttl)
-        },
-        None => (ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None }, HOUR),
+        let mut found = None;
+        while let Some(answer) = pending.next().await {
+            if let Some(answer) = answer.flatten() {
+                found = Some(answer);
+                break;
+            }
+        }
+        drop(pending);
+        if found.is_none() && !req.youtube_only {
+            found = with_timeout(&*svc.rt, svc.config.provider_timeout_ms.min(3_000), try_preview(svc, want)).await.flatten();
+        }
+        match found {
+            Some((matched, source, confidence)) => ResolveResponse {
+                matched: Some(matched), source: Some(source), confidence, youtube_hint: None,
+            },
+            None => ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None },
+        }
     };
-    cache::put_json(&*svc.cache, &key, &resp, ttl).await;
+    let resp = with_timeout(&*svc.rt, budget, work).await.unwrap_or(ResolveResponse {
+        matched: None, source: None, confidence: 0.0, youtube_hint: None,
+    });
+    cache::put_json(&*svc.cache, &key, &resp, ttl(&resp)).await;
     resp
 }
 
@@ -350,6 +368,64 @@ mod tests {
         assert_eq!(effective_priority(&[]), DEFAULT_PRIORITY.to_vec());
         assert_eq!(effective_priority(&[Spotify, Deezer]), DEFAULT_PRIORITY.to_vec());
         assert_eq!(effective_priority(&[YouTube, Audius, YouTube]), vec![YouTube, Audius]);
+    }
+
+    #[test]
+    fn providers_overlap_while_a_slower_preferred_match_still_wins() {
+        use crate::traits::{HttpClient, HttpRequest, HttpResponse, HttpError};
+        struct Gated {
+            inner: std::sync::Arc<MockHttp>,
+            gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+        }
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl HttpClient for Gated {
+            async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                let gate = if req.url.contains("audius.co") { self.gate.lock().unwrap().take() } else { None };
+                if let Some(gate) = gate { let _ = gate.await; }
+                self.inner.send(req).await
+            }
+        }
+        let h = setup();
+        h.http.on("audius.co",200,r#"{"data":[{"id":"preferred","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        h.http.on("jamendo.com",200,r#"{"results":[{"id":"fallback","name":"Get Lucky","duration":369,"artist_name":"Daft Punk","audio":"https://cdn.jamendo.com/audio"}]}"#);
+        let (tx,rx) = futures::channel::oneshot::channel();
+        let mut svc = Services { http:h.svc.http.clone(),cache:h.svc.cache.clone(),limiter:h.svc.limiter.clone(),rt:h.svc.rt.clone(),cmds:h.svc.cmds.clone(),config:h.svc.config.clone() };
+        svc.http = std::sync::Arc::new(Gated { inner:h.http.clone(), gate:std::sync::Mutex::new(Some(rx)) });
+        block_on(async {
+            let request = resolve(&svc, ResolveRequest { youtube_only:false,track:want(),priority:vec![Audius,Jamendo] });
+            futures::pin_mut!(request);
+            assert!(futures::poll!(&mut request).is_pending());
+            assert_eq!(h.http.call_count("jamendo.com"),1,"fallback should run while preferred lookup is waiting");
+            tx.send(()).unwrap();
+            assert_eq!(request.await.matched.unwrap().id,"preferred");
+        });
+    }
+
+    #[test]
+    fn total_deadline_includes_a_stalled_companion() {
+        struct Deadline;
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl crate::Runtime for Deadline {
+            fn now_ms(&self) -> u64 { 0 }
+            async fn sleep(&self, ms: u64) {
+                if ms != 23_000 { futures::future::pending::<()>().await; }
+            }
+        }
+        struct Stalled;
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl crate::CommandRunner for Stalled {
+            async fn run(&self, _: &str, _: &[String], _: u64) -> Result<Vec<u8>, crate::CommandError> { unreachable!() }
+            async fn resolve(&self, _: &ResolveRequest) -> Option<ResolveResponse> { futures::future::pending().await }
+        }
+        let h = setup();
+        let svc = Services { http:h.svc.http.clone(),cache:h.svc.cache.clone(),limiter:h.svc.limiter.clone(),
+            rt:std::sync::Arc::new(Deadline),cmds:std::sync::Arc::new(Stalled),config:h.svc.config.clone() };
+        let response = block_on(resolve(&svc,ResolveRequest { youtube_only:false,track:want(),priority:vec![] }));
+        assert!(response.source.is_none());
+        assert_eq!(h.http.call_count("http"),0,"deadline must not start another provider pass");
     }
 
     fn setup() -> Harness {

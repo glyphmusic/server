@@ -286,7 +286,7 @@ impl Server {
                         (format!("{namespace}:{u_key}"), u_key, lim),
                         (format!("{namespace}:{d_key}"), d_key, lim),
                     ]).await?;
-                    return Ok(true);
+                    return self.check_account_access(req, true);
                 }
             }
             let mut rules = vec![(format!("{namespace}:guest:{ip}"), ip_key, base)];
@@ -295,7 +295,7 @@ impl Server {
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
             check_rules(&svc, &rules).await?;
-            Ok(false)
+            self.check_account_access(req, false)
         } else {
             let mut rules = vec![
                 (format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8)),
@@ -306,9 +306,27 @@ impl Server {
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
             check_rules(&svc, &rules).await?;
-            Ok(false)
+            self.check_account_access(req, false)
         }
     }
+
+    fn check_account_access(&self, req: &Request, member: bool) -> Result<bool, ApiErr> {
+        let path = req.path.trim_end_matches('/');
+        // Bootstrap and refresh keep their own authentication rules. All other
+        // API paths, including host-owned media/cache routes, require a session.
+        let protected = path.starts_with("/v1/")
+            && !(path == "/v1/health" && req.method == Method::Get)
+            && path != "/v1/account" && !path.starts_with("/v1/account/")
+            && req.method != Method::Options;
+        if self.services().config.require_account && protected && !member {
+            if self.accounts.is_none() {
+                return Err(ApiErr::unavailable("this server requires accounts, but its account backend is unavailable"));
+            }
+            return Err(ApiErr::new(401, "account_required", "sign in to a Glyph account to use this server"));
+        }
+        Ok(member)
+    }
+
 }
 
 async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<(), ApiErr> {
@@ -348,6 +366,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 200,
                 &HealthResponse {
                     server_auth_required: svc.config.server_bearer_hash.is_some(),
+                    account_required: svc.config.require_account,
                     server_version: svc.config.server_version.clone(),
                     protocol_version: PROTOCOL_VERSION,
                     providers: svc.config.enabled_providers(),

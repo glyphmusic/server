@@ -32,8 +32,33 @@ impl AdminHost for TestHost {
     async fn persist_limits(&self, _: &Limits) -> Result<(), HostError> {
         Ok(())
     }
+    async fn companion_status(&self) -> Result<CompanionStatus,HostError> {
+        let tool=ToolStatus{available:true,version:Some("0.1.1".into()),configured:true};
+        Ok(CompanionStatus{version:"0.3.0".into(),target:"test".into(),enabled:true,ready:true,r_dlp:tool.clone(),yt_dlp:tool.clone(),ffmpeg:tool})
+    }
+    async fn companion_update(&self, rdlp:bool, apply:bool) -> Result<MaintenanceResponse,HostError> {
+        Ok(MaintenanceResponse{info:UpdateInfo{current:"0.1.0".into(),latest:Some("0.1.1".into()),update_available:true,message:"test".into()},
+            applied:apply,restart_required:false,message:if rdlp{"r-dlp"}else{"companion"}.into()})
+    }
     async fn logs(&self, _: usize, after: Option<u64>) -> Result<LogsResponse, HostError> {
         Ok(LogsResponse { lines: vec!["line".into()], next: after.unwrap_or(0) + 1 })
+    }
+}
+
+#[test]
+fn companion_management_routes_require_admin_auth_and_fixed_methods() {
+    let t=setup(true,TestHost::default());
+    let pair=login(&t);let token=Some(pair.access_token.as_str());
+    let (status,value,_)=call(&t,req(Method::Get,"/admin/v1/companion/status","",token));
+    assert_eq!(status,200);assert_eq!(value["r_dlp"]["version"],"0.1.1");
+    for (path,rdlp,apply) in [("companion/update/check",false,false),("companion/update/apply",false,true),
+        ("companion/r-dlp/check",true,false),("companion/r-dlp/apply",true,true)] {
+        let path=format!("/admin/v1/{path}");
+        assert_eq!(call(&t,req(Method::Post,&path,"{}",None)).0,401);
+        assert_eq!(call(&t,req(Method::Get,&path,"",token)).0,405);
+        let (status,value,_)=call(&t,req(Method::Post,&path,"{}",token));
+        assert_eq!(status,200);assert_eq!(value["applied"],apply);
+        assert_eq!(value["message"],if rdlp{"r-dlp"}else{"companion"});
     }
 }
 
@@ -316,6 +341,31 @@ fn limits_get_set_and_validate() {
     let invalid = separate.replace("\"d1_max_mb\":250", "\"d1_max_mb\":0");
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &invalid, tok)).0, 400);
     assert_eq!(t.server.services().config.d1_max_mb, 250);
+}
+
+#[test]
+fn account_gate_requires_a_backend_and_old_admin_clients_preserve_it() {
+    let mut t = setup(true,TestHost::default());
+    let pair = login(&t);
+    let token = Some(pair.access_token.as_str());
+    let required = r#"{"require_account":true,"rate_limit_per_min":30,"youtube_daily_budget_units":5000,"import_max_pages":3}"#;
+    assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",required,token)).0,400);
+    struct Entropy;
+    impl crate::accounts::Entropy for Entropy { fn fill(&self, bytes: &mut [u8]) { bytes.fill(1); } }
+    t.server = t.server.with_accounts(crate::accounts::Accounts {
+        store:Arc::new(crate::accounts::store::MemStore::default()),blobs:None,entropy:Arc::new(Entropy),
+        origin:"https://glyph.example".into(),extra_origins:vec![],rp_id:None,
+    });
+    assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",required,token)).0,200);
+    assert!(t.server.services().config.require_account);
+    let legacy = r#"{"rate_limit_per_min":40,"youtube_daily_budget_units":5000,"import_max_pages":3}"#;
+    assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",legacy,token)).0,200);
+    assert!(t.server.services().config.require_account,"old clients must not reopen the API");
+    let (_,value,_) = call(&t,req(Method::Get,"/admin/v1/limits","",token));
+    assert_eq!(value["require_account"],true);
+    let disabled = required.replace("true","false");
+    assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",&disabled,token)).0,200);
+    assert!(!t.server.services().config.require_account);
 }
 
 #[test]

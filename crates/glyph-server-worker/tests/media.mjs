@@ -1,5 +1,6 @@
 // Run after worker-build --dev --no-opt. No live providers or Cloudflare account.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
@@ -186,3 +187,187 @@ try {
   await invalid.arrayBuffer();
   console.log('Private Worker: health discovery, invalid/missing token, cache gate and authorized playback passed.');
 } finally { await privateMf.dispose(); }
+
+// Fragmented encodes have no Content-Length on their first request. They must
+// stream immediately and only publish a chunk manifest after successful EOF.
+let variantComplete = false;
+let variantCalls = 0;
+const variantSample = sample + '\x00\x00\x00\x21freeglyph-variant-complete-v1';
+const variantMf = new Miniflare({ ...options, r2Buckets: ['GLYPH_COVERS'], outboundService: async request => {
+  const url = new URL(request.url);
+  if (url.hostname === 'companion.example' && url.pathname === '/internal/audio/broken00001') {
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('partial'));
+      setTimeout(() => controller.error(new Error('test encoder failure')),50);
+    }}), { headers: { 'content-type':'audio/mp4' } });
+  }
+  if (url.hostname === 'companion.example' && url.pathname === '/internal/audio/streaming01') {
+    variantCalls++;
+    assert.equal(request.headers.get('x-glyph-audio-quality'), 'low');
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(sample.slice(0,5)));
+      setTimeout(() => { variantComplete = true; controller.enqueue(new TextEncoder().encode(variantSample.slice(5))); controller.close(); },300);
+    }}), { headers: { 'content-type':'audio/mp4' } });
+  }
+  return options.outboundService(request);
+}});
+await schema(variantMf);
+try {
+  const url = 'https://glyph.test/v1/audio/youtube/streaming01?quality=low';
+  const cold = await variantMf.dispatchFetch(url);
+  assert.equal(cold.status,200);
+  assert.equal(cold.headers.get('content-length'),null);
+  const reader = cold.body.getReader();
+  let text = new TextDecoder().decode((await reader.read()).value);
+  assert.equal(variantComplete,false,'first bytes must not wait for full encode');
+  for (;;) { const {value,done} = await reader.read(); if(done) break; text += new TextDecoder().decode(value); }
+  assert.equal(text,variantSample);
+  const db = await variantMf.getD1Database('GLYPH_DB');
+  let manifest;
+  for(let i=0;i<80;i++) {
+    manifest = await db.prepare("SELECT manifest FROM audio_variants WHERE track_id='streaming01' AND quality='low'").first();
+    if(manifest) break;
+    await new Promise(r=>setTimeout(r,25));
+  }
+  assert.ok(manifest,'unknown-length successful stream must persist');
+  const ranged = await variantMf.dispatchFetch(url,{ headers:{range:'bytes=5-9'} });
+  assert.equal(ranged.status,206);
+  assert.equal(ranged.headers.get('x-glyph-cache'),'R2-CHUNKS');
+  assert.equal(await ranged.text(),sample.slice(5,10));
+  assert.equal(variantCalls,1,'warm range must not call companion');
+  const head = await variantMf.dispatchFetch(url,{method:'HEAD'});
+  assert.equal(head.headers.get('content-length'),String(variantSample.length));
+  assert.equal(await head.text(),'');
+  const broken = await variantMf.dispatchFetch('https://glyph.test/v1/audio/youtube/broken00001?quality=low');
+  // Miniflare's Node outbound adapter loses the transport error at EOF. The
+  // missing completion atom must still prevent caching this partial output.
+  await broken.arrayBuffer().catch(()=>{});
+  await new Promise(r=>setTimeout(r,100));
+  assert.equal(await db.prepare("SELECT manifest FROM audio_variants WHERE track_id='broken00001'").first(),null,'failed encode must not publish a manifest');
+  console.log('Variant Worker: unknown-length streaming, complete R2 publication, warm range, HEAD and failed-stream exclusion passed.');
+} finally { await variantMf.dispose(); }
+
+// Account-only mode applies before metadata providers and media cache reads.
+const memberMf = new Miniflare({ ...options, bindings: { ...options.bindings,
+  REQUIRE_ACCOUNT:'true', PUBLIC_ORIGIN:'https://glyph.test' } });
+await schema(memberMf);
+try {
+  const db = await memberMf.getD1Database('GLYPH_DB');
+  const access = 'ga_member-test-access';
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const now = Date.now();
+  // Legacy saved limits must not disable the new environment setting.
+  await db.prepare("INSERT INTO server_settings(key,value) VALUES('limits',?1)").bind(JSON.stringify({
+    rate_limit_per_min:1000,youtube_daily_budget_units:9000,import_max_pages:5
+  })).run();
+  await db.prepare("INSERT INTO users(id,handle,created_at,recovery_hash) VALUES('member','member',?1,'recovery')").bind(now).run();
+  await db.prepare("INSERT INTO devices(id,user_id,name,platform,created_at,last_seen,access_hash,access_exp,refresh_hash,refresh_exp) VALUES('device','member','Test','windows',?1,?1,?2,?3,'refresh',?3)")
+    .bind(now,hash(access),now+60000).run();
+  const call = (path,token) => memberMf.dispatchFetch(`https://glyph.test${path}`,{
+    headers:token ? {authorization:`Bearer ${token}`} : {}
+  });
+  const health = await (await call('/v1/health')).json();
+  assert.equal(health.accounts,true);
+  assert.equal(health.account_required,true);
+  const before = calls.length;
+  for(const path of ['/v1/access','/v1/search?q=test','/v1/resolve','/v1/audio/deezer/1',
+    '/v1/download/youtube/abcdefghijk','/v1/upstream?url=https://upload.wikimedia.org/a.jpg']) {
+    for(const token of [undefined,'forged','refresh']) {
+      const denied = await call(path,token);
+      assert.equal(denied.status,401,path);
+      assert.equal((await denied.json()).code,'account_required');
+    }
+  }
+  assert.equal(calls.length,before,'guests must not contact providers');
+  const login = await memberMf.dispatchFetch('https://glyph.test/v1/account/login/start',{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({device_name:'Test',platform:'windows'})
+  });
+  assert.equal(login.status,200);
+  await login.arrayBuffer();
+  const valid = await call('/v1/access',access);
+  assert.equal(valid.status,200);
+  await valid.arrayBuffer();
+  const cold = await call('/v1/audio/deezer/1',access);
+  assert.equal(await cold.text(),sample);
+  let warm = false;
+  for(let i=0;i<30;i++) {
+    const response = await call('/v1/audio/deezer/1',access);
+    warm ||= response.headers.get('x-glyph-cache')==='HIT';
+    await response.arrayBuffer();
+    if(warm) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.ok(warm);
+  assert.equal((await call('/v1/audio/deezer/1')).status,401,'warm cache must not bypass account gate');
+  await db.prepare("UPDATE devices SET access_exp=?1 WHERE id='device'").bind(now-1).run();
+  assert.equal((await call('/v1/access',access)).status,401,'expired access token');
+  await db.prepare("UPDATE devices SET access_exp=?1 WHERE id='device'").bind(now+60000).run();
+  await db.prepare("DELETE FROM devices WHERE id='device'").run();
+  assert.equal((await call('/v1/audio/deezer/1',access)).status,401,'revoked device must lose cached audio access');
+  console.log('Account-only Worker: environment/legacy limits, login bootstrap, valid/forged/expired/revoked sessions and warm-cache denial passed.');
+} finally { await memberMf.dispose(); }
+
+for(const [saved,environment,status] of [
+  [{require_account:false,rate_limit_per_min:1000,youtube_daily_budget_units:9000,import_max_pages:5},'true',200],
+  ['invalid saved limits','false',401],
+]) {
+  const policyMf = new Miniflare({ ...options, bindings:{...options.bindings,
+    REQUIRE_ACCOUNT:environment,PUBLIC_ORIGIN:'https://glyph.test'} });
+  await schema(policyMf);
+  try {
+    const db = await policyMf.getD1Database('GLYPH_DB');
+    await db.prepare("INSERT INTO server_settings(key,value) VALUES('limits',?1)")
+      .bind(typeof saved==='string' ? saved : JSON.stringify(saved)).run();
+    const response = await policyMf.dispatchFetch('https://glyph.test/v1/access');
+    assert.equal(response.status,status,'explicit saved choice wins; corrupt saved policy must fail closed');
+    await response.arrayBuffer();
+  } finally { await policyMf.dispose(); }
+}
+console.log('Account policy: explicit saved disable and corrupt-policy fail-closed behavior passed.');
+
+// Public test password/hash only; never production credentials.
+const maintenanceCalls=[];
+const adminMf=new Miniflare({...options,bindings:{...options.bindings,
+  ADMIN_PASSWORD_HASH:'$argon2id$v=19$m=19456,t=2,p=1$BVPUtwgX342xHD/TpX5nDA$k20JP0Icgx0aK5FiAO/DNKRj/4HDIN2KzI2VL+pZ2Zo'
+},outboundService:async request=>{
+  const url=new URL(request.url);
+  if(url.hostname==='companion.example') {
+    assert.equal(request.headers.get('authorization'),`Bearer ${token}`);
+    maintenanceCalls.push(url.pathname);
+    if(url.pathname==='/internal/status') {
+      assert.equal(request.method,'GET');
+      const tool={available:true,configured:true,version:'0.1.1'};
+      return Response.json({version:'0.3.0',target:'test',enabled:true,ready:true,r_dlp:tool,yt_dlp:tool,ffmpeg:tool});
+    }
+    assert.equal(request.method,'POST');
+    if(url.pathname==='/internal/update/apply') return new Response(`Use the container update path; private token ${token}`,{status:502});
+    return Response.json({info:{current:'0.1.0',latest:'0.1.1',update_available:true,message:'test'},
+      applied:url.pathname.endsWith('/apply'),restart_required:false,message:'test'});
+  }
+  return options.outboundService(request);
+}});
+await schema(adminMf);
+try {
+  const base='https://glyph.test/admin/v1/';
+  for(const endpoint of ['companion/status','companion/r-dlp/apply','companion/update/apply']) {
+    const denied=await adminMf.dispatchFetch(base+endpoint,{method:endpoint.endsWith('/status')?'GET':'POST'});
+    assert.equal(denied.status,401);await denied.arrayBuffer();
+  }
+  assert.equal(maintenanceCalls.length,0,'unauthenticated callers must not reach companion management');
+  const login=await adminMf.dispatchFetch(base+'login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:'glyph-test-admin-password-only'})});
+  assert.equal(login.status,200,await login.clone().text());
+  const {access_token}=await login.json();
+  const auth={authorization:`Bearer ${access_token}`};
+  const status=await adminMf.dispatchFetch(base+'companion/status',{headers:auth});
+  assert.equal(status.status,200);assert.equal((await status.json()).r_dlp.version,'0.1.1');
+  for(const endpoint of ['companion/update/check','companion/r-dlp/check','companion/r-dlp/apply']) {
+    const response=await adminMf.dispatchFetch(base+endpoint,{method:'POST',headers:auth,body:'{}'});
+    assert.equal(response.status,200);const value=await response.json();
+    assert.equal(value.applied,endpoint.endsWith('/apply'));assert.ok(!JSON.stringify(value).includes(token));
+  }
+  const failed=await adminMf.dispatchFetch(base+'companion/update/apply',{method:'POST',headers:auth,body:'{}'});
+  assert.equal(failed.status,500);
+  const detail=await failed.text();assert.ok(!detail.includes(token));assert.ok(detail.includes('[redacted]'));
+  assert.deepEqual(maintenanceCalls,['/internal/status','/internal/update/check','/internal/r-dlp/check','/internal/r-dlp/apply','/internal/update/apply']);
+  console.log('Companion management: admin gate, fixed private endpoints, versions, update checks/apply and secret isolation passed.');
+} finally {await adminMf.dispose();}

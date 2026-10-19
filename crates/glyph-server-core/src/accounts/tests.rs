@@ -12,6 +12,62 @@ const ORIGIN: &str = "https://glyph.example";
 const RP: &str = "glyph.example";
 
 #[test]
+fn optional_account_gate_covers_api_and_media_and_tracks_session_lifecycle() {
+    let t = setup();
+    t.s.update_config(|c| { c.require_account = true; c.rate_limit_per_min = 1000; });
+    let (status, health) = call(&t,Method::Get,"/v1/health",serde_json::Value::Null,None);
+    assert_eq!(status,200);
+    assert_eq!(health["account_required"],true);
+    // Sign-up and login must work even when guests cannot call the API.
+    let (session,_,_) = sign_up(&t,"members_only");
+    let req = |path: &str, token: Option<&str>| Request::new(Method::Get,path,
+        token.map(|v| vec![("authorization".into(),format!("Bearer {v}"))]).unwrap_or_default(),vec![],Some("gate-test".into()));
+    block_on(async {
+        for path in ["/v1/search?q=test","/v1/resolve","/v1/lyrics","/v1/audio/youtube/abcdefghijk",
+            "/v1/download/youtube/abcdefghijk","/v1/upstream?url=https://example.com","/v1/access","/v1/profiles/someone"] {
+            for token in [None,Some("forged"),Some(session.refresh_token.as_str())] {
+                let error = t.s.admit(&req(path,token),path.contains("audio")).await.unwrap_err();
+                assert_eq!(error.status,401,"{path}");
+                assert_eq!(error.body.code,"account_required");
+            }
+            assert!(t.s.admit(&req(path,Some(&session.access_token)),false).await.unwrap());
+        }
+        let mut duplicate = req("/v1/access",Some(&session.access_token));
+        duplicate.headers.push(("authorization".into(),"Bearer forged".into()));
+        assert_eq!(t.s.admit(&duplicate,false).await.unwrap_err().status,401);
+        assert_eq!(t.s.handle(req("/v1/access",None)).await.status,401);
+        assert_eq!(t.s.handle(req("/v1/access",Some(&session.access_token))).await.status,200);
+    });
+    t.h.rt.advance(ACCESS_TTL);
+    assert_eq!(block_on(t.s.admit(&req("/v1/access",Some(&session.access_token)),false)).unwrap_err().status,401);
+    let (status,value) = call(&t,Method::Post,"/v1/account/token/refresh",serde_json::json!({"refresh_token":session.refresh_token}),None);
+    assert_eq!(status,200,"{value}");
+    let fresh: Session = serde_json::from_value(value).unwrap();
+    block_on(async {
+        let request = req("/v1/access",Some(&fresh.access_token));
+        assert!(t.s.admit(&request,false).await.unwrap());
+        let accounts = t.s.accounts.as_ref().unwrap();
+        let (user,device) = accounts.abuse_identity(&t.s.services(),&request).await.unwrap();
+        accounts.store.delete_device(&user,&device).await.unwrap();
+        assert_eq!(t.s.admit(&request,false).await.unwrap_err().status,401);
+        t.s.update_config(|c| c.require_account = false);
+        assert_eq!(t.s.handle(req("/v1/access",None)).await.status,200);
+    });
+}
+
+#[test]
+fn account_gate_fails_closed_without_account_backend() {
+    let h = harness(Default::default());
+    let server = Server::from_arc(h.svc.clone());
+    server.update_config(|c| c.require_account = true);
+    for path in ["/v1/access","/v1/audio/youtube/abcdefghijk"] {
+        let request = Request::new(Method::Get,path,vec![],vec![],None);
+        assert_eq!(block_on(server.admit(&request,true)).unwrap_err().status,503);
+    }
+    assert_eq!(block_on(server.handle(Request::new(Method::Get,"/v1/health",vec![],vec![],None))).status,200);
+}
+
+#[test]
 fn abuse_privileges_require_live_sessions_and_account_quotas_survive_ip_changes() {
     let t = setup();
     let (session, _, _) = sign_up(&t, "abuse_test");

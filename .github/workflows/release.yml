@@ -25,12 +25,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: glyph-server
-      - uses: actions/checkout@v4
-        with:
-          repository: glyphmusic/desktop
-          # Pin the desktop protocol and site assets used by this server release.
-          ref: v0.2.4
-          path: glyph
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -44,12 +38,12 @@ jobs:
           NAME="glyph-server-${VERSION}-${{ matrix.target }}"
           mkdir -p dist/stage
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/glyph-server.exe" dist/stage/
+            cp "target/${{ matrix.target }}/release/glyph-server.exe" dist/stage/glyph.exe
             cp LICENSE-MIT LICENSE-APACHE README.md dist/stage/
             (cd dist/stage && 7z a -tzip "../${NAME}.zip" . >/dev/null)
             ARCHIVE="dist/${NAME}.zip"
           else
-            cp "target/${{ matrix.target }}/release/glyph-server" dist/stage/
+            cp "target/${{ matrix.target }}/release/glyph-server" dist/stage/glyph
             cp LICENSE-MIT LICENSE-APACHE README.md dist/stage/
             tar -C dist/stage -czf "dist/${NAME}.tar.gz" .
             ARCHIVE="dist/${NAME}.tar.gz"
@@ -72,8 +66,42 @@ jobs:
           path: glyph-server/dist/*.sha256
           if-no-files-found: error
 
+  npm-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: glyph-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build the portable Worker payload
+        working-directory: glyph-server/crates/glyph-server-worker
+        run: |
+          cargo install worker-build --locked
+          worker-build --release
+      - name: Verify package and build release tarball
+        working-directory: glyph-server/npm
+        run: |
+          test "$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME#v}"
+          npm test
+          npm pack
+          sha256sum glyph-server-*.tgz > npm.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: glyph-server/npm/*.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums-npm
+          path: glyph-server/npm/npm.sha256
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, npm-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

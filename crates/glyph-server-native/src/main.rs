@@ -4,6 +4,8 @@
 //! password) and self-update.
 
 mod doctor;
+mod diagnostics;
+mod management;
 mod host;
 mod logbuf;
 mod platform;
@@ -21,28 +23,33 @@ use std::sync::Arc;
 
 const EXAMPLES: &str = "\
 Getting started:
-  glyph-server setup              answer a few questions, writes server.toml
-  glyph-server                    run the server
-  glyph-server doctor             check config, keys, ports and reachability
-  glyph-server service install    start it automatically at boot
+  glyph help                      list commands
+  glyph version all               show CLI/server/companion versions
+  glyph check companion           probe companion, r-dlp, yt-dlp and FFmpeg
+  glyph update                    update the CLI
+  glyph setup cloudflare          own Cloudflare deployment (npm installation)
+  glyph setup              answer a few questions, writes server.toml
+  glyph                    run the server
+  glyph doctor             check config, keys, ports and reachability
+  glyph service install    start it automatically at boot
 
 yt-dlp companion of the Cloudflare Worker (takes effect at once):
-  glyph-server companion status
-  glyph-server companion off      every companion request gets 403
-  glyph-server companion on
+  glyph companion status
+  glyph companion off      every companion request gets 403
+  glyph companion on
 
 Manage a running server (here or anywhere):
-  glyph-server remote login https://glyph.example.com
-  glyph-server remote status
-  glyph-server remote limits --rate 120
-  glyph-server remote companion off
-  glyph-server remote keys set youtube_api_key
-  glyph-server remote logs --follow
-  glyph-server remote accounts default-limit 5
-  glyph-server remote accounts limit somehandle 10";
+  glyph remote login https://glyph.example.com
+  glyph remote status
+  glyph remote limits --rate 120
+  glyph remote companion off
+  glyph remote keys set youtube_api_key
+  glyph remote logs --follow
+  glyph remote accounts default-limit 5
+  glyph remote accounts limit somehandle 10";
 
 #[derive(Parser)]
-#[command(name = "glyph-server", version, about = "Metadata server of the Glyph music app", after_help = EXAMPLES)]
+#[command(name = "glyph", bin_name = "glyph", version, about = "Metadata server of the Glyph music app", after_help = EXAMPLES)]
 struct Cli {
     /// Address to listen on (default 0.0.0.0:8787)
     #[arg(long, global = true)]
@@ -59,6 +66,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Show installed or running component versions (default: CLI)
+    Version {
+        #[arg(value_enum,default_value="cli")] target:management::Component,
+        #[arg(long)] server:Option<String>,
+        #[arg(long)] local:bool,
+    },
+    /// Check server/companion connectivity, tools and release versions
+    Check {
+        #[arg(value_enum,default_value="all")] target:management::Component,
+        #[arg(long)] server:Option<String>,
+        #[arg(long)] local:bool,
+    },
+    /// Update CLI, native server, companion or r-dlp; --check only checks
+    Update {
+        #[arg(value_enum,default_value="cli")] target:management::Component,
+        #[arg(long)] check:bool,
+        #[arg(long)] server:Option<String>,
+        #[arg(long)] local:bool,
+    },
     /// Run the server (the default when no command is given)
     Serve,
     /// Set the server up step by step (or --non-interactive for scripts/Docker)
@@ -100,7 +126,7 @@ enum CompanionCmd {
     Status,
 }
 
-/// `glyph-server companion ...`: a marker file the running server checks on
+/// `glyph companion ...`: a marker file the running server checks on
 /// every request, so no restart is needed.
 fn companion_cmd(cmd: CompanionCmd, s: &settings::Settings) {
     let flag = serve::companion_off_flag(s);
@@ -172,6 +198,13 @@ fn main() {
     }
 
     match cli.command {
+        Some(Cmd::Version {target,ref server,local}) | Some(Cmd::Check {target,ref server,local}) => {
+            let check=matches!(cli.command,Some(Cmd::Check{..}));
+            if let Err(error)=runtime().block_on(management::inspect(&load_settings(&cli),target,server.clone(),local,check)){fail(error);}
+        },
+        Some(Cmd::Update {target,check,ref server,local}) => {
+            if let Err(error)=runtime().block_on(management::upgrade(&load_settings(&cli),target,server.clone(),local,check)){fail(error);}
+        },
         Some(Cmd::Access { disable }) => {
             let mut file = settings::load_file(&config_path, false).unwrap_or_else(|e| fail(e));
             file.server_bearer_hash = if disable { None } else {
@@ -186,7 +219,7 @@ fn main() {
             let s = load_settings(&cli);
             if !s.config_path.exists() {
                 eprintln!(
-                    "note: no {} found, running with defaults (key-free sources only).\n      Run `glyph-server setup` to add API keys, HTTPS and remote management.",
+                    "note: no {} found, running with defaults (key-free sources only).\n      Run `glyph setup` to add API keys, HTTPS and remote management.",
                     s.config_path.display()
                 );
             }
@@ -262,5 +295,21 @@ fn main() {
                 fail(format!("self-update failed: {e}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn component_commands_and_legacy_aliases_parse_without_running_them() {
+        assert!(matches!(Cli::try_parse_from(["glyph","version"]).unwrap().command,Some(Cmd::Version{target:management::Component::Cli,..})));
+        assert!(matches!(Cli::try_parse_from(["glyph","check","companoin"]).unwrap().command,Some(Cmd::Check{target:management::Component::Companion,..})));
+        assert!(matches!(Cli::try_parse_from(["glyph","check","r-dlp","--local"]).unwrap().command,Some(Cmd::Check{target:management::Component::Rdlp,local:true,..})));
+        assert!(matches!(Cli::try_parse_from(["glyph","update","companion","--check","--server","https://own.example"]).unwrap().command,Some(Cmd::Update{check:true,..})));
+        assert!(matches!(Cli::try_parse_from(["glyph-server","self-update"]).unwrap().command,Some(Cmd::SelfUpdate)));
+        let help=Cli::try_parse_from(["glyph","help"]).err().unwrap();
+        assert_eq!(help.kind(),clap::error::ErrorKind::DisplayHelp);
+        assert!(help.to_string().contains("Usage: glyph"));
     }
 }

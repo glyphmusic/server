@@ -1,4 +1,4 @@
-//! `glyph-server remote …`: manage a running server (on this machine or
+//! `glyph remote …`: manage a running server (on this machine or
 //! anywhere) through its admin API with the admin password.
 //!
 //! `remote login` exchanges the password for a token pair; only the refresh
@@ -51,6 +51,9 @@ pub enum RemoteCmd {
     },
     /// Show or change rate limits
     Limits {
+        /// Require a signed-in account for API and media access (true/false)
+        #[arg(long)]
+        require_account: Option<bool>,
         /// Requests per minute per client
         #[arg(long)]
         rate: Option<u32>,
@@ -213,6 +216,9 @@ pub fn normalize_url(u: &str) -> Result<String, String> {
     let u = u.trim().trim_end_matches('/');
     let with_scheme = if u.contains("://") { u.to_string() } else if is_local(u) { format!("http://{u}") } else { format!("https://{u}") };
     let parsed = url::Url::parse(&with_scheme).map_err(|_| format!("`{u}` is not a valid server address"))?;
+    if !matches!(parsed.scheme(),"http"|"https") || !parsed.username().is_empty() || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("use an HTTP(S) server URL without embedded credentials, query or fragment".into());
+    }
     if parsed.scheme() == "http" && !is_local(parsed.host_str().unwrap_or("")) {
         return Err("the admin API only works over HTTPS (plain http is allowed for localhost only)".into());
     }
@@ -226,7 +232,7 @@ fn is_local(host: &str) -> bool {
 
 // ------------------------------------------------------------------ http
 
-struct Client {
+pub(crate) struct Client {
     http: reqwest::Client,
     base: String,
     access: String,
@@ -235,6 +241,8 @@ struct Client {
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("glyph-server-remote/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("http client")
@@ -245,20 +253,20 @@ async fn error_of(r: reqwest::Response) -> String {
     let body = r.text().await.unwrap_or_default();
     let msg = serde_json::from_str::<glyph_protocol::ApiError>(&body).map(|e| e.message).unwrap_or(body);
     match status {
-        401 => format!("not logged in or the login expired ({msg}). Run `glyph-server remote login <url>`."),
-        404 => "this server has no admin API (set an admin password with `glyph-server setup`)".into(),
+        401 => format!("not logged in or the login expired ({msg}). Run `glyph remote login <url>`."),
+        404 => format!("endpoint unavailable ({msg}); configure the admin API or update an older server/companion"),
         429 => format!("too many attempts: {msg}"),
         _ => format!("HTTP {status}: {msg}"),
     }
 }
 
 impl Client {
-    async fn connect(server: Option<String>) -> Result<Self, String> {
+    pub(crate) async fn connect(server: Option<String>) -> Result<Self, String> {
         let base = match server {
             Some(s) => normalize_url(&s)?,
-            None => load_profile().default.ok_or("no server yet. Run `glyph-server remote login <url>` first.")?,
+            None => load_profile().default.ok_or("no server yet. Run `glyph remote login <url>` first.")?,
         };
-        let refresh = read_token(&base).ok_or_else(|| format!("not logged in to {base}. Run `glyph-server remote login {base}`."))?;
+        let refresh = read_token(&base).ok_or_else(|| format!("not logged in to {base}. Run `glyph remote login {base}`."))?;
         let http = client();
         let r = http
             .post(format!("{base}/admin/v1/refresh"))
@@ -283,12 +291,14 @@ impl Client {
         r.json().await.map_err(|e| e.to_string())
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
+    pub(crate) async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
         self.send(self.http.get(format!("{}/admin/v1/{path}", self.base))).await
     }
 
-    async fn post<B: Serialize, T: for<'de> Deserialize<'de>>(&self, path: &str, body: &B) -> Result<T, String> {
-        self.send(self.http.post(format!("{}/admin/v1/{path}", self.base)).json(body)).await
+    pub(crate) async fn post<B: Serialize, T: for<'de> Deserialize<'de>>(&self, path: &str, body: &B) -> Result<T, String> {
+        let request=self.http.post(format!("{}/admin/v1/{path}", self.base)).json(body);
+        let request=if path.contains("update") || path.contains("r-dlp") {request.timeout(std::time::Duration::from_secs(180))}else{request};
+        self.send(request).await
     }
 
     async fn put<B: Serialize, T: for<'de> Deserialize<'de>>(&self, path: &str, body: &B) -> Result<T, String> {
@@ -341,7 +351,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             let pair: TokenPair = r.json().await.map_err(|e| e.to_string())?;
             store_token(&base, &pair.refresh_token)?;
             println!("Logged in to {base}. The login stays valid for 30 days of inactivity.");
-            println!("Try: glyph-server remote status");
+            println!("Try: glyph remote status");
             Ok(())
         }
         RemoteCmd::Logout => {
@@ -373,7 +383,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
                 let state = match (p.enabled, p.skipped) {
                     (true, true) => "paused (error or quota, retries in a few minutes)",
                     (true, false) => "on",
-                    (false, _) if p.needs_key => "off (no key: glyph-server remote keys set …)",
+                    (false, _) if p.needs_key => "off (no key: glyph remote keys set …)",
                     (false, _) => "off",
                 };
                 println!("  {:<18} {state}", p.name);
@@ -388,7 +398,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
                     for k in k.keys {
                         println!("  {:<26} {}", k.name, if k.set { k.masked.unwrap_or_else(|| "set".into()) } else { "-".into() });
                     }
-                    println!("\nSet one with: glyph-server remote keys set <NAME>");
+                    println!("\nSet one with: glyph remote keys set <NAME>");
                 }
                 KeysCmd::Set { name, value } => {
                     let name = name.to_lowercase();
@@ -432,10 +442,11 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { rate, youtube_budget, import_pages, audio_days, audio_max_gb, d1_max_mb } => {
+        RemoteCmd::Limits { require_account, rate, youtube_budget, import_pages, audio_days, audio_max_gb, d1_max_mb } => {
             let c = Client::connect(a.server).await?;
             let mut l: Limits = c.get("limits").await?;
-            if rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() || d1_max_mb.is_some() {
+            if require_account.is_some() || rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() || d1_max_mb.is_some() {
+                if let Some(v) = require_account { l.require_account = v; }
                 if let Some(v) = d1_max_mb { l.d1_max_mb = v; }
                 if let Some(v) = audio_days {
                     l.audio_cache_days = v;
@@ -455,6 +466,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
                 l = c.put("limits", &l).await?;
                 println!("Saved.");
             }
+            println!("Account required               {}", l.require_account);
             println!("Requests per minute per client  {}", l.rate_limit_per_min);
             println!("YouTube units per day           {}", l.youtube_daily_budget_units);
             println!("Pages per playlist import       {}", l.import_max_pages);
@@ -536,7 +548,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
                 let r: UpdateInfo = c.post("update/check", &serde_json::json!({})).await?;
                 println!("{}", r.message);
                 if r.update_available {
-                    println!("Install it with: glyph-server remote update --apply");
+                    println!("Install it with: glyph remote update --apply");
                 }
             }
             Ok(())
@@ -571,6 +583,17 @@ fn print_account(a: &AdminAccount) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn account_gate_cli_requires_an_explicit_boolean() {
+        use clap::Parser;
+        #[derive(Parser)] struct Cli { #[command(flatten)] remote: super::RemoteArgs }
+        for (value,expected) in [("true",true),("false",false)] {
+            let cli = Cli::try_parse_from(["test","limits","--require-account",value]).unwrap();
+            let super::RemoteCmd::Limits { require_account, .. } = cli.remote.cmd else { panic!("wrong command") };
+            assert_eq!(require_account,Some(expected));
+        }
+        assert!(Cli::try_parse_from(["test","limits","--require-account"]).is_err());
+    }
     #[test]
     fn storage_limits_have_independent_cli_flags_and_legacy_alias() {
         use clap::Parser;
@@ -613,4 +636,9 @@ mod tests {
         assert_eq!(uptime(3700), "1h 1m");
         assert_eq!(uptime(90_000), "1d 1h");
     }
+}
+
+/// Resolve a target without prompting or exposing a stored refresh token.
+pub fn selected_server(explicit: Option<String>) -> Result<Option<String>,String> {
+    explicit.or_else(||load_profile().default).map(|s|normalize_url(&s)).transpose()
 }

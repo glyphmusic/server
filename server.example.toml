@@ -1,4 +1,4 @@
-# Optional shared app access: run `glyph-server access` or set GLYPH_SERVER_BEARER.
+# Optional shared app access: run `glyph access` or set GLYPH_SERVER_BEARER.
 # Off by default; independent of the admin password. HTTPS required outside loopback.
 # Copy to server.toml. Environment variables (YOUTUBE_API_KEY, ...) override this file.
 bind = "0.0.0.0:8787"
@@ -6,6 +6,8 @@ bind = "0.0.0.0:8787"
 cache_entries = 10000
 trust_proxy = false              # true behind a loopback reverse proxy that overwrites forwarded headers
 rate_limit_per_min = 60
+# require_account = false       # API/media need a signed-in account when enabled;
+# requires an account backend (currently provided by the Cloudflare Worker).
 youtube_daily_budget_units = 9000   # playlist import only; search uses yt-dlp
 # ytdlp_path = "/usr/bin/yt-dlp"    # YouTube search + audio; found in PATH when unset
 proxy_audio = true                   # clients get /v1/audio/... instead of provider URLs

@@ -27,6 +27,7 @@ pub struct FileConfig {
     pub trust_proxy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_min: Option<u32>,
+    pub require_account: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub youtube_daily_budget_units: Option<u64>,
     /// yt-dlp executable for YouTube search (default: found in `PATH`).
@@ -147,6 +148,7 @@ pub struct Settings {
     pub cache_entries: usize,
     pub trust_proxy: bool,
     pub rate_limit_per_min: u32,
+    pub require_account: bool,
     pub youtube_daily_budget_units: u64,
     /// Configured yt-dlp path, if any (the working one is resolved at startup).
     pub ytdlp_path: Option<String>,
@@ -294,6 +296,7 @@ impl Settings {
             cache_dir: env("GLYPH_CACHE_DIR").map(PathBuf::from).or(file.cache_dir),
             cache_entries: env("GLYPH_CACHE_ENTRIES").and_then(|v| v.parse().ok()).or(file.cache_entries).unwrap_or(10_000),
             trust_proxy: env("GLYPH_TRUST_PROXY").map(|v| v == "1" || v == "true").or(file.trust_proxy).unwrap_or(false),
+            require_account: env("GLYPH_REQUIRE_ACCOUNT").map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).or(file.require_account).unwrap_or(false),
             rate_limit_per_min: env("GLYPH_RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()).or(file.rate_limit_per_min).unwrap_or(60),
             youtube_daily_budget_units: env("YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()).or(file.youtube_daily_budget_units).unwrap_or(9000),
             ytdlp_path: env("YTDLP_PATH").or(file.ytdlp_path),

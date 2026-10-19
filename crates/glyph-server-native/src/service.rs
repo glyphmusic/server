@@ -1,4 +1,4 @@
-//! `glyph-server service install|uninstall|status`: systemd (Linux), launchd
+//! `glyph service install|uninstall|status`: systemd (Linux), launchd
 //! (macOS), Windows service. Unit/plist generation is pure and unit tested;
 //! the platform branches use runtime `cfg!` so the code is type-checked on
 //! every OS.
@@ -111,9 +111,9 @@ fn permission_hint(e: &std::io::Error, what: &str) -> String {
         let how = if cfg!(windows) {
             "Open a terminal with \"Run as administrator\" and run the same command again."
         } else if cfg!(target_os = "macos") {
-            "Run the command again with sudo, or install for your user only (no sudo needed): glyph-server service install"
+            "Run the command again with sudo, or install for your user only (no sudo needed): glyph service install"
         } else {
-            "Run the command again with sudo, or install for your user only: glyph-server service install --user"
+            "Run the command again with sudo, or install for your user only: glyph service install --user"
         };
         format!("No permission to {what}. {how}")
     } else {
@@ -124,7 +124,7 @@ fn permission_hint(e: &std::io::Error, what: &str) -> String {
 fn spec(config: &Path, a: &ServiceArgs) -> Result<Spec, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let config = std::fs::canonicalize(config).map_err(|_| {
-        format!("{} does not exist yet. Run `glyph-server setup` first, or pass --config <path>.", config.display())
+        format!("{} does not exist yet. Run `glyph setup` first, or pass --config <path>.", config.display())
     })?;
     // `canonicalize` yields \\?\ paths on Windows, which services do not like.
     let strip = |p: PathBuf| PathBuf::from(p.display().to_string().trim_start_matches(r"\\?\").to_string());
@@ -184,7 +184,7 @@ fn install(config: &Path, a: &ServiceArgs) -> Result<(), String> {
         systemctl(s.user_mode, &["daemon-reload"])?;
         systemctl(s.user_mode, &["enable", "--now", NAME])?;
         println!("Installed {} and started it.", path.display());
-        println!("Check it with: glyph-server service status{}", if s.user_mode { " --user" } else { "" });
+        println!("Check it with: glyph service status{}", if s.user_mode { " --user" } else { "" });
         if s.user_mode {
             println!("To keep it running when you are logged out: sudo loginctl enable-linger $USER");
         }
@@ -257,7 +257,7 @@ fn status(a: &ServiceArgs) -> Result<(), String> {
     if cfg!(target_os = "linux") {
         let path = unit_path(user_mode)?;
         if !path.exists() {
-            println!("Not installed (no {}). Install it with: glyph-server service install{}", path.display(), if user_mode { " --user" } else { "" });
+            println!("Not installed (no {}). Install it with: glyph service install{}", path.display(), if user_mode { " --user" } else { "" });
             return Ok(());
         }
         let active = systemctl(user_mode, &["is-active", NAME]).unwrap_or_else(|e| e).trim().to_string();
@@ -267,7 +267,7 @@ fn status(a: &ServiceArgs) -> Result<(), String> {
     } else if cfg!(target_os = "macos") {
         let path = plist_path(user_mode)?;
         if !path.exists() {
-            println!("Not installed (no {}). Install it with: glyph-server service install", path.display());
+            println!("Not installed (no {}). Install it with: glyph service install", path.display());
             return Ok(());
         }
         let domain = if user_mode { format!("gui/{}", uid()) } else { "system".to_string() };
@@ -276,7 +276,7 @@ fn status(a: &ServiceArgs) -> Result<(), String> {
                 let state = t.lines().find(|l| l.trim_start().starts_with("state =")).unwrap_or("state = unknown").trim().to_string();
                 println!("Installed: yes ({})\nRunning:   {state}", path.display());
             }
-            Err(_) => println!("Installed: yes ({}), but not loaded. Reinstall with: glyph-server service install", path.display()),
+            Err(_) => println!("Installed: yes ({}), but not loaded. Reinstall with: glyph service install", path.display()),
         }
         Ok(())
     } else if cfg!(windows) {
@@ -333,7 +333,7 @@ pub mod win {
             .map_err(|e| {
                 let t = denied(&e);
                 if t.contains("already exists") || t.contains("1073") {
-                    "The service already exists. Remove it first: glyph-server service uninstall".to_string()
+                    "The service already exists. Remove it first: glyph service uninstall".to_string()
                 } else {
                     t
                 }
@@ -363,7 +363,7 @@ pub mod win {
     pub fn status() -> Result<(), String> {
         let mgr = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(|e| denied(&e))?;
         match mgr.open_service(WINDOWS_SERVICE, ServiceAccess::QUERY_STATUS) {
-            Err(_) => println!("Not installed. Install it with (as administrator): glyph-server service install"),
+            Err(_) => println!("Not installed. Install it with (as administrator): glyph service install"),
             Ok(svc) => {
                 let st = svc.query_status().map_err(|e| e.to_string())?;
                 println!("Installed: yes\nRunning:   {:?}", st.current_state);
@@ -473,6 +473,6 @@ mod tests {
     #[test]
     fn install_without_config_explains_what_to_do() {
         let err = super::spec(Path::new("definitely-not-here.toml"), &ServiceArgs::default()).unwrap_err();
-        assert!(err.contains("glyph-server setup"));
+        assert!(err.contains("glyph setup"));
     }
 }

@@ -1,0 +1,35 @@
+name: Publish npm CLI
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published GitHub release tag (for example v0.3.0)
+        required: true
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Download and verify the prepared release package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          VERSION="${RELEASE_TAG#v}"
+          gh release download "$RELEASE_TAG" --pattern "glyph-server-${VERSION}.tgz" --pattern SHA256SUMS.txt
+          grep -E "^[a-f0-9]{64}  glyph-server-${VERSION//./\.}\.tgz$" SHA256SUMS.txt > package.sha256
+          test "$(wc -l < package.sha256)" = 1
+          sha256sum --check package.sha256
+      - name: Publish the verified package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN" || { echo 'Configure the repository NPM_TOKEN secret, or publish the release tarball after npm login locally.'; exit 1; }
+          npm publish ./glyph-server-*.tgz --access public

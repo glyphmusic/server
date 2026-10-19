@@ -7,3 +7,9 @@ node_modules/
 .wrangler-home/
 
 __pycache__/
+npm/worker/
+npm/LICENSE-MIT
+npm/LICENSE-APACHE
+*.tgz
+dist/
+.cli-smoke/

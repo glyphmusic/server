@@ -214,8 +214,10 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
     if let Some(n) = secret(env, "YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()) {
         config.youtube_daily_budget_units = n;
     }
+    config.require_account = secret(env, "REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
     // Limits saved with `glyph-server remote limits` win over wrangler.toml.
     if let Some(l) = &saved {
+        config.require_account = l.require_account;
         config.rate_limit_per_min = l.rate_limit_per_min;
         config.youtube_daily_budget_units = l.youtube_daily_budget_units;
         config.import_max_pages = l.import_max_pages;
@@ -243,7 +245,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
     // Abuse counters must be atomic and shared across locations. Requires 0009.
     let api_cache = api.clone();
     let limiter = Arc::new(abuse::D1Limiter { db: env.d1("GLYPH_DB").ok(), rt: rt.clone(), admin: Arc::new(glyph_server_core::ratelimit::CacheRateLimiter::new(api.clone(), rt.clone())) });
-    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_token:secret(env,"YTDLP_SERVICE_TOKEN"), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
@@ -338,9 +340,35 @@ struct WorkerHost {
     db: Option<worker::D1Database>,
     cache: Arc<dyn Cache>,
     bucket: Option<worker::Bucket>,
+    companion_url: Option<String>,
+    companion_token: Option<String>,
 }
 
-const SETTINGS_CACHE_KEY: &str = "admin:limits";
+impl WorkerHost {
+    async fn companion_call<T: serde::de::DeserializeOwned>(&self, path: &str, post: bool) -> std::result::Result<T,HostError> {
+        let base=self.companion_url.as_deref().filter(|s|s.starts_with("https://")).ok_or_else(||HostError::Unsupported("companion URL is not configured".into()))?;
+        let token=self.companion_token.as_deref().filter(|s|s.len()>=32).ok_or_else(||HostError::Unsupported("companion token is not configured".into()))?;
+        let work=async {
+            let headers=worker::Headers::new();
+            headers.set("authorization",&format!("Bearer {token}"))?;
+            let mut init=worker::RequestInit::new();
+            init.with_method(if post {worker::Method::Post}else{worker::Method::Get}).with_headers(headers).with_redirect(worker::RequestRedirect::Manual);
+            let mut response=worker::Fetch::Request(worker::Request::new_with_init(&format!("{}{path}",base.trim_end_matches('/')),&init)?).send().await?;
+            if response.status_code()!=200 {
+                let status=response.status_code();
+                if status==404 {return Err(worker::Error::RustError("companion management unavailable; update an older companion image first".into()));}
+                let detail=response.text().await.unwrap_or_default().replace(token,"[redacted]").chars().take(512).collect::<String>();
+                return Err(worker::Error::RustError(format!("companion management HTTP {status}: {detail}")));
+            }
+            response.json::<T>().await
+        };
+        glyph_server_core::traits::with_timeout(&WorkerRuntime,150_000,work).await
+            .ok_or_else(||HostError::Failed("companion management timed out; check its status before retrying an update".into()))?
+            .map_err(|e|HostError::Failed(format!("companion management failed: {e}")))
+    }
+}
+
+const SETTINGS_CACHE_KEY: &str = "admin:limits:v2";
 /// Each Cloudflare location re-reads D1 at most this often.
 const SETTINGS_CACHE_S: u64 = 30;
 
@@ -365,9 +393,22 @@ async fn saved_limits(env: &Env) -> Option<Limits> {
     struct Row { value: String }
     let row = db.prepare("SELECT value FROM server_settings WHERE key = 'limits'").first::<Row>(None).await;
     let limits = match row {
-        Ok(row) => row.and_then(|r| serde_json::from_str::<Limits>(&r.value).ok()),
-        // Table missing (migration not applied yet) or D1 down: defaults, uncached.
-        Err(_) => return None,
+        Ok(row) => row.map(|r| {
+            let decoded = (|| {
+                let mut value: serde_json::Value = serde_json::from_str(&r.value).ok()?;
+                // Old stored limits must not override an explicit environment gate.
+                let object = value.as_object_mut()?;
+                if !object.contains_key("require_account") {
+                    object.insert("require_account".into(),secret(env, "REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")).into());
+                }
+                serde_json::from_value::<Limits>(value).ok()
+            })();
+            decoded.unwrap_or_else(|| Limits { require_account: true, ..Default::default() })
+        }),
+        // Never reopen a protected API if its persisted access policy cannot be
+        // loaded. Retain the last policy, otherwise deny anonymous requests.
+        Err(_) => return LOCAL_LIMITS.with(|c| c.borrow().as_ref().and_then(|(_, l)| l.clone()))
+            .or_else(|| Some(Limits { require_account: true, ..Default::default() })),
     };
     LOCAL_LIMITS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, limits.clone())));
     glyph_server_core::cache::put_json(&cache, SETTINGS_CACHE_KEY, &limits, SETTINGS_CACHE_S).await;
@@ -384,6 +425,15 @@ impl AdminHost for WorkerHost {
         Capabilities { set_limits: self.db.is_some(), ..Capabilities::default() }
     }
 
+    async fn companion_status(&self) -> std::result::Result<glyph_server_core::admin::types::CompanionStatus,HostError> {
+        self.companion_call("/internal/status",false).await
+    }
+    async fn companion_update(&self, rdlp: bool, apply: bool) -> std::result::Result<glyph_server_core::admin::types::MaintenanceResponse,HostError> {
+        self.companion_call(match (rdlp,apply) {
+            (false,false)=>"/internal/update/check",(false,true)=>"/internal/update/apply",
+            (true,false)=>"/internal/r-dlp/check",(true,true)=>"/internal/r-dlp/apply",
+        },true).await
+    }
     async fn persist_limits(&self, l: &Limits) -> std::result::Result<(), HostError> {
         let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
         let value = serde_json::to_string(l).map_err(|_| HostError::Failed("could not encode limits".into()))?;

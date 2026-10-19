@@ -1,5 +1,21 @@
 # Self-hosting glyph-server
 
+## Quick start with the npm CLI
+
+```sh
+npm install --global glyph-server
+glyph setup cloudflare
+```
+
+This creates a separate deployment project using your own Cloudflare login,
+D1 database and optional R2 bucket. It includes the prebuilt Worker and migrations;
+Node.js 22+ is enough. Your config is `glyph-cloudflare/wrangler.json`.
+Use `glyph deploy --config glyph-cloudflare/wrangler.json` for later deployments.
+The checked-in `crates/glyph-server-worker/wrangler.toml` describes the maintainer's
+production instance; the setup wizard does not reuse its resource IDs or domains.
+See [the CLI guide](../npm/README.md) for versions, diagnostics and updates.
+
+
 This guide sets up your own Glyph server with accounts and library sync, on
 your own Cloudflare account and your own domain. Everything below uses free
 Cloudflare plans unless noted. The [README](../README.md) covers the music side
@@ -147,15 +163,15 @@ Full design: `docs/ACCOUNTS.md` in the app repository.
 The admin API (`/admin/v1/*`) is off until you set an admin password hash:
 
 ```
-glyph-server hash-password                 # asks for a password, prints a hash
+glyph hash-password                 # asks for a password, prints a hash
 npx wrangler secret put ADMIN_PASSWORD_HASH  # paste the hash
 ```
 
 The password itself is stored nowhere. Then, from any machine:
 
 ```
-glyph-server remote login https://api.example.com
-glyph-server remote status
+glyph remote login https://api.example.com
+glyph remote status
 ```
 
 The login keeps only a refresh token in the OS keychain. Admin logins are rate
@@ -170,11 +186,11 @@ fails with a CPU error there, it needs the Workers Paid plan.
 
 | Command | Effect |
 | --- | --- |
-| `glyph-server remote accounts default-limit` | show the default |
-| `glyph-server remote accounts default-limit 5` | set the default for every account without its own limit (1-100) |
-| `glyph-server remote accounts limit alice 10` | give `@alice` her own limit |
-| `glyph-server remote accounts limit alice default` | back to the default |
-| `glyph-server remote accounts show alice` | limit in force, whether it is her own, her devices |
+| `glyph remote accounts default-limit` | show the default |
+| `glyph remote accounts default-limit 5` | set the default for every account without its own limit (1-100) |
+| `glyph remote accounts limit alice 10` | give `@alice` her own limit |
+| `glyph remote accounts limit alice default` | back to the default |
+| `glyph remote accounts show alice` | limit in force, whether it is her own, her devices |
 
 Until you set one, the default is 5. It is stored in the D1 table `settings`,
 per-account limits in `users.device_limit` (0 = default), so changes apply at
@@ -184,9 +200,9 @@ and the pairing flow let the user remove a device first.
 
 ### Other limits
 
-`glyph-server remote limits` shows and changes the general limits, e.g.
-`glyph-server remote limits --rate 120 --import-pages 3`.
-`glyph-server remote companion off|on` switches the yt-dlp companion
+`glyph remote limits` shows and changes the general limits, e.g.
+`glyph remote limits --rate 120 --import-pages 3`.
+`glyph remote companion off|on` switches the yt-dlp companion
 (YouTube); while off, YouTube search is empty and YouTube audio answers 403.
 On the Worker, `--audio-days 15 --audio-max-gb 10` set how long and how much
 companion audio stays in R2 (oldest songs go first). The R2 lifecycle rule
@@ -252,9 +268,9 @@ account page. Accounts need the Worker with D1 for now.
 ## Optional shared server access
 
 A self-hosted server stays public by default. To require a separate shared bearer
-for app access, run `glyph-server access --config /path/to/server.toml` and enter
+for app access, run `glyph access --config /path/to/server.toml` and enter
 a random 32-256 character token twice. Only its SHA-256 hash is stored in the
-private config. Restart the server to apply. `glyph-server access --disable`
+private config. Restart the server to apply. `glyph access --disable`
 removes this requirement (environment overrides must also be removed).
 
 For Docker/scripts set `GLYPH_SERVER_BEARER` in the server environment. For a

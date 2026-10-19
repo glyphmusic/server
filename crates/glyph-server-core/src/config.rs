@@ -118,6 +118,8 @@ pub struct Config {
     pub server_bearer_hash: Option<String>,
     /// The host implements the streaming /v1/audio endpoint.
     pub proxy_audio: bool,
+    /// Require a live account session for /v1 API calls (login and health stay public).
+    pub require_account: bool,
     pub secrets: Secrets,
     pub server_version: String,
     /// Anonymous requests/minute; verified accounts get 4x, fixed IP ceiling 8x.
@@ -150,6 +152,7 @@ impl Config {
         Self {
             server_bearer_hash: None,
             proxy_audio: false,
+            require_account: false,
             secrets: secrets.normalized(),
             server_version: crate::SERVER_VERSION.to_string(),
             rate_limit_per_min: 60,

@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 // The app decodes AAC/Vorbis; selecting arbitrary WebM audio could return unsupported Opus.
 pub const AUDIO_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[acodec=vorbis]";
 
+/// A valid, ignorable MP4 free atom, appended only after successful encoding.
+/// Unknown-length HTTP streams may lose transport errors at proxy boundaries;
+/// require this trailer before publishing such a representation in R2.
+pub const VARIANT_COMPLETE_MARKER: &[u8] = b"\x00\x00\x00\x21freeglyph-variant-complete-v1";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioVariant { Low, Standard, High }

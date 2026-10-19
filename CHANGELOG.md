@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-10-19
+
+- Distribute the `glyph` CLI through the `glyph-server` npm package, with verified native downloads and a legacy command alias.
+- Add component version/check/update commands for CLI, server, companion and r-dlp, plus authenticated companion maintenance.
+- Ship the prebuilt Worker and migrations; add guided self-hosted Cloudflare setup and deployments using the owner's resources.
+- Support scoped Docker companion updates with pulled-image and health verification.
+- Make source/Docker/CI builds self-contained with a shared protocol snapshot.
+- Stream and coalesce encoded audio, reuse connections, move cache stats off the playback path and bound parallel resolution.
+- Add optional account-only API/media access while preserving login and refresh.
+
 ## 0.2.6 - 2026-10-19
 
 - Serve lyrics from the companion first (`POST /internal/lyrics`) and fall back to the Worker's own lookup, so LRCLIB's rate limit on data-centre addresses no longer breaks lyrics.

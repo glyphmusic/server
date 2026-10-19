@@ -58,6 +58,7 @@ impl AdminHost for NativeHost {
         }
         let mut cfg = load_file(&self.config_path, false).map_err(HostError::Failed)?;
         cfg.rate_limit_per_min = Some(l.rate_limit_per_min);
+        cfg.require_account = Some(l.require_account);
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
         cfg.import_max_pages = Some(l.import_max_pages);
         save(&self.config_path, &cfg).map_err(HostError::Failed)?;
@@ -81,6 +82,14 @@ impl AdminHost for NativeHost {
     async fn update_apply(&self) -> Result<UpdateApplyResponse, HostError> {
         update::apply(&self.update_repo).await.map_err(HostError::Failed)
     }
+    async fn companion_status(&self) -> Result<CompanionStatus,HostError> {
+        let file=load_file(&self.config_path,false).map_err(HostError::Failed)?;
+        let settings=crate::settings::Settings::resolve(file,None,self.config_path.clone());
+        Ok(crate::diagnostics::snapshot(&settings).await)
+    }
+    async fn companion_update(&self, rdlp: bool, apply: bool) -> Result<MaintenanceResponse,HostError> {
+        crate::diagnostics::maintenance(&self.update_repo,rdlp,apply).await.map_err(HostError::Failed)
+    }
 }
 
 #[cfg(test)]
@@ -100,17 +109,18 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(host.companion_flag.exists());
-        host.persist_limits(&Limits { rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(!host.companion_flag.exists());
         let cfg = load_file(&host.config_path, true).unwrap();
         assert_eq!(cfg.keys.youtube_api_key.as_deref(), Some("AIzaSECRET"));
         assert_eq!(cfg.rate_limit_per_min, Some(7));
+        assert_eq!(cfg.require_account,Some(false));
         // removing
         m.insert("youtube_api_key".to_string(), None);
         host.persist_keys(&m).await.unwrap();

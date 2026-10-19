@@ -24,7 +24,7 @@ async fn piece(bucket:&Bucket,key:&str,w:&Window)->Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub async fn cached(db:&D1Database,bucket:Bucket,id:&str,quality:AudioVariant,range:Option<&str>,head:bool,days:u32)->Result<Option<Response>> {
+pub async fn cached(ctx:&worker::Context,db:&D1Database,bucket:Bucket,id:&str,quality:AudioVariant,range:Option<&str>,head:bool,days:u32)->Result<Option<Response>> {
     #[derive(serde::Deserialize)]struct Row{manifest:String,created:u64}
     let row=db.prepare("SELECT manifest,created FROM audio_variants WHERE track_id=?1 AND quality=?2")
         .bind(&[s(id),s(quality.name())])?.first::<Row>(None).await?;
@@ -64,7 +64,7 @@ pub async fn cached(db:&D1Database,bucket:Bucket,id:&str,quality:AudioVariant,ra
     if start == 0 {
         let touch=db.prepare("UPDATE audio_cache SET hits=MIN(hits+1,2147483647),last_access=?1 WHERE state='ready' AND key IN(SELECT value FROM json_each(?2))")
             .bind(&[n(worker::Date::now().as_millis()),s(&keys_json)])?;
-        let _=touch.run().await;
+        ctx.wait_until(async move { let _=touch.run().await; });
     }
     let bucket=Rc::new(bucket);
     let remaining=futures::stream::iter(windows).then(move|w|{

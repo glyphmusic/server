@@ -44,6 +44,12 @@ pub trait AdminHost: MaybeSendSync {
     async fn update_apply(&self) -> Result<UpdateApplyResponse, HostError> {
         Err(HostError::Unsupported("updates are not managed by this server".into()))
     }
+    async fn companion_status(&self) -> Result<CompanionStatus, HostError> {
+        Err(HostError::Unsupported("no companion management configured".into()))
+    }
+    async fn companion_update(&self, _rdlp: bool, _apply: bool) -> Result<MaintenanceResponse, HostError> {
+        Err(HostError::Unsupported("no companion management configured".into()))
+    }
 }
 
 /// Used when no host is configured (tests, embedding).

@@ -30,6 +30,7 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     let rt: Arc<dyn Runtime> = Arc::new(TokioRuntime);
     let mut config = Config::new(s.secrets.clone());
     config.rate_limit_per_min = s.rate_limit_per_min;
+    config.require_account = s.require_account;
     config.youtube_daily_budget_units = s.youtube_daily_budget_units;
     // YouTube search runs through the local yt-dlp binary.
     config.ytdlp_path = crate::platform::resolve_ytdlp(s.ytdlp_path.as_deref());
@@ -237,7 +238,8 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
 
-    if path_only == "/internal/ytdlp" || path_only == "/internal/resolve" || path_only == "/internal/lyrics" || path_only.starts_with("/internal/audio/") {
+    if matches!(path_only.as_str(),"/internal/ytdlp"|"/internal/resolve"|"/internal/lyrics"|"/internal/status"
+        |"/internal/update/check"|"/internal/update/apply"|"/internal/r-dlp/check"|"/internal/r-dlp/apply") || path_only.starts_with("/internal/audio/") {
         return companion(&st.server, &path_only, &headers, method, &body).await;
     }
     if let Err(resp) = st.server.check_access(&Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local)) {
@@ -383,13 +385,14 @@ async fn retry_stale_youtube(
 /// The permit moves into the body only on success, so a retry can reuse it.
 async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
     // Fetch on the extraction host: YouTube signatures can be bound to its IP.
-    let client = match reqwest::Client::builder()
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> = std::sync::OnceLock::new();
+    let client = match CLIENT.get_or_init(|| reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() < 5 && attempt.url().scheme() == "https" && attempt.url().host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) { attempt.follow() } else { attempt.stop() }
-        })).build()
+        })).build())
     {
         Ok(c) => c,
         Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "audio client unavailable"),
@@ -464,10 +467,34 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().filter(|t| t.len() >= 32);
     let Some(token) = token else { return plain(StatusCode::NOT_FOUND, "not found") };
     let expected = format!("Bearer {token}");
-    let supplied = headers.iter().find(|(k,_)| k == "authorization").map(|(_,v)| v.as_bytes()).unwrap_or_default();
-    let mut diff = expected.len() ^ supplied.len();
+    let mut auth = headers.iter().filter(|(k,_)| k == "authorization");
+    let supplied = auth.next().map(|(_,v)| v.as_bytes()).unwrap_or_default();
+    let mut diff = (expected.len() ^ supplied.len()) | usize::from(auth.next().is_some());
     for (i,b) in expected.bytes().enumerate() { diff |= usize::from(b ^ supplied.get(i).copied().unwrap_or(0)); }
     if diff != 0 { return plain(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    // Management remains reachable while extraction is paused. Credentials
+    // above are always checked before probing tools or installing anything.
+    if path == "/internal/status" {
+        if method != Method::Get {return plain(StatusCode::METHOD_NOT_ALLOWED,"GET required");}
+        let svc=server.services();
+        let status=crate::diagnostics::snapshot_with(svc.config.ytdlp_path.as_deref(),!companion_disabled()).await;
+        return Response::builder().header("content-type","application/json").header("cache-control","no-store")
+            .body(Body::from(serde_json::to_vec(&status).unwrap())).unwrap();
+    }
+    if let Some((rdlp,apply)) = match path {
+        "/internal/update/check" => Some((false,false)), "/internal/update/apply" => Some((false,true)),
+        "/internal/r-dlp/check" => Some((true,false)), "/internal/r-dlp/apply" => Some((true,true)), _ => None,
+    } {
+        if method != Method::Post {return plain(StatusCode::METHOD_NOT_ALLOWED,"POST required");}
+        static MANAGEMENT: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+        let Ok(_permit)=MANAGEMENT.get_or_init(||tokio::sync::Semaphore::new(1)).try_acquire() else {return plain(StatusCode::TOO_MANY_REQUESTS,"maintenance already running");};
+        let settings=crate::settings::Settings::resolve(Default::default(),None,crate::settings::default_config_path());
+        return match crate::diagnostics::maintenance(&settings.update_repo,rdlp,apply).await {
+            Ok(result) => Response::builder().header("content-type","application/json").header("cache-control","no-store")
+                .body(Body::from(serde_json::to_vec(&result).unwrap())).unwrap(),
+            Err(error) => plain(StatusCode::BAD_GATEWAY,&error),
+        };
+    }
     // Switched off with `glyph-server companion off` (only the Worker, which
     // holds the token, learns about it).
     if companion_disabled() { return plain(StatusCode::FORBIDDEN, "companion disabled"); }
@@ -563,89 +590,8 @@ async fn slice_variant(response:Response,range:Option<&str>) -> Response {
     out
 }
 
-/// The authenticated Worker selects a fixed, validated bitrate. Local files
-/// allow MP4 fast-start, so a client need not fetch the tail to begin playback.
-async fn companion_variant(svc: &Arc<Services>, id: &str, variant: glyph_server_core::media::AudioVariant, permit: tokio::sync::OwnedSemaphorePermit, background: bool) -> Response {
-    let cache_key=format!("{id}/{}",variant.name());
-    {
-        let mut cache=variant_cache().lock().unwrap();
-        cache.retain(|(_,at,_)|at.elapsed()<std::time::Duration::from_secs(600));
-        if let Some((_,_,bytes))=cache.iter().find(|(key,_,_)|key==&cache_key) {return variant_response(bytes.clone());}
-    }
-    static BACKGROUND: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    let _background = if background {
-        match BACKGROUND.get_or_init(|| tokio::sync::Semaphore::new(2)).try_acquire() {
-            Ok(permit) => Some(permit),
-            Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS, "background encoder busy"),
-        }
-    } else { None };
-    static ENCODERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    let Ok(_encoder) = ENCODERS.get_or_init(|| tokio::sync::Semaphore::new(3)).try_acquire() else {
-        return plain(StatusCode::TOO_MANY_REQUESTS, "audio encoder busy; retry later");
-    };
-    let url = match audio_url(svc, glyph_protocol::ProviderId::YouTube, id).await {
-        Ok(url) => url, Err(_) => return plain(StatusCode::BAD_GATEWAY,"audio lookup failed"),
-    };
-    let mut slot = Some(permit);
-    let response = fetch_upstream_audio(&url, None, &mut slot).await;
-    let response = retry_stale_youtube(svc, id, None, response, &mut slot).await;
-    if response.status() != StatusCode::OK { return response; }
-    let bytes = match axum::body::to_bytes(response.into_body(), MAX_AUDIO_BYTES as usize).await {
-        Ok(bytes) => bytes, Err(_) => return plain(StatusCode::BAD_GATEWAY,"audio source exceeds size limit"),
-    };
-    // Force a known demuxer rather than allowing playlist auto-detection to
-    // introduce arbitrary network URLs or local file references.
-    let input_format = if bytes.get(4..8) == Some(b"ftyp") { "mov" }
-        else if bytes.starts_with(b"OggS") { "ogg" }
-        else if bytes.starts_with(&[0x1a,0x45,0xdf,0xa3]) { "matroska" }
-        else { return plain(StatusCode::BAD_GATEWAY,"unsupported audio container"); };
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir, Err(_) => return plain(StatusCode::SERVICE_UNAVAILABLE,"audio workspace unavailable"),
-    };
-    let input = dir.path().join("source.audio");
-    let output = dir.path().join("variant.m4a");
-    if tokio::fs::write(&input, &bytes).await.is_err() { return plain(StatusCode::SERVICE_UNAVAILABLE,"audio workspace unavailable"); }
-    let ffmpeg = std::env::var("GLYPH_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
-    let mut command = tokio::process::Command::new(ffmpeg);
-    command.args(["-nostdin","-hide_banner","-loglevel","error","-y","-protocol_whitelist","file,pipe","-f",input_format,"-i"])
-        .arg(&input).args(["-map","0:a:0","-vn"]);
-    if variant == glyph_server_core::media::AudioVariant::High && input_format == "mov" {
-        // Keep the best source AAC rather than introducing another lossy encode.
-        command.args(["-c:a","copy"]);
-    } else {
-        command.args(["-ac","2","-ar","44100","-c:a","aac","-b:a"])
-            .arg(format!("{}k",variant.bitrate()));
-    }
-    command.args(["-threads","1","-movflags","+faststart","-fs","33488896"])
-        .arg(&output).kill_on_drop(true)
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let mut child = match command.spawn() {
-        Ok(child) => child, Err(_) => return plain(StatusCode::SERVICE_UNAVAILABLE,"ffmpeg is required for audio quality variants"),
-    };
-    match tokio::time::timeout(std::time::Duration::from_secs(45),child.wait()).await {
-        Ok(Ok(status)) if status.success() => {},
-        _ => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return plain(StatusCode::BAD_GATEWAY,"audio encoding failed or timed out");
-        }
-    }
-    let size = tokio::fs::metadata(&output).await.map(|m|m.len()).unwrap_or(0);
-    // ffmpeg's size cap may stop a long input early. Never advertise that
-    // truncated output as a complete song; leave margin for its final MP4 atoms.
-    if size == 0 || size >= 33_480_000 { return plain(StatusCode::PAYLOAD_TOO_LARGE,"encoded audio exceeds size limit"); }
-    let bytes = match tokio::fs::read(&output).await {
-        Ok(bytes) => bytes, Err(_) => return plain(StatusCode::BAD_GATEWAY,"encoded audio unavailable"),
-    };
-    let bytes=Bytes::from(bytes);
-    {
-        let mut cache=variant_cache().lock().unwrap();
-        cache.retain(|(key,_,_)|key!=&cache_key);
-        while cache.len()>=8 || cache.iter().map(|(_,_,v)|v.len()).sum::<usize>()+bytes.len()>64*1024*1024 {if cache.pop_front().is_none(){break;}}
-        cache.push_back((cache_key,std::time::Instant::now(),bytes.clone()));
-    }
-    variant_response(bytes)
-}
+mod variant_stream;
+use variant_stream::companion_variant;
 
 fn plain(status: StatusCode, msg: &str) -> Response {
     Response::builder().status(status).body(Body::from(msg.to_string())).unwrap()
@@ -719,6 +665,10 @@ mod tests {
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::OK);
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
+        for path in ["/internal/status","/internal/update/apply","/internal/r-dlp/apply"] {
+            let request=axum::http::Request::builder().uri(path).method("POST").body(Body::empty()).unwrap();
+            assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED,"{path}");
+        }
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
 
@@ -738,6 +688,11 @@ mod tests {
         std::fs::write(&flag, b"off\n").unwrap();
         let authed = || axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),authed()).await.status(),StatusCode::FORBIDDEN);
+        let request=axum::http::Request::builder().uri("/internal/status").header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap();
+        let response=handle(State(state.clone()),ConnectInfo(peer),request).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        let status: glyph_server_core::admin::types::CompanionStatus=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
+        assert!(!status.enabled && !status.ready,"status remains reachable while extraction is paused");
         std::fs::remove_file(&flag).unwrap();
         assert_eq!(handle(State(state),ConnectInfo(peer),authed()).await.status(),StatusCode::BAD_REQUEST);
     }

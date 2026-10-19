@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["release-protocol"]
 members = [
     "crates/glyph-server-core",
     "crates/glyph-server-worker",
@@ -7,16 +8,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/glyphmusic/server"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Shared wire types. For releases pin the tag of the main repo instead:
-#   glyph-protocol = { git = "https://github.com/glyphmusic/desktop", tag = "protocol-v1" }
-glyph-protocol = { path = "../glyph/crates/glyph-protocol" }
+# Shared wire snapshot ships with the server, so a source clone builds alone.
+# Refresh from the desktop checkout with node scripts/snapshot-protocol.mjs.
+glyph-protocol = { path = "release-protocol" }
 glyph-server-core = { path = "crates/glyph-server-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

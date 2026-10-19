@@ -1,8 +1,12 @@
-# Glyph Server 0.2.6
+# Glyph CLI / Server 0.3.0
 
-- Serve lyrics from the companion first (`POST /internal/lyrics`) and fall back to the Worker's own lookup, so LRCLIB's rate limit on data-centre addresses no longer breaks lyrics.
-- Answer `/v1/lyrics` with "no lyrics" (404) when the upstream is rate-limited or down, instead of a 502/503; a failed lookup is retried after five minutes, a confirmed miss after an hour.
-- Answer `/v1/similar` with an empty list (200) when Last.fm is not configured or fails, instead of a 503/502.
-- Build against desktop protocol v0.2.4.
+- Install with `npm install --global glyph-server`; run `glyph help`.
+- Inspect `glyph version all`, `glyph check companion` and `glyph check r-dlp`.
+- Update individual components, or pull/recreate/verify your Docker companion with `--compose-dir`.
+- Self-host with `glyph setup cloudflare`: prebuilt Worker, migrations and your own resources. R2 is optional; Rust and a desktop checkout are not needed.
+- Source builds include the protocol snapshot and Docker builds use matching builder/runtime distributions.
+- Include streaming audio performance improvements and optional account-only API access.
 
-Cloudflare deployments require D1 migrations through 0013_audio_variant_jobs.sql.
+Native binary replacement reports when a restart remains necessary. Docker and npm-managed processes use their deployment/package update path. Existing companions need this server release before the new management endpoints are available.
+
+Cloudflare requires D1 migrations through 0013_audio_variant_jobs.sql. The npm tarball and native archives are attached with checksums; npm publication is a separate authenticated release step.

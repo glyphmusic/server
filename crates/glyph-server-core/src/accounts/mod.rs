@@ -348,7 +348,9 @@ impl Accounts {
 
     /// Only a live server-side session grants higher quotas or priority.
     pub(crate) async fn abuse_identity(&self, svc: &Services, req: &Request) -> Option<(String, String)> {
-        let token = req.header("authorization")?.strip_prefix("Bearer ")?.trim();
+        let mut headers = req.headers.iter().filter(|(key,_)| key.eq_ignore_ascii_case("authorization"));
+        let token = headers.next()?.1.strip_prefix("Bearer ")?.trim();
+        if headers.next().is_some() { return None; }
         if token.len() > 128 { return None; }
         let device = self.store.device_by_access(&hash(token)).await.ok()??;
         if device.access_exp <= svc.rt.now_ms() { return None; }

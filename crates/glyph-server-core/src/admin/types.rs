@@ -114,6 +114,9 @@ pub struct CacheClearResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
+    /// Only signed-in account sessions may use the app API. Off by default.
+    #[serde(default)]
+    pub require_account: bool,
     pub rate_limit_per_min: u32,
     pub youtube_daily_budget_units: u64,
     pub import_max_pages: u32,
@@ -129,6 +132,22 @@ pub struct Limits {
     /// Independent D1 database ceiling in decimal MB (Worker only).
     #[serde(default = "d1_mb")]
     pub d1_max_mb: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        let config = crate::Config::new(Default::default());
+        Self {
+            require_account: config.require_account,
+            rate_limit_per_min: config.rate_limit_per_min,
+            youtube_daily_budget_units: config.youtube_daily_budget_units,
+            import_max_pages: config.import_max_pages,
+            companion_enabled: config.companion_enabled,
+            audio_cache_days: config.audio_cache_days,
+            audio_cache_max_gb: config.audio_cache_max_gb,
+            d1_max_mb: config.d1_max_mb,
+        }
+    }
 }
 
 fn d1_mb() -> u32 { 500 }
@@ -198,4 +217,31 @@ pub struct UpdateInfo {
 pub struct UpdateApplyResponse {
     pub message: String,
     pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompanionStatus {
+    /// Version of the companion's running Glyph process, not the Docker image tag.
+    pub version: String,
+    pub target: String,
+    pub enabled: bool,
+    pub ready: bool,
+    pub r_dlp: ToolStatus,
+    pub yt_dlp: ToolStatus,
+    pub ffmpeg: ToolStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceResponse {
+    pub info: UpdateInfo,
+    pub applied: bool,
+    pub restart_required: bool,
+    pub message: String,
 }

@@ -1,4 +1,4 @@
-//! `glyph-server setup`: interactive wizard (or `--non-interactive` for
+//! `glyph setup`: interactive wizard (or `--non-interactive` for
 //! scripts/Docker) that writes `server.toml`.
 
 use crate::settings::{self, FileConfig, FileKeys, FileTls};
@@ -193,7 +193,7 @@ pub fn answers_from_env(args: &SetupArgs, env: &dyn Fn(&str) -> Option<String>) 
     }
     let admin_hash = if let Some(h) = env("GLYPH_ADMIN_PASSWORD_HASH") {
         if !auth::is_valid_hash(&h) {
-            return Err("GLYPH_ADMIN_PASSWORD_HASH is not an Argon2id hash (create one with `glyph-server hash-password`)".into());
+            return Err("GLYPH_ADMIN_PASSWORD_HASH is not an Argon2id hash (create one with `glyph hash-password`)".into());
         }
         Some(h)
     } else if let Some(f) = &args.admin_password_file {
@@ -219,14 +219,14 @@ pub fn answers_from_env(args: &SetupArgs, env: &dyn Fn(&str) -> Option<String>) 
 }
 
 fn prompt_err(e: dialoguer::Error) -> String {
-    format!("input cancelled or not possible here ({e}). Without a terminal, use `glyph-server setup --non-interactive`.")
+    format!("input cancelled or not possible here ({e}). Without a terminal, use `glyph setup --non-interactive`.")
 }
 
 /// Ask for the keys of every provider the user wants, testing each live.
 /// `secrets` is updated in place. Shared with `cloudflare setup`.
 pub async fn ask_provider_keys(http: &dyn HttpClient, secrets: &mut Secrets, run_tests: bool) -> Result<(), String> {
     println!("\nProviders. Audius, Deezer, Internet Archive and LRCLIB need no key and are always on.");
-    println!("The others are optional: press Enter to skip any you do not have; you can add them later\n(`glyph-server remote keys set <provider>`).");
+    println!("The others are optional: press Enter to skip any you do not have; you can add them later\n(`glyph remote keys set <provider>`).");
     for help in PROVIDER_HELP.iter() {
         let name = help.id.display_name();
         println!("\n{name}: {}\n  Get it here: {}", help.what, help.url);
@@ -279,7 +279,7 @@ pub async fn ask_provider_keys(http: &dyn HttpClient, secrets: &mut Secrets, run
 }
 
 pub fn ask_admin_password() -> Result<Option<String>, String> {
-    println!("\nRemote administration lets you manage this server from any computer with `glyph-server remote ...`.");
+    println!("\nRemote administration lets you manage this server from any computer with `glyph remote ...`.");
     if !Confirm::new().with_prompt("Turn it on? (recommended)").default(true).interact().map_err(prompt_err)? {
         return Ok(None);
     }
@@ -324,7 +324,7 @@ pub async fn run(config_path: PathBuf, args: SetupArgs, http: &dyn HttpClient) -
         a
     } else {
         if !std::io::stdin().is_terminal() {
-            return Err("this is not an interactive terminal; use `glyph-server setup --non-interactive`".into());
+            return Err("this is not an interactive terminal; use `glyph setup --non-interactive`".into());
         }
         interactive(http, &args).await?
     };
@@ -340,16 +340,16 @@ pub async fn run(config_path: PathBuf, args: SetupArgs, http: &dyn HttpClient) -
     println!("\nSaved {} (readable only by you).", abs.display());
     println!("\nNext steps:");
     println!("  1. Start the server:        glyph-server --config {}", abs.display());
-    println!("  2. Keep it running forever: glyph-server service install --config {}", abs.display());
-    println!("  3. Check everything:        glyph-server doctor --config {}", abs.display());
+    println!("  2. Keep it running forever: glyph service install --config {}", abs.display());
+    println!("  3. Check everything:        glyph doctor --config {}", abs.display());
     if cfg.admin.password_hash.is_some() {
-        println!("  4. Manage it remotely:      glyph-server remote login <your server URL>");
+        println!("  4. Manage it remotely:      glyph remote login <your server URL>");
     }
     Ok(())
 }
 
 async fn interactive(http: &dyn HttpClient, args: &SetupArgs) -> Result<Answers, String> {
-    println!("Welcome to glyph-server setup. Press Enter to accept the suggestion in [brackets].\n");
+    println!("Welcome to glyph setup. Press Enter to accept the suggestion in [brackets].\n");
     let modes = [
         "Cloudflare Tunnel (recommended: no router settings, free HTTPS)",
         "Built-in HTTPS with my own domain (Let's Encrypt, needs ports 80/443 open)",
@@ -407,7 +407,7 @@ async fn interactive(http: &dyn HttpClient, args: &SetupArgs) -> Result<Answers,
     Ok(Answers { listen: Some(listen), public_url, mode, tls_domain, tls_email, admin_hash, secrets })
 }
 
-/// `glyph-server hash-password`: print an Argon2id hash (for Docker, Cloudflare secrets).
+/// `glyph hash-password`: print an Argon2id hash (for Docker, Cloudflare secrets).
 pub fn hash_password_cli(from_env: Option<String>) -> Result<String, String> {
     let pw = match from_env {
         Some(p) => p,

@@ -1,0 +1,16 @@
+{
+  "name": "glyph-server",
+  "version": "0.3.0",
+  "description": "Glyph CLI: install, diagnose and manage Glyph servers and companions",
+  "license": "MIT OR Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/glyphmusic/server.git" },
+  "engines": { "node": ">=22" },
+  "bin": { "glyph": "bin/glyph.cjs", "glyph-server": "bin/glyph.cjs" },
+  "files": ["bin/", "lib/", "worker/", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "scripts": {
+    "postinstall": "node bin/install.cjs",
+    "test": "node --test test/*.test.cjs",
+    "prepack": "node bin/prepack.cjs"
+  },
+  "publishConfig": { "access": "public" }
+}

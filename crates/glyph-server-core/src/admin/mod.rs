@@ -43,6 +43,11 @@ enum R {
     Logs,
     UpdateCheck,
     UpdateApply,
+    CompanionStatus,
+    CompanionCheck,
+    CompanionApply,
+    RdlpCheck,
+    RdlpApply,
     AccountDefaultsGet,
     AccountDefaultsPut,
     AccountGet,
@@ -66,6 +71,11 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "logs" => (R::Logs, Get),
         "update/check" => (R::UpdateCheck, Post),
         "update/apply" => (R::UpdateApply, Post),
+        "companion/status" => (R::CompanionStatus, Get),
+        "companion/update/check" => (R::CompanionCheck, Post),
+        "companion/update/apply" => (R::CompanionApply, Post),
+        "companion/r-dlp/check" => (R::RdlpCheck, Post),
+        "companion/r-dlp/apply" => (R::RdlpApply, Post),
         "account-defaults" if m == Put => (R::AccountDefaultsPut, Put),
         "account-defaults" => (R::AccountDefaultsGet, Get),
         s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
@@ -94,6 +104,7 @@ fn limited(code: &str, msg: &str, retry: u64) -> ApiErr {
 
 fn limits_of(svc: &Services) -> Limits {
     Limits {
+        require_account: svc.config.require_account,
         rate_limit_per_min: svc.config.rate_limit_per_min,
         youtube_daily_budget_units: svc.config.youtube_daily_budget_units,
         import_max_pages: svc.config.import_max_pages,
@@ -241,7 +252,13 @@ impl Server {
             R::CacheClear => Ok(Response::json(200, &CacheClearResponse { cleared: svc.cache.clear().await })),
             R::LimitsGet => Ok(Response::json(200, &limits_of(svc))),
             R::LimitsPut => {
-                let l: Limits = parse_body(&req)?;
+                let mut l: Limits = parse_body(&req)?;
+                // Older admin clients must not silently reopen a protected API.
+                let body: serde_json::Value = parse_body(&req)?;
+                if body.get("require_account").is_none() { l.require_account = svc.config.require_account; }
+                if l.require_account && self.accounts.is_none() {
+                    return Err(ApiErr::bad_request("require_account needs an enabled account backend"));
+                }
                 if !(1..=10_000).contains(&l.rate_limit_per_min) {
                     return Err(ApiErr::bad_request("rate_limit_per_min must be between 1 and 10000"));
                 }
@@ -262,6 +279,7 @@ impl Server {
                 }
                 self.host.persist_limits(&l).await.map_err(host_err)?;
                 self.update_config(|c| {
+                    c.require_account = l.require_account;
                     c.rate_limit_per_min = l.rate_limit_per_min;
                     c.youtube_daily_budget_units = l.youtube_daily_budget_units;
                     c.import_max_pages = l.import_max_pages;
@@ -277,6 +295,9 @@ impl Server {
                 let after = req.query.get("after").and_then(|v| v.parse::<u64>().ok());
                 Ok(Response::json(200, &self.host.logs(n, after).await.map_err(host_err)?))
             }
+            R::CompanionStatus => Ok(Response::json(200, &self.host.companion_status().await.map_err(host_err)?)),
+            R::CompanionCheck | R::CompanionApply | R::RdlpCheck | R::RdlpApply => Ok(Response::json(200,
+                &self.host.companion_update(matches!(route,R::RdlpCheck|R::RdlpApply), matches!(route,R::CompanionApply|R::RdlpApply)).await.map_err(host_err)?)),
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
             R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountGet | R::AccountPut => {

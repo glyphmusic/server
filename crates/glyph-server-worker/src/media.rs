@@ -140,7 +140,7 @@ pub async fn handle(
             Some(raw) => {
                 let Some(quality)=media::AudioVariant::parse(raw) else { return Response::error("invalid audio quality",400); };
                 if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
-                    match super::variants::cached(&db,bucket,id,quality,range.as_deref(),req.method()==worker::Method::Head,svc.config.audio_cache_days).await {
+                    match super::variants::cached(ctx,&db,bucket,id,quality,range.as_deref(),req.method()==worker::Method::Head,svc.config.audio_cache_days).await {
                         Ok(Some(hit)) => return Ok(hit),
                         Ok(None) => {},
                         Err(_) => worker::console_error!("audio chunk cache lookup failed; using companion"),
@@ -255,7 +255,10 @@ pub async fn handle(
             // Older than `audio_cache_days`: fetch again (and replace it).
             let age_ms = (worker::Date::now().as_millis()).saturating_sub(obj.uploaded().as_millis());
             if age_ms <= max_age_ms {
-            if let Ok(db) = env.d1("GLYPH_DB") { super::audio_cache::touch(&db, k).await; }
+            if let Ok(db) = env.d1("GLYPH_DB") {
+                let key = k.clone();
+                ctx.wait_until(async move { super::audio_cache::touch(&db, &key).await; });
+            }
             let content_type = obj.http_metadata().content_type.unwrap_or_else(|| "audio/mp4".into());
             let size = obj.size();
             if let Some(body) = obj.body() {
@@ -388,7 +391,7 @@ pub async fn handle(
         });
     }
     if let Some((id,quality))=variant {
-        if length.is_some_and(|n|n>0 && n<=MAX_CACHE_BYTES)
+        if length.is_none_or(|n|n>0 && n<=MAX_CACHE_BYTES)
             && (quality != media::AudioVariant::High || content_type.starts_with("audio/mp4")) {
             if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
                 let mut copy=full.cloned()?;
@@ -396,7 +399,8 @@ pub async fn handle(
                 let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
                 ctx.wait_until(async move {
                     if let Ok(bytes)=copy.bytes().await {
-                        if Some(bytes.len() as u64)!=length{return;}
+                        if bytes.is_empty() || bytes.len() as u64 > MAX_CACHE_BYTES || length.is_some_and(|n| n != bytes.len() as u64){return;}
+                        if length.is_none() && !bytes.ends_with(media::VARIANT_COMPLETE_MARKER) { return; }
                         if super::variants::store(&db,&bucket,&id,quality,bytes,days,cap,None).await.is_err(){
                             worker::console_error!("audio variant caching failed; bytes remain reserved");
                         }

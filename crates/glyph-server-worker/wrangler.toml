@@ -1,4 +1,6 @@
 name = "glyph-server"
+# Optional: set REQUIRE_ACCOUNT="true" in vars (or use remote limits
+# --require-account true). Requires GLYPH_DB and PUBLIC_ORIGIN for accounts.
 main = "build/worker/shim.mjs"
 compatibility_date = "2025-01-01"
 
