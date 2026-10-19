@@ -1,5 +1,6 @@
 //! Three independent extractors: different songs run in parallel, while each
-//! process reuses Python imports, HTTP sessions and YouTube extractor state.
+//! process reuses HTTP sessions and extractor state. GLYPH_RDLP_PATH opts in
+//! to native r-dlp; the command runner retains its yt-dlp fallback.
 use glyph_server_core::CommandError;
 use std::sync::{atomic::{AtomicUsize, Ordering}, OnceLock};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin, ChildStdout}, sync::Mutex};
@@ -27,9 +28,17 @@ struct Worker {
 
 impl Worker {
     async fn start(program: &str) -> Result<Self, CommandError> {
-        let python = std::env::var("GLYPH_PYTHON_PATH").unwrap_or_else(|_| "python3".into());
-        let mut child = tokio::process::Command::new(python)
-            .args(["-u", "-c", include_str!("ytdlp_worker.py"), program])
+        let mut command = if let Some(path) = std::env::var("GLYPH_RDLP_PATH").ok().filter(|p| !p.trim().is_empty()) {
+            let mut command = tokio::process::Command::new(path);
+            command.arg("serve");
+            command
+        } else {
+            let python = std::env::var("GLYPH_PYTHON_PATH").unwrap_or_else(|_| "python3".into());
+            let mut command = tokio::process::Command::new(python);
+            command.args(["-u", "-c", include_str!("ytdlp_worker.py"), program]);
+            command
+        };
+        let mut child = command
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()).kill_on_drop(true)
             .spawn().map_err(|_| CommandError::Unavailable)?;
