@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-10-20
+
+- Restyle the AI assistant (MCP) sign-in page to match the desktop app.
+
 ## 0.4.0 - 2026-10-20
 
 - `/v1/import/spotify` also reads SoundCloud links (sets, a profile's likes or tracks, single songs) with the server's SoundCloud key, so the app's "Transfer music" needs no key of its own.

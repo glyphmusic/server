@@ -67,7 +67,7 @@ test('installer rejects altered release bytes before writing any executable',asy
   const previous={local:process.env.LOCALAPPDATA,cache:process.env.XDG_CACHE_HOME,fetch:global.fetch};
   process.env.LOCALAPPDATA=dir;process.env.XDG_CACHE_HOME=dir;
   global.fetch=async url=>new Response(String(url).endsWith('SHA256SUMS.txt')
-    ? `${'a'.repeat(64)}  glyph-server-0.4.0-${target()}.${process.platform==='win32'?'zip':'tar.gz'}\n`:'tampered');
+    ? `${'a'.repeat(64)}  glyph-server-0.4.1-${target()}.${process.platform==='win32'?'zip':'tar.gz'}\n`:'tampered');
   try {await assert.rejects(install(),/SHA-256 mismatch/);assert.equal(fs.existsSync(executable()),false);}
   finally {
     global.fetch=previous.fetch;

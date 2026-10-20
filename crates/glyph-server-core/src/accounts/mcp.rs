@@ -433,10 +433,10 @@ fn authorize_page(auth: Option<(&str, &str, &str)>, error: &str) -> Response {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
     let body = match auth {
         Some((id, client, code)) => format!(
-            r#"<h1>Connect {client} to Glyph</h1>
-<p>{client} wants to control Glyph for you: playback, queue, playlists and likes.</p>
-<form id="f"><label>Your Glyph account<input id="h" placeholder="@handle" autocomplete="username" required></label><button>Continue</button></form>
-<div id="wait" hidden><p>Now confirm in the Glyph app on a signed-in device. It shows the same code:</p><p class="code">{code}</p><p class="muted">Turn on Settings › Integrations › AI assistants › Through the server if nothing appears.</p></div>
+            r#"<h1>Connect {client}</h1>
+<p class="sub">{client} wants to control Glyph for you: playback, queue, playlists and likes.</p>
+<form id="f"><label for="h">Your Glyph account</label><input id="h" placeholder="@handle" autocomplete="username" autofocus required><div class="row"><button>Continue</button></div></form>
+<div id="wait" hidden><p class="sub">Confirm in the Glyph app on a signed-in device. It shows the same code:</p><div class="code">{code}</div><p class="muted">Nothing appears? Turn on Settings › Integrations › AI assistants › Through the server.</p></div>
 <p id="msg" class="muted"></p>
 <script>
 const id={id:?};const msg=document.getElementById('msg');
@@ -454,11 +454,11 @@ async function poll(){{const r=await fetch('/oauth/authorize/poll?id='+id);const
             code = esc(code),
             id = id,
         ),
-        None => format!("<h1>Glyph</h1><p>{}</p>", esc(error)),
+        None => format!("<h1>Something went wrong</h1><p class=\"sub\">{}</p>", esc(error)),
     };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glyph · Connect an assistant</title>
-<style>body{{background:#0b0b0d;color:#eee;font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}}main{{max-width:420px;width:100%}}h1{{font-size:22px}}input{{display:block;width:100%;box-sizing:border-box;margin:8px 0 12px;padding:10px 12px;border-radius:8px;border:1px solid #333;background:#151518;color:#fff;font-size:16px}}button{{padding:10px 16px;border-radius:8px;border:0;background:#fff;color:#000;font-weight:600;cursor:pointer}}.code{{font:700 28px ui-monospace,monospace;letter-spacing:2px;color:#ff5fa2}}.muted{{color:#999;font-size:14px}}label{{font-size:14px;color:#bbb}}</style></head><body><main>{body}</main></body></html>"#
+<style>*{{box-sizing:border-box}}body{{background:#09090b;color:#f2f2f2;font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}}main{{width:100%;max-width:460px;padding:24px;border-radius:12px;background:#171717;display:flex;flex-direction:column;gap:18px}}.logo{{font:700 15px "JetBrains Mono",ui-monospace,monospace;color:#ff5fa2}}h1{{margin:0;font-size:20px;font-weight:700;color:rgba(255,255,255,.95)}}p{{margin:0}}.sub{{color:rgba(255,255,255,.7)}}form,#wait{{display:flex;flex-direction:column;gap:8px}}[hidden]{{display:none!important}}label{{font-size:13px;color:rgba(255,255,255,.55)}}input{{width:100%;height:40px;padding:0 12px;border-radius:8px;border:1px solid transparent;background:rgba(255,255,255,.07);color:#fff;font:inherit;font-size:14px;outline:none}}input:focus{{border-color:rgba(255,255,255,.2)}}input::placeholder{{color:rgba(255,255,255,.35)}}.row{{display:flex;justify-content:flex-end;margin-top:10px}}button{{height:40px;padding:0 24px;border-radius:8px;border:0;background:#fff;color:#000;font:inherit;font-weight:600;cursor:pointer}}button:hover{{background:rgba(255,255,255,.88)}}.code{{height:64px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(255,255,255,.07);font:700 26px "JetBrains Mono",ui-monospace,monospace;letter-spacing:2px;color:#ff5fa2}}.muted{{color:rgba(255,255,255,.45);font-size:13px}}#msg:empty{{display:none}}</style></head><body><main><div class="logo">glyph</div>{body}</main></body></html>"#
     );
     Response {
         status: 200,
