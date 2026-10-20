@@ -1,5 +1,5 @@
 // The Glyph note in ASCII, as in the app's splash (src/ui/splash.rs in
-// glyphmusic/desktop): characters stream in from the edges in curved
+// glyphmusic/apps): characters stream in from the edges in curved
 // currents and assemble the note; then a few characters keep flickering.
 const NOTE_ART = [
   "                         ..+.. ",

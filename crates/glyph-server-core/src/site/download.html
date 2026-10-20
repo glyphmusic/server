@@ -70,14 +70,14 @@ footer a { color: var(--dim); }
   <div class="links">
     <a href="/#features">features</a>
     <a href="https://docs.glyph.my">docs</a>
-    <a href="https://github.com/glyphmusic/desktop">github</a>
+    <a href="https://github.com/glyphmusic/apps">github</a>
   </div>
 </nav>
 
 <main>
   <h1>download glyph</h1>
   <p class="ver" id="ver">looking up the latest release...</p>
-  <div class="main-dl"><a class="act" id="dl-main" href="https://github.com/glyphmusic/desktop/releases/latest">download</a></div>
+  <div class="main-dl"><a class="act" id="dl-main" href="https://github.com/glyphmusic/apps/releases/latest">download</a></div>
   <p class="status" id="status" aria-live="polite"></p>
 
   <pre class="rule" data-rule="all platforms"></pre>
@@ -92,7 +92,7 @@ footer a { color: var(--dim); }
 
 <footer>
   <span>glyph · mit / apache-2.0</span>
-  <span><a href="https://github.com/glyphmusic/desktop/releases">all releases</a></span>
+  <span><a href="https://github.com/glyphmusic/apps/releases">all releases</a></span>
 </footer>
 </div>
 
@@ -107,7 +107,7 @@ document.querySelectorAll("[data-rule]").forEach(el => {
 // updater). The links point straight at the files, so the browser downloads
 // them and the page stays open.
 (async () => {
-  const REPO = "glyphmusic/desktop";
+  const REPO = "glyphmusic/apps";
   const PLATS = [
     { os: "windows", target: "x86_64-pc-windows-msvc", name: "windows", sub: "x64 · zip" },
     { os: "macos", target: "aarch64-apple-darwin", name: "macos", sub: "apple silicon · tar.gz" },

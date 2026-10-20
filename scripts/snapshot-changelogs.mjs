@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 const root=new URL('../',import.meta.url);
 const output=new URL('crates/glyph-server-core/src/site/changelogs/',root);
 mkdirSync(output,{recursive:true});
-const sources={desktop:'../glyph/',server:'./',companion:'../companion/','r-dlp':'../r-dlp/'};
+const sources={desktop:'../glyph-apps/',server:'./',companion:'../glyph-companion/','r-dlp':'../glyph-r-dlp/'};
 for(const [name,dir] of Object.entries(sources)) {
   const file=new URL(`${dir}CHANGELOG.md`,root);
   if(!existsSync(file)) {console.warn(`skipped ${name}: ${fileURLToPath(file)} not found`);continue;}

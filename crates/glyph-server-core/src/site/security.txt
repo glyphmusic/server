@@ -1,4 +1,4 @@
-Contact: https://github.com/glyphmusic/desktop/security/advisories/new
+Contact: https://github.com/glyphmusic/apps/security/advisories/new
 Expires: 2027-10-18T00:00:00.000Z
 Preferred-Languages: en, de
 Canonical: {ORIGIN}/.well-known/security.txt

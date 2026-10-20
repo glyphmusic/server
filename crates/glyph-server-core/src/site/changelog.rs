@@ -4,7 +4,7 @@
 
 /// (repository, GitHub URL, CHANGELOG.md).
 const SOURCES: &[(&str, &str, &str)] = &[
-    ("desktop", "https://github.com/glyphmusic/desktop", include_str!("changelogs/desktop.md")),
+    ("desktop", "https://github.com/glyphmusic/apps", include_str!("changelogs/desktop.md")),
     ("server", "https://github.com/glyphmusic/server", include_str!("changelogs/server.md")),
     ("companion", "https://github.com/glyphmusic/companion", include_str!("changelogs/companion.md")),
     ("r-dlp", "https://github.com/glyphmusic/r-dlp", include_str!("changelogs/r-dlp.md")),

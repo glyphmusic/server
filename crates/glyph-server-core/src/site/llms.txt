@@ -29,4 +29,4 @@ Glyph is a native app written in Rust (GPUI), not a web app. It plays only free 
 
 ## Optional
 
-- [Releases](https://github.com/glyphmusic/desktop/releases/latest): downloads and changelog
+- [Releases](https://github.com/glyphmusic/apps/releases/latest): downloads and changelog

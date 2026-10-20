@@ -7,6 +7,10 @@ credentials belong in the source tree or npm payload.
    and `RELEASE_NOTES.md`. If shared wire types changed, run
    `node scripts/snapshot-protocol.mjs` with the desktop checkout alongside this
    repository. The snapshot is already included for ordinary source builds.
+   Always run `node scripts/snapshot-changelogs.mjs` (desktop, companion and r-dlp
+   checkouts alongside) so glyph.my/changelog lists the release, and decide whether
+   the change needs a page in the docs repository (docs.glyph.my); write one for
+   any new user-facing feature or setting.
 2. Run Rust tests, the Worker WASM build/integration tests, and `npm test` inside
    `npm/`. For the real native installer test, set `GLYPH_TEST_BINARY` to a binary
    built from this version before running npm tests.
@@ -30,3 +34,7 @@ Verify `npm view glyph-server version`, then install into a clean prefix and run
 `glyph --version`, `glyph help`, `glyph setup cloudflare --help`. A local pack or
 publish dry-run is not proof of a public npm release. Actual Cloudflare deploys,
 remote updates and Docker recreation require their own environment validation.
+
+After every release, redeploy the Worker (`wrangler deploy` in
+`crates/glyph-server-worker`) and check that glyph.my/changelog shows the new
+version: the tag does not deploy the site.
