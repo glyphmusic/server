@@ -26,6 +26,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Glyph","url":"https://glyph.my/","image":"https://glyph.my/og.png","applicationCategory":"MultimediaApplication","applicationSubCategory":"Music player","operatingSystem":"Windows, macOS, Linux","description":"A fast desktop music player that searches many legal music sources at once and keeps your library, playlists and lyrics in one flat app.","downloadUrl":"https://glyph.my/download","offers":{"@type":"Offer","price":"0","priceCurrency":"EUR"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Glyph free?","acceptedAnswer":{"@type":"Answer","text":"Yes. The app, the server and every other part are free and open source (MIT / Apache-2.0). There are no ads, no subscriptions and no tracking."}},{"@type":"Question","name":"Where does the music come from?","acceptedAnswer":{"@type":"Answer","text":"Only from legal, free sources: full songs from open platforms such as Audius, Jamendo and the Internet Archive, official 30-second previews elsewhere, and YouTube or SoundCloud through their own players or your own yt-dlp. Glyph searches them all at once and merges the results into one list."}},{"@type":"Question","name":"Do I need an account?","acceptedAnswer":{"@type":"Answer","text":"No. Everything works without one and your library stays on your computer. An optional @handle account syncs likes, playlists, settings and listening stats between your devices."}},{"@type":"Question","name":"Which systems does it run on?","acceptedAnswer":{"@type":"Answer","text":"Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64). Glyph is a native app written in Rust, not a website in a window, so it starts fast and uses little memory."}},{"@type":"Question","name":"Can I listen offline?","acceptedAnswer":{"@type":"Answer","text":"Yes. Songs from sources that allow it can be downloaded, single songs or whole playlists, and play without internet afterwards."}},{"@type":"Question","name":"Does Glyph collect data about me?","acceptedAnswer":{"@type":"Answer","text":"No telemetry. Listening statistics are off by default; when you turn them on they are only visible to you and are deleted when you turn them off again."}},{"@type":"Question","name":"Can I run my own server?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Glyph server runs on your own computer or VPS, in Docker, or on your own Cloudflare account. The glyph CLI sets it up, checks it and lets you change every option; the app just needs its address."}},{"@type":"Question","name":"Can AI assistants control Glyph?","acceptedAnswer":{"@type":"Answer","text":"Yes, if you want. Glyph includes an MCP server, so assistants such as Claude can play songs, manage the queue and edit playlists. It runs only on your computer, or through the server after you confirm the connection in the app."}},{"@type":"Question","name":"How do I report a bug or ask for a feature?","acceptedAnswer":{"@type":"Answer","text":"Open an issue on GitHub, or use Settings, Support in the app, which can copy diagnostic info without keys or personal data."}}]}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap">
@@ -68,11 +69,20 @@ footer a { color: var(--dim); }
 .lightbox img { max-width: 100%; max-height: calc(100% - 36px); width: auto; height: auto; border: 1px solid var(--line); border-radius: 10px; }
 .lightbox span { color: var(--dim); font-size: 12px; }
 .shots figcaption { margin-top: 10px; color: var(--dim); font-size: 12px; }
+.faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 4ch; margin-top: 18px; }
+.faq details { border-bottom: 1px solid var(--line); padding: 12px 0; }
+.faq summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 2ch; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; color: var(--dim); }
+.faq details[open] summary::after { content: "-"; }
+.faq summary:hover, .faq summary:focus-visible { color: var(--pink); outline: none; }
+.faq p { margin: 10px 0 2px; color: var(--dim); }
 .shots .row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3ch; }
 
 @media (max-width: 860px) {
   .features { grid-template-columns: 1fr 1fr; }
   .shots .row3 { grid-template-columns: 1fr; }
+  .faq { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   nav .links a.opt { display: none; }
@@ -86,6 +96,8 @@ footer a { color: var(--dim); }
   <a class="brand" href="/">glyph</a>
   <div class="links">
     <a class="opt" href="#features">features</a>
+    <a class="opt" href="#faq">faq</a>
+    <a class="opt" href="/changelog">changelog</a>
     <a href="/download">download</a>
     <a href="https://github.com/glyphmusic/desktop">github</a>
   </div>
@@ -123,6 +135,21 @@ footer a { color: var(--dim); }
   </div>
 </section>
 
+<section id="faq">
+  <pre class="rule" data-rule="questions"></pre>
+  <div class="faq">
+    <details><summary>Is Glyph free?</summary><p>Yes. The app, the server and every other part are free and open source (MIT / Apache-2.0). There are no ads, no subscriptions and no tracking.</p></details>
+    <details><summary>Where does the music come from?</summary><p>Only from legal, free sources: full songs from open platforms such as Audius, Jamendo and the Internet Archive, official 30-second previews elsewhere, and YouTube or SoundCloud through their own players or your own yt-dlp. Glyph searches them all at once and merges the results into one list.</p></details>
+    <details><summary>Do I need an account?</summary><p>No. Everything works without one and your library stays on your computer. An optional @handle account syncs likes, playlists, settings and listening stats between your devices.</p></details>
+    <details><summary>Which systems does it run on?</summary><p>Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64). Glyph is a native app written in Rust, not a website in a window, so it starts fast and uses little memory.</p></details>
+    <details><summary>Can I listen offline?</summary><p>Yes. Songs from sources that allow it can be downloaded, single songs or whole playlists, and play without internet afterwards.</p></details>
+    <details><summary>Does Glyph collect data about me?</summary><p>No telemetry. Listening statistics are off by default; when you turn them on they are only visible to you and are deleted when you turn them off again.</p></details>
+    <details><summary>Can I run my own server?</summary><p>Yes. The Glyph server runs on your own computer or VPS, in Docker, or on your own Cloudflare account. The glyph CLI sets it up, checks it and lets you change every option; the app just needs its address.</p></details>
+    <details><summary>Can AI assistants control Glyph?</summary><p>Yes, if you want. Glyph includes an MCP server, so assistants such as Claude can play songs, manage the queue and edit playlists. It runs only on your computer, or through the server after you confirm the connection in the app.</p></details>
+    <details><summary>How do I report a bug or ask for a feature?</summary><p>Open an issue on GitHub, or use Settings, Support in the app, which can copy diagnostic info without keys or personal data.</p></details>
+  </div>
+</section>
+
 <section class="dl" id="download">
   <h2>get glyph</h2>
   <p>Free and open source. No account needed.</p>
@@ -132,7 +159,7 @@ footer a { color: var(--dim); }
 
 <footer>
   <span>glyph · mit / apache-2.0</span>
-  <span><a href="https://github.com/glyphmusic/desktop">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a></span>
+  <span><a href="/changelog">what's new</a> · <a href="https://docs.glyph.my">docs</a> · <a href="https://github.com/glyphmusic/desktop">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a></span>
 </footer>
 </div>
 

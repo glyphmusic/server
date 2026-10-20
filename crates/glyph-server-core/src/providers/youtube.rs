@@ -1,7 +1,8 @@
-//! YouTube search via the `yt-dlp` binary (no API key, no quota). We ask it
-//! for a flat search first (fast, ids + titles + channels), then one follow-up
-//! call for the durations. Playback is only ever the official IFrame embed
-//! (`embed_id` = video id), so nothing is downloaded.
+//! YouTube search: YouTube's own web search endpoint first (one HTTP request,
+//! a few hundred ms), the `yt-dlp` binary as the fallback (no API key, no
+//! quota; a flat search, then one follow-up call for the durations).
+//! Playback is only ever the official IFrame embed (`embed_id` = video id),
+//! so nothing is downloaded.
 
 use super::*;
 use crate::traits::{with_timeout, CommandError};
@@ -143,7 +144,118 @@ pub async fn video_info(svc: &Services, video_id: &str) -> PResult<Option<(Strin
     }))
 }
 
+const SEARCH_URL: &str = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false";
+const WEB_CLIENT_VERSION: &str = "2.20260930.01.00";
+
+fn text_of(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v["simpleText"].as_str() {
+        return Some(s.to_string());
+    }
+    let s: String = v["runs"].as_array()?.iter().filter_map(|r| r["text"].as_str()).collect();
+    (!s.is_empty()).then_some(s)
+}
+
+fn video_renderers<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a serde_json::Value>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(r) = m.get("videoRenderer") {
+                out.push(r);
+                return;
+            }
+            m.values().for_each(|x| video_renderers(x, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| video_renderers(x, out)),
+        _ => {}
+    }
+}
+
+fn parse_length(s: &str) -> Option<u64> {
+    let mut total = 0u64;
+    for part in s.trim().split(':') {
+        total = total * 60 + part.trim().parse::<u64>().ok()?;
+    }
+    (total > 0).then_some(total * 1000)
+}
+
+/// Candidates from a web search response (live streams, premieres and
+/// broken entries left out).
+pub(crate) fn parse_native(v: &serde_json::Value) -> Vec<Candidate> {
+    let mut found = Vec::new();
+    video_renderers(v, &mut found);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in found {
+        let Some(id) = r["videoId"].as_str().filter(|id| crate::media::valid_video_id(id)) else { continue };
+        let Some(raw_title) = text_of(&r["title"]) else { continue };
+        let Some(ms) = text_of(&r["lengthText"]).and_then(|s| parse_length(&s)) else { continue };
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let channel = text_of(&r["ownerText"]).or_else(|| text_of(&r["longBylineText"])).unwrap_or_default();
+        let is_topic = channel.ends_with(" - Topic");
+        let mut artist = channel.trim_end_matches(" - Topic").trim_end_matches("VEVO").trim().to_string();
+        let mut title = raw_title.clone();
+        if let Some((a, rest)) = raw_title.split_once(" - ") {
+            if !a.trim().is_empty() && !rest.trim().is_empty() && (!is_topic || crate::merge::artists_match(a, &artist)) {
+                artist = a.trim().to_string();
+                title = rest.trim().to_string();
+            }
+        }
+        if artist.is_empty() {
+            continue;
+        }
+        let low = raw_title.to_lowercase();
+        let mut bonus = 0.0;
+        if is_topic {
+            bonus += 0.15;
+        }
+        if low.contains("official audio") {
+            bonus += 0.10;
+        }
+        let mut t = new_track(id, ProviderId::YouTube, &title, &artist);
+        t.duration_ms = Some(ms);
+        t.cover_url = Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+        t.permalink = Some(format!("https://www.youtube.com/watch?v={id}"));
+        out.push(Candidate { track: t, bonus, playback: Some(playback(id)) });
+        if out.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    out
+}
+
+/// One request to YouTube's web search (videos only).
+async fn native_search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    let body = serde_json::json!({
+        "context": {"client": {"clientName": "WEB", "clientVersion": WEB_CLIENT_VERSION, "hl": "en", "gl": "US"}},
+        "query": q,
+        "params": "EgIQAQ==",
+    });
+    let req = crate::traits::HttpRequest {
+        method: crate::traits::Method::Post,
+        url: SEARCH_URL.into(),
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-youtube-client-name".into(), "1".into()),
+            ("x-youtube-client-version".into(), WEB_CLIENT_VERSION.into()),
+            ("origin".into(), "https://www.youtube.com".into()),
+        ],
+        body: Some(body.to_string().into_bytes()),
+    };
+    let v: serde_json::Value = fetch_json(svc, req).await?;
+    let out = parse_native(&v);
+    if out.is_empty() {
+        return Err(ProviderError::Parse);
+    }
+    Ok(out)
+}
+
 pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
+    // Seconds faster than starting yt-dlp; yt-dlp stays the fallback (also
+    // when YouTube answers the web request with a bot check).
+    if let Some(Ok(hits)) = with_timeout(&*svc.rt, 4_000, native_search(svc, q)).await {
+        return Ok(hits);
+    }
     let bin = svc.config.ytdlp_path.clone().ok_or(ProviderError::NotConfigured)?;
 
     let mut args = base_args();
@@ -238,6 +350,19 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_native_search() {
+        let v = serde_json::json!({"contents": [{"itemSectionRenderer": {"contents": [
+            {"videoRenderer": {"videoId": "dQw4w9WgXcQ", "title": {"runs": [{"text": "Rick Astley - Never Gonna Give You Up"}]},
+                "ownerText": {"runs": [{"text": "Rick Astley"}]}, "lengthText": {"simpleText": "3:33"}}},
+            {"videoRenderer": {"videoId": "aaaaaaaaaaa", "title": {"runs": [{"text": "Live radio"}]}, "ownerText": {"runs": [{"text": "X"}]}}}
+        ]}}]});
+        let c = parse_native(&v);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].track.title, "Never Gonna Give You Up");
+        assert_eq!(c[0].track.duration_ms, Some(213_000));
+    }
     use crate::testutil::*;
     use futures::executor::block_on;
 

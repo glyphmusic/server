@@ -21,6 +21,12 @@ impl Server {
             || req.path.starts_with("/admin/v1/") || req.path.starts_with("/internal/") {
             return Ok(());
         }
+        // AI assistants (MCP) sign in with their own OAuth tokens tied to an
+        // account; they cannot know a private server's access token.
+        let p = req.path.trim_end_matches('/');
+        if p == "/mcp" || p.starts_with("/oauth/") || p.starts_with("/.well-known/oauth-") {
+            return Ok(());
+        }
         if !req.secure && !req.local {
             return Err(Response::error(ApiErr::new(403, "https_required", "server access requires HTTPS")));
         }

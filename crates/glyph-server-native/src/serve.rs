@@ -108,6 +108,20 @@ async fn audio_url(svc: &Services, provider: glyph_protocol::ProviderId, id: &st
     glyph_server_core::media::audio_url(svc, provider, id).await
 }
 
+/// The app asks for `/internal/audio/<id>` right after a YouTube resolve.
+/// Start r-dlp/yt-dlp now: that request then waits on the same per-video gate
+/// and finds the URL cached instead of starting the extraction itself.
+fn prefetch_audio_url(svc: &Arc<Services>, resolved: &glyph_protocol::ResolveResponse) {
+    use glyph_protocol::{PlaybackSource, ProviderId};
+    let youtube = matches!(resolved.source, Some(PlaybackSource::Embed { provider: ProviderId::YouTube, .. } | PlaybackSource::Stream { provider: ProviderId::YouTube, .. }));
+    let Some(track) = resolved.matched.as_ref().filter(|t| youtube && t.source == ProviderId::YouTube) else { return };
+    if !glyph_server_core::media::valid_video_id(&track.id) { return; }
+    let (svc, id) = (svc.clone(), track.id.clone());
+    tokio::spawn(async move {
+        let _ = audio_url(&svc, ProviderId::YouTube, &id).await;
+    });
+}
+
 /// Checked per request, so switching needs no restart.
 fn companion_disabled() -> bool {
     COMPANION_OFF.get().is_some_and(|p| p.exists())
@@ -119,6 +133,7 @@ pub async fn run(s: Settings, logs: Arc<LogBuffer>, shutdown: impl Future<Output
         tracing::warn!("admin.password_hash is not a valid Argon2id hash: the admin API stays OFF (run `glyph-server setup`)");
     }
     let server = build_server(&s, logs);
+    if let Some(rdlp) = crate::ytdlp_pool::init_rdlp(s.rdlp_path.as_deref()) { tracing::info!("r-dlp: {rdlp}"); }
     if let Some(program) = server.services().config.ytdlp_path.clone() { crate::ytdlp_pool::warm(program); }
     let enabled = server.services().config.enabled_providers();
     let state = AppState { server, trust_proxy: s.trust_proxy, tls: s.tls.is_some() };
@@ -552,6 +567,7 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         let Ok(req) = serde_json::from_slice::<glyph_protocol::ResolveRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid resolve request") };
         if req.track.title.trim().is_empty() || req.track.artist.trim().is_empty() { return plain(StatusCode::BAD_REQUEST, "title and artist required"); }
         let resolved = glyph_server_core::resolver::resolve(&svc, req).await;
+        prefetch_audio_url(&svc, &resolved);
         let body = serde_json::to_vec(&resolved).unwrap();
         return Response::builder().header("content-type", "application/json").header("cache-control", "no-store").body(Body::from(body)).unwrap();
     }

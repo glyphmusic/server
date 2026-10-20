@@ -12,9 +12,13 @@ workers_dev = true
 # glyph.my; the site pages and embedded assets must all reach this Worker.
 routes = [
   { pattern = "api.glyph.my", custom_domain = true },
+  # Docs, rendered from github.com/glyphmusic/docs; glyph.my/docs redirects there.
+  { pattern = "docs.glyph.my", custom_domain = true },
+  { pattern = "glyph.my/docs*", zone_name = "glyph.my" },
   { pattern = "glyph.my/", zone_name = "glyph.my" },
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/download*", zone_name = "glyph.my" },
+  { pattern = "glyph.my/changelog*", zone_name = "glyph.my" },
   { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/favicon.ico", zone_name = "glyph.my" },
   { pattern = "glyph.my/icon.png", zone_name = "glyph.my" },
@@ -39,6 +43,13 @@ head_sampling_rate = 0.1
 
 [observability.issues]
 enabled = true
+
+# Smart Placement (free on every plan): Cloudflare may run the Worker close to
+# the backend it talks to most (the companion), which shortens every
+# resolve/audio round trip. Remove this section to go back to the edge nearest
+# each user.
+[placement]
+mode = "smart"
 
 # Auth must run before every request. The targeted in-Worker media cache remains on.
 [cache]

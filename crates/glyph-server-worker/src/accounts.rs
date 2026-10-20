@@ -615,6 +615,52 @@ impl AccountStore for D1Store {
     async fn delete_share(&self, user_id: &str, id: &str) -> StoreResult<bool> {
         Ok(self.run("DELETE FROM shares WHERE id = ?1 AND owner_id = ?2", &[s(id), s(user_id)]).await? > 0)
     }
+
+    async fn mcp_put(&self, scope: &str, key: &str, value: &str, expires: u64) -> StoreResult<()> {
+        self.run(
+            "INSERT OR REPLACE INTO mcp_mailbox (scope, key, value, expires) VALUES (?1, ?2, ?3, ?4)",
+            &[s(scope), s(key), s(value), n(expires)],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn mcp_get(&self, scope: &str, key: &str, now: u64) -> StoreResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            value: String,
+        }
+        Ok(self
+            .first::<Row>("SELECT value FROM mcp_mailbox WHERE scope = ?1 AND key = ?2 AND expires > ?3", &[s(scope), s(key), n(now)])
+            .await?
+            .map(|r| r.value))
+    }
+
+    async fn mcp_take(&self, scope: &str, prefix: &str, now: u64) -> StoreResult<Vec<(String, String)>> {
+        #[derive(Deserialize)]
+        struct Row {
+            key: String,
+            value: String,
+        }
+        // Read and delete in one batch so two pulls never get the same call;
+        // expired rows of the scope go at the same time.
+        let like = format!("{}%", prefix.replace('%', "").replace('_', "\\_"));
+        let r = self
+            .batch(vec![
+                self.stmt(
+                    "SELECT key, value FROM mcp_mailbox WHERE scope = ?1 AND key LIKE ?2 ESCAPE '\\' AND expires > ?3",
+                    &[s(scope), s(&like), n(now)],
+                )?,
+                self.stmt("DELETE FROM mcp_mailbox WHERE scope = ?1 AND (key LIKE ?2 ESCAPE '\\' OR expires <= ?3)", &[s(scope), s(&like), n(now)])?,
+            ])
+            .await?;
+        let rows: Vec<Row> = r.first().map(|x| x.results::<Row>().unwrap_or_default()).unwrap_or_default();
+        Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
+    async fn mcp_delete(&self, scope: &str, key: &str) -> StoreResult<()> {
+        self.run("DELETE FROM mcp_mailbox WHERE scope = ?1 AND key = ?2", &[s(scope), s(key)]).await.map(|_| ())
+    }
 }
 
 impl D1Store {

@@ -8,6 +8,9 @@ Glyph is a native app written in Rust (GPUI), not a web app. It plays only free 
 
 - [Home]({ORIGIN}/): what Glyph is, screenshots and features
 - [Download]({ORIGIN}/download): installers for Windows, macOS and Linux (latest GitHub release)
+- [What's new]({ORIGIN}/changelog): every release of the desktop app, server, companion and r-dlp
+- [Docs](https://docs.glyph.my): how to use Glyph, self-host the server, the CLI and the API
+- [FAQ]({ORIGIN}/#faq): common questions about sources, accounts, self-hosting and AI assistants
 
 ## Features
 

@@ -43,9 +43,9 @@ pub async fn snapshot(s: &Settings) -> CompanionStatus {
     .await
 }
 pub async fn snapshot_with(ytdlp: Option<&str>, enabled: bool) -> CompanionStatus {
-    let rdlp = std::env::var("GLYPH_RDLP_PATH")
+    let rdlp = crate::ytdlp_pool::rdlp_path().map(str::to_string).or_else(|| std::env::var("GLYPH_RDLP_PATH")
         .ok()
-        .filter(|s| !s.trim().is_empty());
+        .filter(|s| !s.trim().is_empty()));
     let ytdlp = ytdlp.unwrap_or("yt-dlp");
     let ffmpeg = std::env::var("GLYPH_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
     let (r, y, f) = tokio::join!(
@@ -82,9 +82,9 @@ pub async fn maintenance(
     apply: bool,
 ) -> Result<MaintenanceResponse, String> {
     if rdlp {
-        let program = std::env::var("GLYPH_RDLP_PATH")
+        let program = crate::ytdlp_pool::rdlp_path().map(str::to_string).or_else(|| std::env::var("GLYPH_RDLP_PATH")
             .ok()
-            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !s.trim().is_empty()))
             .unwrap_or_else(|| "r-dlp".into());
         let version = tool_version(&program, false)
             .await

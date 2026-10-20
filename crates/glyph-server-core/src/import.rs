@@ -1,6 +1,7 @@
 //! `POST /v1/import/spotify`: read the track list of a *public* playlist
-//! (Spotify, Deezer or YouTube link). Metadata only; resolving happens per
-//! track via `/v1/resolve`. Private libraries are read by the app itself.
+//! (Spotify, Deezer, YouTube, SoundCloud link or a Last.fm profile) with the
+//! server's keys, so the app needs none. Metadata only; resolving happens
+//! per track via `/v1/resolve`. Private libraries are read by the app itself.
 
 use crate::error::ApiErr;
 use crate::providers::{self, build_url, fetch_json, new_track, spotify, ProviderError};
@@ -15,7 +16,14 @@ pub enum Target {
     DeezerUser(String),
     LastFm(String),
     YouTube(String),
+    /// soundcloud.com link: path segments (set, likes, tracks, one song).
+    SoundCloud(Vec<String>),
 }
+
+/// soundcloud.com paths that are pages of the site, not music.
+const SOUNDCLOUD_RESERVED: [&str; 14] = [
+    "discover", "search", "you", "stream", "upload", "settings", "messages", "notifications", "charts", "pages", "mobile", "imprint", "terms-of-use", "pro",
+];
 
 fn valid_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -39,6 +47,11 @@ pub fn parse_url(raw: &str) -> Option<Target> {
             let numeric = |i: &&str| !i.is_empty() && i.len() <= 64 && i.bytes().all(|c| c.is_ascii_digit());
             after("playlist").filter(numeric).map(|i| Target::Deezer(i.into()))
                 .or_else(|| after("profile").or_else(|| after("user")).filter(numeric).map(|i| Target::DeezerUser(i.into())))
+        }
+        "soundcloud.com" | "m.soundcloud.com" => {
+            let segs: Vec<String> = segs.iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            let first = segs.first()?;
+            (!SOUNDCLOUD_RESERVED.contains(&first.as_str()) && segs.len() <= 3 && segs.iter().all(|s| valid_id(s))).then_some(Target::SoundCloud(segs))
         }
         "last.fm" | "lastfm.de" | "lastfm.com" => after("user").filter(|i| valid_id(i)).map(|i| Target::LastFm(i.into())),
         "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" => u
@@ -71,6 +84,11 @@ pub async fn import(svc: &Services, url: &str) -> Result<ImportResponse, ApiErr>
         Target::DeezerUser(id) => deezer_favorites(svc, &id).await.map_err(map_err),
         Target::LastFm(user) => lastfm_loved(svc, &user).await.map_err(map_err),
         Target::YouTube(id) => youtube_playlist(svc, &id).await.map_err(map_err),
+        Target::SoundCloud(segs) => {
+            let link = format!("https://soundcloud.com/{}", segs.join("/"));
+            let (name, tracks) = providers::soundcloud::import_link(svc, &link, &segs).await.map_err(map_err)?;
+            Ok(ImportResponse { name, source: ProviderId::SoundCloud, tracks })
+        }
     }
 }
 
@@ -270,6 +288,8 @@ mod tests {
         assert_eq!(parse_url("https://www.youtube.com/playlist?list=PLabc_-1"), Some(Target::YouTube("PLabc_-1".into())));
         assert_eq!(parse_url("https://evil.example/playlist/abc"), None);
         assert_eq!(parse_url("https://open.spotify.com/album/abc"), None);
+        assert_eq!(parse_url("https://soundcloud.com/odesza/likes"), Some(Target::SoundCloud(vec!["odesza".into(), "likes".into()])));
+        assert_eq!(parse_url("https://soundcloud.com/discover"), None);
         assert_eq!(parse_url("javascript:alert(1)"), None);
         assert_eq!(parse_url("not a url"), None);
     }

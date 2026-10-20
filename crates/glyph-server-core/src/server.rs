@@ -227,6 +227,9 @@ impl Server {
         if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
             return acc.handle(&svc, req).await;
         }
+        if crate::site::docs::owns(&req, req.path.trim_end_matches('/')) {
+            return crate::site::docs::handle(&svc, &req).await;
+        }
         if crate::site::owns(req.path.trim_end_matches('/')) {
             return crate::site::handle(&req).unwrap_or_else(Response::error);
         }

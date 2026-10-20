@@ -135,6 +135,9 @@ pub struct Config {
     pub import_max_pages: u32,
     /// Switch for the yt-dlp companion, changed with `remote companion on|off`.
     pub companion_enabled: bool,
+    /// AI assistants may reach signed-in apps through this server (MCP relay,
+    /// `/mcp` + OAuth). Changed with `remote mcp on|off`.
+    pub mcp_relay: bool,
     /// Days / GB of companion audio kept in R2 (Worker).
     pub audio_cache_days: u32,
     pub audio_cache_max_gb: u32,
@@ -161,6 +164,7 @@ impl Config {
             ytdlp_path: None,
             import_max_pages: 5,
             companion_enabled: true,
+            mcp_relay: true,
             audio_cache_days: 15,
             audio_cache_max_gb: 10,
             d1_max_mb: 500,

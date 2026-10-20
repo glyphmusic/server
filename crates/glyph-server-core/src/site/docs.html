@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>{{TITLE}} — Glyph docs</title>
+<meta name="description" content="{{DESC}}">
+<link rel="canonical" href="{{CANON}}">
+<link rel="alternate" type="text/markdown" href="{{MD}}">
+<link rel="help" type="text/markdown" href="{{BASE}}/llms.txt" title="llms.txt">
+<meta property="og:title" content="{{TITLE}} — Glyph docs">
+<meta property="og:description" content="{{DESC}}">
+<meta property="og:image" content="https://glyph.my/og.png">
+<meta name="theme-color" content="#0a0a09">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+/*BASE*/
+/* Scrollbars as in the app: a 3 px thumb, no track, white at 9 % (16 % on hover, 28 % while dragging). */
+::-webkit-scrollbar { width: 9px; height: 9px; background: transparent; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,.09); border: 3px solid transparent; background-clip: content-box; border-radius: 9px; min-height: 28px; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,.16); }
+::-webkit-scrollbar-thumb:active { background-color: rgba(255,255,255,.28); }
+::-webkit-scrollbar-button { display: none; height: 0; width: 0; }
+/* Firefox: Chromium ignores ::-webkit-scrollbar once these are set. */
+@supports not selector(::-webkit-scrollbar) { * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; } }
+.toc { scrollbar-gutter: stable; }
+.toc:not(:hover)::-webkit-scrollbar-thumb { background-color: transparent; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
+nav.top { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
+nav .brand { font-weight: 700; text-decoration: none; }
+/*BRAND*/
+nav .links { display: flex; gap: 3ch; }
+nav .links a { color: var(--dim); text-decoration: none; }
+nav .links a:hover, nav .links a[aria-current] { color: var(--fg); }
+.layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 5ch; align-items: start; }
+.side { position: sticky; top: 16px; }
+.toc { max-height: calc(100vh - 80px); overflow-y: auto; padding-bottom: 24px; }
+.toc summary { display: none; }
+.toc ul { list-style: none; margin: 0 0 6px; padding: 0; }
+.toc li a { display: block; padding: 3px 0; color: var(--dim); text-decoration: none; }
+.toc li a:hover { color: var(--fg); }
+.toc li a[aria-current] { color: var(--pink); }
+.toc li.d1 a { padding-left: 2ch; }
+.toc li.d2 a, .toc li.d3 a { padding-left: 4ch; }
+.toc .grp { margin: 18px 0 4px; color: var(--fg); font-weight: 700; text-transform: lowercase; }
+article { min-width: 0; max-width: 760px; padding-bottom: 8px; }
+article h1 { font-size: clamp(24px, 4vw, 34px); margin: 8px 0 6px; letter-spacing: -0.02em; text-transform: lowercase; }
+article .lead { color: var(--dim); margin: 0 0 24px; }
+article h2 { font-size: 18px; margin: 36px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+article h3 { font-size: 15px; margin: 26px 0 8px; }
+article h4 { font-size: 14px; margin: 20px 0 6px; color: var(--dim); }
+article h2, article h3, article h4 { scroll-margin-top: 16px; }
+article .anchor { text-decoration: none; }
+article .anchor:hover::after { content: " #"; color: var(--dim); }
+article p, article li { color: var(--fg); }
+article a { color: var(--fg); text-decoration-color: var(--dim); text-underline-offset: 3px; }
+article a:hover { color: var(--pink); text-decoration-color: var(--pink); }
+article ul, article ol { padding-left: 2.5ch; }
+article li { margin: 4px 0; }
+article li::marker { color: var(--dim); }
+article code { background: var(--panel-2); padding: 0 .4ch; }
+article pre { background: var(--panel); border: 1px solid var(--line); padding: 12px 2ch; margin: 14px 0; overflow-x: auto; white-space: pre; }
+article pre code { background: none; padding: 0; }
+article table { border-collapse: collapse; width: 100%; margin: 14px 0; display: block; overflow-x: auto; }
+article th, article td { border-bottom: 1px solid var(--line); padding: 7px 2ch 7px 0; text-align: left; vertical-align: top; }
+article th { color: var(--dim); font-weight: 600; white-space: nowrap; }
+article blockquote { margin: 14px 0; padding: 2px 2ch; border-left: 2px solid var(--line); color: var(--dim); }
+article img { max-width: 100%; height: auto; border: 1px solid var(--line); }
+article hr { border: 0; border-top: 1px solid var(--line); margin: 28px 0; }
+.hint { border: 1px solid var(--line); padding: 10px 2ch; margin: 16px 0; }
+.hint::before { content: "note"; display: block; color: var(--dim); font-size: 12px; margin-bottom: 2px; }
+.hint.warning, .hint.danger { border-color: var(--pink); }
+.hint.warning::before { content: "warning"; color: var(--pink); }
+.hint.danger::before { content: "careful"; color: var(--pink); }
+.hint.success::before { content: "tip"; }
+.hint > :first-child, .tab > :nth-child(2) { margin-top: 0; }
+.hint > :last-child, .tab > :last-child { margin-bottom: 0; }
+.tabs { border: 1px solid var(--line); margin: 16px 0; }
+.tabs .bar { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.tabs .bar button { font: inherit; color: var(--dim); background: none; border: 0; border-right: 1px solid var(--line); padding: 6px 2ch; cursor: pointer; }
+.tabs .bar button:hover { color: var(--fg); }
+.tabs .bar button[aria-selected="true"] { color: var(--bg); background: var(--fg); }
+.tab { padding: 10px 2ch; }
+.tab-title { color: var(--dim); font-size: 12px; }
+.tabs.live .tab-title { display: none; }
+article details { border-top: 1px solid var(--line); padding: 10px 0; }
+article details summary { cursor: pointer; font-weight: 600; }
+article details summary::marker { color: var(--dim); }
+article details[open] summary { margin-bottom: 6px; }
+.onpage { border-left: 1px solid var(--line); padding-left: 2ch; margin: 0 0 8px; }
+.onpage ul { list-style: none; padding: 0; margin: 0; }
+.onpage li { margin: 2px 0; }
+.onpage a { color: var(--dim); text-decoration: none; }
+.onpage a:hover { color: var(--fg); }
+.pager { display: flex; justify-content: space-between; gap: 2ch; margin-top: 40px; border-top: 1px solid var(--line); padding-top: 18px; }
+.pager a { display: flex; flex-direction: column; text-decoration: none; border: 1px solid var(--line); padding: 8px 2ch; max-width: 48%; }
+.pager a:hover { border-color: var(--fg); color: var(--fg); }
+.pager a span { color: var(--dim); font-size: 12px; }
+.pager .next { margin-left: auto; text-align: right; }
+.edit { margin: 18px 0 0; font-size: 12px; }
+.edit a { color: var(--dim); }
+footer { border-top: 1px solid var(--line); margin-top: 32px; padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
+footer a { color: var(--dim); }
+.search-open { display: flex; justify-content: space-between; align-items: center; width: 100%; margin: 0 0 14px; font: inherit; color: var(--dim); background: none; border: 1px solid var(--line); padding: 6px 1.5ch; cursor: pointer; text-align: left; }
+.search-open:hover, .search-open:focus-visible { color: var(--fg); border-color: var(--dim); outline: none; }
+kbd { font: inherit; font-size: 11px; color: var(--dim); border: 1px solid var(--line); padding: 0 .6ch; }
+dialog.search { width: min(680px, calc(100vw - 32px)); max-height: min(70vh, 640px); margin: 10vh auto auto; padding: 0; background: var(--panel); color: var(--fg); border: 1px solid var(--line); display: none; flex-direction: column; }
+dialog.search[open] { display: flex; }
+dialog.search::backdrop { background: rgba(0,0,0,.6); }
+dialog.search input { font: inherit; font-size: 15px; color: var(--fg); background: none; border: 0; border-bottom: 1px solid var(--line); padding: 12px 2ch; outline: none; }
+dialog.search input::placeholder { color: var(--dim); }
+.results { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; flex: 1; }
+.results:empty { display: none; }
+.results li a { display: block; padding: 8px 2ch; text-decoration: none; border-left: 2px solid transparent; }
+.results li a[aria-selected="true"] { background: var(--panel-2); border-left-color: var(--pink); }
+.results .rt { display: block; color: var(--fg); }
+.results .rh { color: var(--dim); }
+.results .rs { display: block; color: var(--dim); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.results mark { background: none; color: var(--pink); }
+.results .none { padding: 12px 2ch; color: var(--dim); }
+.hint-line { display: flex; justify-content: space-between; gap: 2ch; margin: 0; padding: 8px 2ch; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+.hint-line a { color: var(--dim); }
+@media (max-width: 820px) {
+  .layout { display: block; }
+  .side { position: static; }
+  .hint-line span { display: none; }
+  .toc { position: static; max-height: none; border: 1px solid var(--line); padding: 8px 2ch; margin-bottom: 20px; }
+  .toc summary { display: list-item; cursor: pointer; color: var(--dim); }
+  .toc[open] summary { margin-bottom: 4px; }
+  .pager a { max-width: none; flex: 1; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="top">
+  <a class="brand" href="{{SITE}}/">glyph</a>
+  <div class="links">
+    <a href="{{SITE}}/changelog">changelog</a>
+    <a href="{{SITE}}/download">download</a>
+    <a href="{{DOCS}}" aria-current="page">docs</a>
+  </div>
+</nav>
+<div class="layout">
+<div class="side">
+<button type="button" class="search-open" aria-haspopup="dialog"><span>search docs</span><kbd>ctrl k</kbd></button>
+<details class="toc" open>
+  <summary>contents</summary>
+  {{NAV}}
+</details>
+</div>
+<article>
+{{BODY}}
+</article>
+</div>
+<footer>
+  <span>glyph · mit / apache-2.0</span>
+  <span><a href="https://github.com/glyphmusic/docs">docs on github</a> · <a href="https://github.com/glyphmusic/desktop">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a></span>
+</footer>
+</div>
+<dialog class="search" aria-label="Search the docs">
+  <input type="search" placeholder="search the docs" autocomplete="off" spellcheck="false" aria-label="Search the docs">
+  <ul class="results" role="listbox"></ul>
+  <p class="hint-line"><span><kbd>up</kbd> <kbd>down</kbd> choose · <kbd>enter</kbd> open · <kbd>esc</kbd> close</span><a href="{{BASE}}/llms.txt">llms.txt</a></p>
+</dialog>
+<script>
+(() => {
+  // Contents fold away on small screens.
+  const toc = document.querySelector(".toc");
+  if (toc && matchMedia("(max-width: 820px)").matches) toc.open = false;
+  // Keep the current page visible in a long contents list.
+  const cur = toc && toc.querySelector("a[aria-current]");
+  if (cur && toc.scrollHeight > toc.clientHeight) toc.scrollTop = cur.offsetTop - toc.offsetTop - toc.clientHeight / 2;
+  // GitBook tabs: one button per tab, the first one shown.
+  document.querySelectorAll(".tabs").forEach((box, n) => {
+    const tabs = [...box.children].filter(c => c.classList.contains("tab"));
+    if (!tabs.length) return;
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.setAttribute("role", "tablist");
+    const show = i => tabs.forEach((t, j) => {
+      t.hidden = i !== j;
+      bar.children[j].setAttribute("aria-selected", String(i === j));
+    });
+    tabs.forEach((t, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      b.textContent = t.querySelector(".tab-title")?.textContent || "tab " + (i + 1);
+      b.addEventListener("click", () => show(i));
+      bar.append(b);
+    });
+    box.prepend(bar);
+    box.classList.add("live");
+    show(0);
+  });
+
+  // Search: Ctrl+K or "/" opens it; the index loads on first use.
+  const dlg = document.querySelector("dialog.search");
+  const input = dlg.querySelector("input");
+  const list = dlg.querySelector(".results");
+  const opener = document.querySelector(".search-open");
+  if (/Mac|iPhone|iPad/.test(navigator.platform)) opener.querySelector("kbd").textContent = "⌘ k";
+  let index = null, loading = null, hits = [], sel = 0;
+  const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const load = () => loading ||= fetch("{{BASE}}/search.json").then(r => r.json()).then(j => { index = j.pages; run(); }).catch(() => { list.innerHTML = '<li class="none">search is unavailable right now</li>'; });
+  const open = () => { if (!dlg.open) dlg.showModal(); input.select(); load(); };
+  opener.addEventListener("click", open);
+  document.addEventListener("keydown", e => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if ((e.key === "k" && (e.ctrlKey || e.metaKey)) || (e.key === "/" && !typing && !dlg.open)) { e.preventDefault(); open(); }
+  });
+  dlg.addEventListener("click", e => { if (e.target === dlg) dlg.close(); });
+  const mark = (text, words) => {
+    let html = esc(text);
+    for (const w of words) html = html.replace(new RegExp(esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), m => `<mark>${m}</mark>`);
+    return html;
+  };
+  const snippet = (text, words) => {
+    const low = text.toLowerCase(), whole = low.indexOf(words.join(" "));
+    const at = whole >= 0 ? whole : Math.max(0, Math.min(...words.map(w => { const i = low.indexOf(w); return i < 0 ? Infinity : i; })));
+    if (!isFinite(at)) return text.slice(0, 120);
+    const start = Math.max(0, at - 40);
+    return (start ? "…" : "") + text.slice(start, start + 140);
+  };
+  function run() {
+    if (!index) return;
+    const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) { list.innerHTML = ""; hits = []; return; }
+    hits = [];
+    for (const p of index) {
+      let score = 0, heading = null;
+      const title = p.t.toLowerCase(), desc = p.d.toLowerCase(), text = p.x.toLowerCase();
+      const ok = words.every(w => {
+        let s = 0;
+        if (title.includes(w)) s += title.startsWith(w) ? 14 : 10;
+        const h = p.h.find(([, t]) => t.toLowerCase().includes(w));
+        if (h) { s += 6; heading ||= h; }
+        if (desc.includes(w)) s += 3;
+        if (text.includes(w)) s += 1 + Math.min(4, text.split(w).length - 2);
+        score += s;
+        return s > 0;
+      });
+      // The whole query as written counts most.
+      const phrase = words.join(" ");
+      if (ok && words.length > 1) {
+        const exact = p.h.find(([, t]) => t.toLowerCase().includes(phrase));
+        if (exact) { score += 30; heading = exact; }
+        if (title.includes(phrase)) score += 30;
+        if (text.includes(phrase)) score += 8;
+      }
+      if (ok) hits.push({ p, score, heading });
+    }
+    hits.sort((a, b) => b.score - a.score);
+    hits = hits.slice(0, 12);
+    sel = 0;
+    list.innerHTML = hits.length ? hits.map(({ p, heading }, i) => {
+      const url = heading && !p.t.toLowerCase().includes(words[0]) ? `${p.u}#${heading[0]}` : p.u;
+      const sub = heading ? ` <span class="rh">› ${mark(heading[1], words)}</span>` : "";
+      return `<li><a href="${esc(url)}" role="option" aria-selected="${i === 0}"><span class="rt">${mark(p.t, words)}${sub}</span><span class="rs">${mark(snippet(p.x, words), words)}</span></a></li>`;
+    }).join("") : '<li class="none">nothing found</li>';
+  }
+  const select = i => {
+    const links = [...list.querySelectorAll("a")];
+    if (!links.length) return;
+    sel = (i + links.length) % links.length;
+    links.forEach((a, j) => a.setAttribute("aria-selected", String(j === sel)));
+    links[sel].scrollIntoView({ block: "nearest" });
+  };
+  input.addEventListener("input", run);
+  input.addEventListener("keydown", e => {
+    if (e.key === "ArrowDown") { e.preventDefault(); select(sel + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); select(sel - 1); }
+    else if (e.key === "Enter") { const a = list.querySelectorAll("a")[sel]; if (a) { e.preventDefault(); location.href = a.href; dlg.close(); } }
+  });
+})();
+</script>
+</body>
+</html>

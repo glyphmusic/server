@@ -56,6 +56,22 @@ Companion checks include the running Glyph version, enabled/ready state and the
 installed r-dlp, yt-dlp and FFmpeg versions. Installed tool versions are distinct
 from an image tag or an already-loaded persistent worker.
 
+## Change options
+
+```sh
+glyph config list                          # own server: every server.toml option
+glyph config set rate_limit_per_min 120
+glyph config set lastfm_api_key            # asked without echo
+glyph cloudflare list                      # Cloudflare: values in wrangler.json
+glyph cloudflare set REQUIRE_ACCOUNT true  # then: glyph deploy
+glyph cloudflare secret LASTFM_API_KEY     # applies at once
+glyph cloudflare domain glyph.example.com
+```
+
+`glyph config` validates values and shows where each one comes from (file,
+environment variable or default). `glyph cloudflare` only edits generated
+`wrangler.json` projects; live limits still change with `glyph remote`.
+
 ## Updates
 
 ```sh

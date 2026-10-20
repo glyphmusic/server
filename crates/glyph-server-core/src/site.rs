@@ -1,7 +1,11 @@
 //! The public site on the share origin (`https://glyph.my`): the landing page
-//! at `/`, `/download`, and what crawlers and chat apps look for (robots.txt,
-//! sitemap.xml, llms.txt, icons, the link-card image). The `/p/` playlist page
+//! at `/`, `/download`, `/changelog` (every release of every repository), the
+//! docs (`docs.rs`, on `docs.*` hosts and `/docs`), and
+//! what crawlers and chat apps look for (robots.txt, sitemap.xml, llms.txt, icons, the link-card image). The `/p/` playlist page
 //! (`share.rs`) uses the same stylesheet and ASCII note.
+
+pub mod changelog;
+pub mod docs;
 
 use crate::error::ApiErr;
 use crate::server::{Body, Request, Response};
@@ -30,7 +34,7 @@ pub const PAGE_CSP: &str = "default-src 'none'; img-src 'self' data:; manifest-s
 
 /// Paths owned by this module (`path` without its trailing `/`).
 pub fn owns(path: &str) -> bool {
-    path.is_empty() || path == "/download" || shot(path).is_some() || file(path).is_some()
+    path.is_empty() || path == "/download" || path == "/changelog" || shot(path).is_some() || file(path).is_some()
 }
 
 /// Files at fixed paths: (path, content type, cache seconds, bytes). Text
@@ -52,7 +56,7 @@ fn file(path: &str) -> Option<&'static (&'static str, &'static str, u32, &'stati
 }
 
 /// `https://<host>` of the request, `https://glyph.my` without a usable Host.
-fn origin(req: &Request) -> String {
+pub(crate) fn origin(req: &Request) -> String {
     match req.header("host").filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))) {
         Some(h) if req.local && !req.secure => format!("http://{h}"),
         Some(h) => format!("https://{h}"),
@@ -105,6 +109,15 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
         }
         return Ok(Response { status: 200, headers, body: Body::Bytes(body) });
     }
+    if req.path.trim_end_matches('/') == "/changelog" {
+        let releases = changelog::releases();
+        let html = include_str!("site/changelog.html")
+            .replace("/*BASE*/", BASE_CSS)
+            .replace("/*BRAND*/", &brand_icon_css("nav .brand"))
+            .replace("<!--COUNT-->", &format!("{} releases.", releases.len()))
+            .replace("<!--RELEASES-->", &changelog::render(&releases));
+        return Ok(html_response(200, html, "public, max-age=300"));
+    }
     if req.path.trim_end_matches('/') == "/download" {
         let html = include_str!("site/download.html").replace("/*BASE*/", BASE_CSS).replace("/*BRAND*/", &brand_icon_css("nav .brand"));
         return Ok(html_response(200, html, "public, max-age=300"));
@@ -156,6 +169,10 @@ mod tests {
         assert_eq!(block_on(s.handle(get("/shots/home.webp"))).status, 404);
         let shot = block_on(s.handle(get("/shots/home.jpg")));
         assert_eq!(shot.status, 200);
+        let log = block_on(s.handle(get("/changelog")));
+        let log_html = String::from_utf8_lossy(log.bytes().unwrap()).to_string();
+        assert_eq!(log.status, 200);
+        assert!(log_html.contains("data-repo=\"r-dlp\"") && !log_html.contains("<!--RELEASES-->") && !log_html.contains("/*BASE*/"));
         let dl = block_on(s.handle(get("/download")));
         let dl_html = String::from_utf8_lossy(dl.bytes().unwrap()).to_string();
         assert_eq!(dl.status, 200);

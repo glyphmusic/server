@@ -46,6 +46,17 @@ async function main() {
     finally {readline.close();}
     return;
   }
+  if (args[0] === 'cloudflare') {
+    const cf=require('../lib/cloudflare.cjs');
+    if(args.length<2 || args.includes('--help') || args[1]==='help') {console.log(cf.configHelp());return;}
+    const rest=args.slice(1);const at=rest.indexOf('--config');
+    let file=require('node:fs').existsSync('wrangler.json')?'wrangler.json':'glyph-cloudflare/wrangler.json';
+    if(at>=0) {if(!rest[at+1]) throw new Error('--config needs a path');file=rest[at+1];rest.splice(at,2);}
+    const [action,name,...value]=rest;
+    const valid=action==='list'?rest.length===1:action==='set'?Boolean(name)&&value.length===1:['unset','secret','domain'].includes(action)?Boolean(name)&&value.length===0:false;
+    if(!valid) throw new Error('Usage:\n'+cf.configHelp());
+    cf.configure(file,action,name,value[0]);return;
+  }
   if (args[0] === 'deploy' || (args[0] === 'update' && args[1] === 'server' && args.includes('--worker-config'))) {
     const flag=args[0]==='deploy'?'--config':'--worker-config';
     const index=args.indexOf(flag);
@@ -60,6 +71,6 @@ async function main() {
   const result = spawnSync(file,args,{stdio:'inherit',env:{...process.env,GLYPH_NPM_MANAGED:'1'}});
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
-  if(result.status===0 && (args[0]==='help' || args.includes('--help'))) console.log('\nWith npm: glyph setup cloudflare [--dir directory] | glyph deploy [--config wrangler.json]\nCloudflare update: glyph update server --worker-config wrangler.json');
+  if(result.status===0 && (args[0]==='help' || args.includes('--help'))) console.log('\nWith npm: glyph setup cloudflare [--dir directory] | glyph deploy [--config wrangler.json]\nCloudflare options: glyph cloudflare list|set|unset|secret|domain (glyph cloudflare --help)\nCloudflare update: glyph update server --worker-config wrangler.json');
 }
 main().catch(error => {console.error(`glyph: ${error.message}`);process.exitCode=1;});

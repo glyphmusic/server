@@ -222,6 +222,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         config.youtube_daily_budget_units = l.youtube_daily_budget_units;
         config.import_max_pages = l.import_max_pages;
         config.companion_enabled = l.companion_enabled;
+        config.mcp_relay = l.mcp_relay;
         config.audio_cache_days = l.audio_cache_days;
         config.audio_cache_max_gb = l.audio_cache_max_gb;
         config.d1_max_mb = l.d1_max_mb;

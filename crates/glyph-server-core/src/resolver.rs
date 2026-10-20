@@ -333,7 +333,8 @@ mod tests {
         h.http.on("api.deezer.com", 200, r#"{"id":1,"title":"Get Lucky","preview":"https://cdn/preview.mp3"}"#);
         let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: true, track: want(), priority: vec![Audius] }));
         assert!(result.source.is_none());
-        assert_eq!(h.http.call_count("http"), 0);
+        // Only YouTube itself (native web search) may be asked.
+        assert_eq!(h.http.call_count("http"), h.http.call_count("www.youtube.com/youtubei"));
     }
 
     #[test]
@@ -343,7 +344,7 @@ mod tests {
         let result = block_on(resolve(&h.svc, ResolveRequest { youtube_only: true, track: want(), priority: vec![Audius] }));
         assert!(matches!(result.source, Some(PlaybackSource::Embed { provider: YouTube, .. })));
         assert_eq!(h.cmds.call_count("official audio"), 1);
-        assert_eq!(h.http.call_count("http"), 0);
+        assert_eq!(h.http.call_count("http"), h.http.call_count("www.youtube.com/youtubei"));
     }
 
     #[test]

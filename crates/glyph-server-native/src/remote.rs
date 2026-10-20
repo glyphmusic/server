@@ -78,6 +78,11 @@ pub enum RemoteCmd {
         #[command(subcommand)]
         cmd: Option<SwitchCmd>,
     },
+    /// Let AI assistants (MCP) control signed-in apps through this server; no argument shows it
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<SwitchCmd>,
+    },
     /// Accounts: device limits are set here, never by the app
     Accounts {
         #[command(subcommand)]
@@ -471,11 +476,27 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             println!("YouTube units per day           {}", l.youtube_daily_budget_units);
             println!("Pages per playlist import       {}", l.import_max_pages);
             println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
+            println!("AI assistants (MCP relay)       {}", if l.mcp_relay { "on" } else { "off" });
             println!("Companion audio in R2 (days)    {}", l.audio_cache_days);
             println!("R2 total ceiling (GB)          {}", l.audio_cache_max_gb);
             println!("R2 working target (GB)         {:.3}", f64::from(l.audio_cache_max_gb) - 0.5);
             println!("D1 database ceiling (MB)       {}", l.d1_max_mb);
             println!("D1 working target (MB)         {}", l.d1_max_mb - 50.min(l.d1_max_mb/10));
+            Ok(())
+        }
+        RemoteCmd::Mcp { cmd } => {
+            let c = Client::connect(a.server).await?;
+            let mut l: Limits = c.get("limits").await?;
+            let want = match cmd {
+                Some(SwitchCmd::On) => Some(true),
+                Some(SwitchCmd::Off) => Some(false),
+                Some(SwitchCmd::Status) | None => None,
+            };
+            if let Some(on) = want {
+                l.mcp_relay = on;
+                l = c.put("limits", &l).await?;
+            }
+            println!("mcp {}", if l.mcp_relay { "on (assistants sign in at /oauth/authorize, endpoint /mcp)" } else { "off (/mcp answers 404)" });
             Ok(())
         }
         RemoteCmd::Companion { cmd } => {

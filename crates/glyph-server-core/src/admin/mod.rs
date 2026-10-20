@@ -109,6 +109,7 @@ fn limits_of(svc: &Services) -> Limits {
         youtube_daily_budget_units: svc.config.youtube_daily_budget_units,
         import_max_pages: svc.config.import_max_pages,
         companion_enabled: svc.config.companion_enabled,
+        mcp_relay: svc.config.mcp_relay,
         audio_cache_days: svc.config.audio_cache_days,
         audio_cache_max_gb: svc.config.audio_cache_max_gb,
         d1_max_mb: svc.config.d1_max_mb,
@@ -284,6 +285,7 @@ impl Server {
                     c.youtube_daily_budget_units = l.youtube_daily_budget_units;
                     c.import_max_pages = l.import_max_pages;
                     c.companion_enabled = l.companion_enabled;
+                    c.mcp_relay = l.mcp_relay;
                     c.audio_cache_days = l.audio_cache_days;
                     c.audio_cache_max_gb = l.audio_cache_max_gb;
                     c.d1_max_mb = l.d1_max_mb;

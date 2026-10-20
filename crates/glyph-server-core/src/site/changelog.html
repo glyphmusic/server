@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>What's new — Glyph</title>
+<meta name="description" content="Every release of Glyph: the desktop app, the server, the companion and r-dlp, newest first.">
+<link rel="canonical" href="https://glyph.my/changelog">
+<meta name="theme-color" content="#0a0a09">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+/*BASE*/
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
+nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
+nav .brand { font-weight: 700; text-decoration: none; }
+/*BRAND*/
+nav .links { display: flex; gap: 3ch; }
+nav .links a { color: var(--dim); text-decoration: none; }
+nav .links a:hover, nav .links a[aria-current] { color: var(--fg); }
+h1 { font-size: clamp(24px, 4vw, 34px); margin: 24px 0 6px; letter-spacing: -0.02em; }
+.lead { color: var(--dim); margin: 0 0 24px; }
+.filters { display: flex; flex-wrap: wrap; gap: 1ch; margin-bottom: 28px; }
+.filters button { font: inherit; color: var(--dim); background: none; border: 1px solid var(--line); padding: 4px 1.5ch; cursor: pointer; }
+.filters button:hover { color: var(--fg); border-color: var(--dim); }
+.filters button[aria-pressed="true"] { color: var(--bg); background: var(--fg); border-color: var(--fg); }
+.rel { border-top: 1px solid var(--line); padding: 18px 0 8px; scroll-margin-top: 16px; }
+.rel header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 1.5ch; }
+.rel .ver { font-weight: 700; text-decoration: none; }
+.rel .ver:hover { color: var(--pink); }
+.rel .date { color: var(--dim); font-size: 12px; margin-left: auto; }
+.tag { font-size: 12px; padding: 1px 1ch; border: 1px solid var(--line); color: var(--dim); }
+.tag.desktop { color: var(--pink); border-color: var(--pink); }
+.rel ul { margin: 10px 0 0; padding-left: 2.5ch; }
+.rel li { margin: 4px 0; color: var(--fg); }
+.rel li::marker { color: var(--dim); }
+code { background: var(--panel-2); padding: 0 .4ch; }
+.empty { color: var(--dim); }
+footer { border-top: 1px solid var(--line); margin-top: 32px; padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
+footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a class="brand" href="/">glyph</a>
+  <div class="links">
+    <a href="/changelog" aria-current="page">changelog</a>
+    <a href="/download">download</a>
+    <a href="https://docs.glyph.my">docs</a>
+  </div>
+</nav>
+
+<h1>what's new</h1>
+<p class="lead">Every release of every part of Glyph, newest first. <!--COUNT--></p>
+<div class="filters" role="group" aria-label="Show releases of">
+  <button type="button" data-repo="" aria-pressed="true">all</button>
+  <button type="button" data-repo="desktop" aria-pressed="false">desktop app</button>
+  <button type="button" data-repo="server" aria-pressed="false">server &amp; cli</button>
+  <button type="button" data-repo="companion" aria-pressed="false">companion</button>
+  <button type="button" data-repo="r-dlp" aria-pressed="false">r-dlp</button>
+</div>
+
+<main id="releases">
+<!--RELEASES-->
+</main>
+
+<footer>
+  <span>glyph · mit / apache-2.0</span>
+  <span><a href="https://github.com/glyphmusic/desktop">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a> · <a href="https://github.com/glyphmusic/companion">companion</a> · <a href="https://github.com/glyphmusic/r-dlp">r-dlp</a></span>
+</footer>
+</div>
+<script>
+// Filter by repository; ?repo=server (or #server-0.3.0) keeps the choice in the URL.
+(() => {
+  const buttons = [...document.querySelectorAll(".filters button")];
+  const show = repo => {
+    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.repo === repo));
+    for (const r of document.querySelectorAll(".rel")) r.hidden = Boolean(repo) && r.dataset.repo !== repo;
+    const url = new URL(location.href);
+    if (repo) url.searchParams.set("repo", repo); else url.searchParams.delete("repo");
+    history.replaceState(null, "", url);
+  };
+  for (const b of buttons) b.addEventListener("click", () => show(b.dataset.repo));
+  const wanted = new URLSearchParams(location.search).get("repo");
+  if (wanted && buttons.some(b => b.dataset.repo === wanted)) show(wanted);
+})();
+</script>
+</body>
+</html>

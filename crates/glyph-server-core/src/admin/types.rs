@@ -123,6 +123,9 @@ pub struct Limits {
     /// yt-dlp companion (YouTube search and audio). Off = YouTube answers 403.
     #[serde(default = "enabled")]
     pub companion_enabled: bool,
+    /// AI assistants (MCP) reach signed-in apps through this server.
+    #[serde(default = "enabled")]
+    pub mcp_relay: bool,
     /// Days companion audio stays in R2 (Worker only).
     #[serde(default = "audio_days")]
     pub audio_cache_days: u32,
@@ -143,6 +146,7 @@ impl Default for Limits {
             youtube_daily_budget_units: config.youtube_daily_budget_units,
             import_max_pages: config.import_max_pages,
             companion_enabled: config.companion_enabled,
+            mcp_relay: config.mcp_relay,
             audio_cache_days: config.audio_cache_days,
             audio_cache_max_gb: config.audio_cache_max_gb,
             d1_max_mb: config.d1_max_mb,

@@ -3,6 +3,7 @@
 //! (start at boot), `remote` (manage a running server with the admin
 //! password) and self-update.
 
+mod config_cmd;
 mod doctor;
 mod diagnostics;
 mod management;
@@ -31,6 +32,9 @@ Getting started:
   glyph setup              answer a few questions, writes server.toml
   glyph                    run the server
   glyph doctor             check config, keys, ports and reachability
+  glyph config list        every option, its value and where it comes from
+  glyph config set rate_limit_per_min 120
+  glyph config set lastfm_api_key   (asks without echo)
   glyph service install    start it automatically at boot
 
 yt-dlp companion of the Cloudflare Worker (takes effect at once):
@@ -91,6 +95,11 @@ enum Cmd {
     Setup(setup::SetupArgs),
     /// Check config, API keys, ports and whether the server is reachable
     Doctor,
+    /// Show or change server.toml options: list, get, set, unset, path
+    Config {
+        #[command(subcommand)]
+        cmd: config_cmd::ConfigCmd,
+    },
     /// Run the server in the background at boot (systemd, launchd, Windows service)
     Service {
         #[command(subcommand)]
@@ -263,6 +272,11 @@ fn main() {
                 fail(e);
             }
         }
+        Some(Cmd::Config { cmd }) => {
+            if let Err(e) = config_cmd::run(cmd, &config_path) {
+                fail(e);
+            }
+        }
         Some(Cmd::Doctor) => {
             let s = load_settings(&cli);
             let ok = runtime().block_on(doctor::run(&s));
@@ -308,6 +322,7 @@ mod cli_tests {
         assert!(matches!(Cli::try_parse_from(["glyph","check","r-dlp","--local"]).unwrap().command,Some(Cmd::Check{target:management::Component::Rdlp,local:true,..})));
         assert!(matches!(Cli::try_parse_from(["glyph","update","companion","--check","--server","https://own.example"]).unwrap().command,Some(Cmd::Update{check:true,..})));
         assert!(matches!(Cli::try_parse_from(["glyph-server","self-update"]).unwrap().command,Some(Cmd::SelfUpdate)));
+        assert!(matches!(Cli::try_parse_from(["glyph","--config","x.toml","config","set","bind","0.0.0.0:1"]).unwrap().command,Some(Cmd::Config{cmd:config_cmd::ConfigCmd::Set{..}})));
         let help=Cli::try_parse_from(["glyph","help"]).err().unwrap();
         assert_eq!(help.kind(),clap::error::ErrorKind::DisplayHelp);
         assert!(help.to_string().contains("Usage: glyph"));

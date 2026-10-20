@@ -91,11 +91,96 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         .collect())
 }
 
+/// Import: a playable song keeps SoundCloud as its source (the embed plays
+/// it), others are metadata only and get matched elsewhere by the app.
+fn import_track(v: &serde_json::Value) -> Option<Track> {
+    let v = if v["track"].is_object() { &v["track"] } else { v };
+    let i: Item = serde_json::from_value(v.clone()).ok()?;
+    let playable = i.streamable.unwrap_or(true) && i.access.as_deref().map(|a| a == "playable").unwrap_or(true);
+    let (id, source) = if playable { (i.id.to_string(), ProviderId::SoundCloud) } else { (format!("sc:{}", i.id), ProviderId::MusicBrainz) };
+    let mut t = new_track(id, source, &i.title, i.user.as_ref().map(|u| u.username.as_str()).unwrap_or(""));
+    t.duration_ms = i.duration;
+    t.cover_url = i.artwork_url.map(|u| u.replace("-large.", "-t500x500."));
+    t.permalink = i.permalink_url;
+    t.isrc = i.isrc.filter(|s| !s.is_empty());
+    Some(t)
+}
+
+/// Every song of a paged list (`linked_partitioning`, `next_href`).
+async fn import_paged(svc: &Services, tok: &str, first: String) -> PResult<Vec<Track>> {
+    let mut out = Vec::new();
+    let mut url = first;
+    for _ in 0..svc.config.import_max_pages.max(1) {
+        let v: serde_json::Value = fetch_json(svc, HttpRequest::get(url.clone()).header("authorization", format!("OAuth {tok}"))).await?;
+        let items = v["collection"].as_array().cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
+        out.extend(items.iter().filter_map(import_track));
+        match v["next_href"].as_str().filter(|s| !s.is_empty()) {
+            Some(n) => url = n.to_string(),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Name and songs of a soundcloud.com link: a set, a user's likes
+/// (`/<user>/likes`), a user's tracks (`/<user>`, `/<user>/tracks`) or one song.
+pub async fn import_link(svc: &Services, url: &str, segs: &[String]) -> PResult<(String, Vec<Track>)> {
+    let tok = token(svc).await?;
+    let likes = segs.get(1).is_some_and(|s| s == "likes");
+    let user_tracks = segs.len() == 1 || segs.get(1).is_some_and(|s| s == "tracks");
+    let target = if likes || user_tracks { format!("https://soundcloud.com/{}", segs[0]) } else { url.to_string() };
+    let v: serde_json::Value = fetch_json(
+        svc,
+        HttpRequest::get(build_url("https://api.soundcloud.com/resolve", &[("url", &target)])).header("authorization", format!("OAuth {tok}")),
+    )
+    .await?;
+    let urn = v["urn"].as_str().map(str::to_string).or_else(|| v["id"].as_u64().map(|n| n.to_string())).ok_or(ProviderError::Parse)?;
+    let page = |path: String| build_url(&format!("https://api.soundcloud.com{path}"), &[("linked_partitioning", "true"), ("limit", "200")]);
+    match v["kind"].as_str().unwrap_or("") {
+        "track" => {
+            let t = import_track(&v).ok_or(ProviderError::Parse)?;
+            Ok((t.title.clone(), vec![t]))
+        }
+        "playlist" => {
+            let name = v["title"].as_str().unwrap_or("SoundCloud set").to_string();
+            Ok((name, import_paged(svc, &tok, page(format!("/playlists/{urn}/tracks"))).await?))
+        }
+        "user" => {
+            let user = v["username"].as_str().unwrap_or("SoundCloud").to_string();
+            if likes {
+                Ok((format!("{user} · likes"), import_paged(svc, &tok, page(format!("/users/{urn}/likes/tracks"))).await?))
+            } else {
+                Ok((format!("{user} · tracks"), import_paged(svc, &tok, page(format!("/users/{urn}/tracks"))).await?))
+            }
+        }
+        _ => Err(ProviderError::Parse),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn import_likes_of_a_profile() {
+        let h = harness(all_secrets());
+        h.http.on("oauth/token", 200, r#"{"access_token":"TOK","expires_in":3600}"#);
+        h.http.on("resolve", 200, r#"{"kind":"user","id":42,"username":"odesza"}"#);
+        h.http.on(
+            "likes/tracks",
+            200,
+            r#"{"collection":[{"id":5,"title":"S","user":{"username":"U"},"duration":123000,"streamable":true,"access":"playable"},
+                {"id":6,"title":"Blocked","user":{"username":"U"},"access":"blocked"}],"next_href":null}"#,
+        );
+        let segs = vec!["odesza".to_string(), "likes".to_string()];
+        let (name, t) = block_on(import_link(&h.svc, "https://soundcloud.com/odesza/likes", &segs)).unwrap();
+        assert_eq!(name, "odesza · likes");
+        assert_eq!(t.len(), 2);
+        assert_eq!((t[0].id.as_str(), t[0].source), ("5", ProviderId::SoundCloud));
+        assert_eq!((t[1].id.as_str(), t[1].source), ("sc:6", ProviderId::MusicBrainz));
+    }
 
     #[test]
     fn token_is_cached_and_not_leaked() {

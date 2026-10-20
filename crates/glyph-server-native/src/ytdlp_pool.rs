@@ -1,6 +1,7 @@
 //! Three independent extractors: different songs run in parallel, while each
-//! process reuses HTTP sessions and extractor state. GLYPH_RDLP_PATH opts in
-//! to native r-dlp; the command runner retains its yt-dlp fallback.
+//! process reuses HTTP sessions and extractor state. Native r-dlp is used on
+//! every OS whenever it is found (GLYPH_RDLP_PATH, `rdlp_path`, next to this
+//! binary or in PATH); the command runner retains its yt-dlp fallback.
 use glyph_server_core::CommandError;
 use std::sync::{atomic::{AtomicUsize, Ordering}, OnceLock};
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin, ChildStdout}, sync::{Mutex, MutexGuard}};
@@ -26,9 +27,30 @@ fn recycle(native: bool, requests: u32) -> bool {
     !native && requests >= 100
 }
 
+static RDLP: OnceLock<Option<String>> = OnceLock::new();
+
+/// Picks the r-dlp executable once at startup: the env var or configured path
+/// if set, else `r-dlp` next to this binary or in PATH, if it answers.
+pub fn init_rdlp(configured: Option<&str>) -> Option<&'static str> {
+    RDLP.get_or_init(|| {
+        let explicit = std::env::var("GLYPH_RDLP_PATH").ok().or(configured.map(str::to_string)).filter(|p| !p.trim().is_empty());
+        if explicit.is_some() { return explicit; }
+        let name = if cfg!(windows) { "r-dlp.exe" } else { "r-dlp" };
+        let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).filter(|p| p.is_file());
+        beside.map(|p| p.to_string_lossy().into_owned()).into_iter().chain([name.to_string()])
+            .find(|p| std::process::Command::new(p).arg("--version").stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()))
+    }).as_deref()
+}
+
+pub fn rdlp_path() -> Option<&'static str> {
+    RDLP.get().and_then(|p| p.as_deref())
+}
+
 pub fn enabled() -> bool {
-    cfg!(unix) && std::env::var("YTDLP_SERVICE_TOKEN").is_ok_and(|token| token.len() >= 32)
-        && std::env::var("GLYPH_YTDLP_PERSISTENT").as_deref() != Ok("0")
+    if std::env::var("GLYPH_YTDLP_PERSISTENT").as_deref() == Ok("0") { return false; }
+    // r-dlp needs no Python and answers warm requests in well under a second.
+    rdlp_path().is_some() || (cfg!(unix) && std::env::var("YTDLP_SERVICE_TOKEN").is_ok_and(|token| token.len() >= 32))
 }
 
 struct Worker {
@@ -42,7 +64,7 @@ struct Worker {
 
 impl Worker {
     async fn start(program: &str) -> Result<Self, CommandError> {
-        let native_path = std::env::var("GLYPH_RDLP_PATH").ok().filter(|p| !p.trim().is_empty());
+        let native_path = rdlp_path();
         let native = native_path.is_some();
         let mut command = if let Some(path) = native_path {
             let mut command = tokio::process::Command::new(path);

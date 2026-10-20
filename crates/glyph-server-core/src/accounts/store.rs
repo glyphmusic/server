@@ -198,6 +198,24 @@ pub trait AccountStore: MaybeSendSync {
     async fn profile(&self, user_id: &str) -> StoreResult<Option<Profile>>;
     /// Insert or replace (`delete_user` removes it).
     async fn put_profile(&self, user_id: &str, profile: &Profile) -> StoreResult<()>;
+
+    // ---- MCP relay mailbox: short-lived entries per scope (a user id or an
+    // internal namespace). Expired entries read as absent.
+
+    /// Insert or replace `scope/key` until `expires` (ms).
+    async fn mcp_put(&self, _scope: &str, _key: &str, _value: &str, _expires: u64) -> StoreResult<()> {
+        Err(StoreError("MCP relay not supported by this store".into()))
+    }
+    async fn mcp_get(&self, _scope: &str, _key: &str, _now: u64) -> StoreResult<Option<String>> {
+        Ok(None)
+    }
+    /// Removes and returns every live entry of `scope` whose key starts with `prefix`.
+    async fn mcp_take(&self, _scope: &str, _prefix: &str, _now: u64) -> StoreResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+    async fn mcp_delete(&self, _scope: &str, _key: &str) -> StoreResult<()> {
+        Ok(())
+    }
 }
 
 /// Binary objects (cover images).
@@ -222,6 +240,7 @@ struct Mem {
     shares: BTreeMap<String, Share>,
     profiles: BTreeMap<String, Profile>,
     default_limit: Option<u8>,
+    mailbox: BTreeMap<(String, String), (String, u64)>,
 }
 
 /// Device limit of accounts nobody configured.
@@ -455,6 +474,35 @@ impl AccountStore for MemStore {
         if m.users.contains_key(user_id) {
             m.profiles.insert(user_id.to_string(), profile.clone());
         }
+        Ok(())
+    }
+
+    async fn mcp_put(&self, scope: &str, key: &str, value: &str, expires: u64) -> StoreResult<()> {
+        self.m.lock().unwrap().mailbox.insert((scope.into(), key.into()), (value.into(), expires));
+        Ok(())
+    }
+
+    async fn mcp_get(&self, scope: &str, key: &str, now: u64) -> StoreResult<Option<String>> {
+        let m = self.m.lock().unwrap();
+        Ok(m.mailbox.get(&(scope.to_string(), key.to_string())).filter(|(_, e)| *e > now).map(|(v, _)| v.clone()))
+    }
+
+    async fn mcp_take(&self, scope: &str, prefix: &str, now: u64) -> StoreResult<Vec<(String, String)>> {
+        let mut m = self.m.lock().unwrap();
+        let keys: Vec<(String, String)> = m.mailbox.keys().filter(|(s, k)| s == scope && k.starts_with(prefix)).cloned().collect();
+        let mut out = Vec::new();
+        for k in keys {
+            if let Some((v, e)) = m.mailbox.remove(&k) {
+                if e > now {
+                    out.push((k.1, v));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn mcp_delete(&self, scope: &str, key: &str) -> StoreResult<()> {
+        self.m.lock().unwrap().mailbox.remove(&(scope.to_string(), key.to_string()));
         Ok(())
     }
 }

@@ -1,12 +1,9 @@
-# Glyph CLI / Server 0.3.0
+# Glyph CLI / Server 0.4.0
 
-- Install with `npm install --global glyph-server`; run `glyph help`.
-- Inspect `glyph version all`, `glyph check companion` and `glyph check r-dlp`.
-- Update individual components, or pull/recreate/verify your Docker companion with `--compose-dir`.
-- Self-host with `glyph setup cloudflare`: prebuilt Worker, migrations and your own resources. R2 is optional; Rust and a desktop checkout are not needed.
-- Source builds include the protocol snapshot and Docker builds use matching builder/runtime distributions.
-- Include streaming audio performance improvements and optional account-only API access.
+- Relay AI assistants (MCP) to signed-in desktop apps: `/mcp` with OAuth 2.1, in-app approval and `glyph remote mcp on|off`. Requires D1 migration 0014.
+- `/v1/import/spotify` also reads SoundCloud links, so the app's "Transfer music" needs no key of its own.
+- Documentation at `docs.glyph.my` (search, `llms.txt`, Markdown pages), a `/changelog` page and a questions section on the landing page.
+- Search YouTube through InnerTube directly and accept the app's YouTube ID hint.
+- New `glyph config list|get|set|unset|path` and `glyph cloudflare list|set|unset|secret|domain` commands.
 
-Native binary replacement reports when a restart remains necessary. Docker and npm-managed processes use their deployment/package update path. Existing companions need this server release before the new management endpoints are available.
-
-Cloudflare requires D1 migrations through 0013_audio_variant_jobs.sql. The npm tarball and native archives are attached with checksums; npm publication is a separate authenticated release step.
+Cloudflare requires D1 migrations through 0014. The npm tarball and native archives are attached with checksums; npm publication is a separate authenticated release step.

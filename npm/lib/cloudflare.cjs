@@ -108,4 +108,87 @@ async function deploy(file,{run=wrangler,copy=copyPayload,healthFetch=fetch}={})
     console.log(`Verified Glyph ${health.server_version}: ${origin}\nNext: glyph remote login ${origin}`);
   } else console.log('Deployment finished. Check your configured public URL with glyph version server --server <url>.');
 }
-module.exports={wrangler,template,setup,deploy,copyPayload};
+// Options of a deployed Worker. Plain values live in wrangler.json `vars`
+// (applied by the next `glyph deploy`); secrets go to Cloudflare directly.
+const VARS={
+  RATE_LIMIT_PER_MIN:{help:'anonymous requests per minute and IP (default 60)',check:v=>/^\d{1,6}$/.test(v)},
+  YOUTUBE_DAILY_BUDGET_UNITS:{help:'YouTube Data API units per day (default 9000)',check:v=>/^\d{1,9}$/.test(v)},
+  REQUIRE_ACCOUNT:{help:'true = only signed-in apps may use the API',check:v=>/^(true|false)$/.test(v)},
+  PUBLIC_ORIGIN:{help:'HTTPS origin of this Worker; accounts and passkeys are bound to it',check:v=>httpsOrigin(v)},
+  SHARE_ORIGIN:{help:'origin of short /p/ links (its domain must route /p/* here)',check:v=>httpsOrigin(v)},
+  YTDLP_SERVICE_URL:{help:'HTTPS URL of your companion (YouTube); pair with secret YTDLP_SERVICE_TOKEN',check:v=>httpsOrigin(v)},
+};
+const SECRETS={
+  YOUTUBE_API_KEY:'YouTube Data API key (playlist import)',
+  JAMENDO_CLIENT_ID:'Jamendo client ID',
+  SOUNDCLOUD_CLIENT_ID:'SoundCloud client ID',
+  SOUNDCLOUD_CLIENT_SECRET:'SoundCloud client secret',
+  SPOTIFY_CLIENT_ID:'Spotify client ID (playlist import)',
+  SPOTIFY_CLIENT_SECRET:'Spotify client secret',
+  LASTFM_API_KEY:'Last.fm API key (radio, similar artists)',
+  YTDLP_SERVICE_TOKEN:'companion token, 32+ characters',
+  GLYPH_SERVER_BEARER:'shared bearer every app must send (private server)',
+};
+function httpsOrigin(v) {
+  try {const u=new URL(v);return u.protocol==='https:' && !u.username && !u.password && u.pathname==='/' && !u.search && !u.hash && u.origin===v;}
+  catch {return false;}
+}
+function writeConfig(file,config) {fs.writeFileSync(file,JSON.stringify(config,null,2)+'\n');}
+const PASSKEY_WARNING='Warning: passkeys registered on the old origin stop working on the new one; password sign-in keeps working.';
+function configHelp() {
+  const pad=Math.max(...Object.keys({...VARS,...SECRETS}).map(k=>k.length));
+  return ['glyph cloudflare list                    values in wrangler.json',
+    'glyph cloudflare set <NAME> <value>      change a value, then run glyph deploy',
+    'glyph cloudflare unset <NAME>            back to the default, then run glyph deploy',
+    'glyph cloudflare secret <NAME>           store a secret in Cloudflare (asked without echo, applies at once)',
+    'glyph cloudflare domain <host>           serve on your own domain (custom domain + PUBLIC_ORIGIN)',
+    'All take [--config wrangler.json]. Runtime limits (rate, accounts, companion, MCP) also change live with glyph remote.',
+    '','Values:',...Object.entries(VARS).map(([k,v])=>`  ${k.padEnd(pad)}  ${v.help}`),
+    '','Secrets:',...Object.entries(SECRETS).map(([k,v])=>`  ${k.padEnd(pad)}  ${v}`)].join('\n');
+}
+function configure(file,action,name,value,{run=wrangler,log=console.log}={}) {
+  file=path.resolve(file);
+  if(!fs.existsSync(file)) throw new Error(`${file} not found; run glyph setup cloudflare first or pass --config.`);
+  if(path.extname(file)!=='.json') throw new Error('Only generated wrangler.json projects can be changed here; edit TOML projects by hand.');
+  const config=readConfig(file);config.vars=config.vars||{};
+  const key=String(name||'').toUpperCase();
+  if(action==='list') {
+    for(const [k,v] of Object.entries(VARS)) log(`${k} = ${config.vars[k]??'(default)'}\n    ${v.help}`);
+    const custom=Object.keys(config.vars).filter(k=>!VARS[k]);
+    if(custom.length) log(`other vars: ${custom.join(', ')}`);
+    log(`custom domain: ${(config.routes||[]).filter(r=>r.custom_domain).map(r=>r.pattern).join(', ')||'none (workers.dev)'}`);
+    log(`Secrets are not readable; list their names with: npx wrangler secret list --config ${file}`);
+    return;
+  }
+  if(action==='set' || action==='unset') {
+    if(!VARS[key]) throw new Error(`Unknown value ${name||''}. ${SECRETS[key]?`${key} is a secret: glyph cloudflare secret ${key}`:'See glyph cloudflare --help.'}`);
+    if(action==='set') {
+      const v=String(value??'').trim().replace(/\/$/,'');
+      if(!VARS[key].check(v)) throw new Error(`${key}: invalid value. ${VARS[key].help}`);
+      if(key==='PUBLIC_ORIGIN' && config.vars.PUBLIC_ORIGIN && config.vars.PUBLIC_ORIGIN!==v) log(PASSKEY_WARNING);
+      config.vars[key]=v;
+    } else delete config.vars[key];
+    writeConfig(file,config);
+    log(`${key} ${action==='set'?'= '+config.vars[key]:'removed'} in ${file}. Run glyph deploy --config ${file} to apply.`);
+    return;
+  }
+  if(action==='secret') {
+    if(!SECRETS[key]) throw new Error(`Unknown secret ${name||''}. ${VARS[key]?`${key} is a plain value: glyph cloudflare set ${key} <value>`:'See glyph cloudflare --help.'}`);
+    run(['secret','put',key,'--config',file]);
+    log(`${key} stored in Cloudflare; the Worker uses it right away.`);
+    return;
+  }
+  if(action==='domain') {
+    const host=String(name||'').trim().toLowerCase();
+    if(!/^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) throw new Error('Use a hostname like glyph.example.com (no scheme or path); its zone must be on your Cloudflare account.');
+    const origin=`https://${host}`;
+    if(config.vars.PUBLIC_ORIGIN && config.vars.PUBLIC_ORIGIN!==origin) log(PASSKEY_WARNING);
+    config.routes=[...(config.routes||[]).filter(r=>!r.custom_domain),{pattern:host,custom_domain:true}];
+    config.vars.PUBLIC_ORIGIN=origin;
+    writeConfig(file,config);
+    log(`${host} set as custom domain and PUBLIC_ORIGIN. Run glyph deploy --config ${file} to apply.`);
+    return;
+  }
+  throw new Error('Usage:\n'+configHelp());
+}
+module.exports={wrangler,template,setup,deploy,copyPayload,configure,configHelp,VARS,SECRETS};

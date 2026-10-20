@@ -33,6 +33,10 @@ pub struct FileConfig {
     /// yt-dlp executable for YouTube search (default: found in `PATH`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ytdlp_path: Option<String>,
+    /// r-dlp executable for fast YouTube audio URLs (default: next to this
+    /// binary or in `PATH`; yt-dlp stays the fallback).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rdlp_path: Option<String>,
     /// Serve audio through `/v1/audio/...` instead of handing out provider URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_audio: Option<bool>,
@@ -152,6 +156,8 @@ pub struct Settings {
     pub youtube_daily_budget_units: u64,
     /// Configured yt-dlp path, if any (the working one is resolved at startup).
     pub ytdlp_path: Option<String>,
+    /// Configured r-dlp path, if any (otherwise looked up at startup).
+    pub rdlp_path: Option<String>,
     /// Whether `/v1/resolve` hands out `/v1/audio/...` URLs (default true).
     pub proxy_audio: bool,
     pub import_max_pages: u32,
@@ -300,6 +306,7 @@ impl Settings {
             rate_limit_per_min: env("GLYPH_RATE_LIMIT_PER_MIN").and_then(|v| v.parse().ok()).or(file.rate_limit_per_min).unwrap_or(60),
             youtube_daily_budget_units: env("YOUTUBE_DAILY_BUDGET_UNITS").and_then(|v| v.parse().ok()).or(file.youtube_daily_budget_units).unwrap_or(9000),
             ytdlp_path: env("YTDLP_PATH").or(file.ytdlp_path),
+            rdlp_path: env("GLYPH_RDLP_PATH").or(file.rdlp_path),
             proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
