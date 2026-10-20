@@ -20,10 +20,10 @@ credentials belong in the source tree or npm payload.
    before publishing it. npm may require account-specific 2FA/OTP approval.
 
 ```sh
-gh release download v0.3.0 --repo glyphmusic/server --pattern glyph-server-0.3.0.tgz --pattern SHA256SUMS.txt
+gh release download v0.4.0 --repo glyphmusic/server --pattern glyph-server-0.4.0.tgz --pattern SHA256SUMS.txt
 # Verify the exact tarball checksum against SHA256SUMS.txt first.
 npm login
-npm publish ./glyph-server-0.3.0.tgz --access public
+npm publish ./glyph-server-0.4.0.tgz --access public
 ```
 
 Verify `npm view glyph-server version`, then install into a clean prefix and run

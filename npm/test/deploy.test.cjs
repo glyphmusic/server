@@ -18,7 +18,7 @@ test('deployment migrates before publishing, detects own URL and verifies versio
   try {
     await deploy(file,{run,copy:()=>{},healthFetch:async url=>{
       assert.equal(url,'https://my-glyph.own-account.workers.dev/v1/health');
-      return Response.json({server_version:'0.3.0',accounts:true});
+      return Response.json({server_version:'0.4.0',accounts:true});
     }});
     assert.deepEqual(calls[0].slice(0,4),['d1','migrations','apply','GLYPH_DB']);
     assert.equal(calls.filter(args=>args[0]==='deploy').length,2);

@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-20
 
+- Transfer music (Settings > Transfer music, or Library > Transfer music), with no login and nothing to set up: Spotify liked songs and playlists come over by copying them in the Spotify app (Ctrl+A, Ctrl+C) and pressing Paste; YouTube Music by playlist link or a Google Takeout file; Deezer and SoundCloud from a public profile; Last.fm from the user name. Runs in the background, continues after a restart, and lists that come over twice only get their new songs. Pasting many links into search opens it too.
+- Links without keys: Spotify playlists, albums, artists and songs are read from Spotify's public embed page when neither the server nor the app has a Spotify key (up to 100 songs per list), YouTube playlists from YouTube's web endpoint without an API key.
+- New playlist: paste a link instead of typing songs. Spotify playlists, albums, artists and songs, Deezer playlists, albums, artists and profiles, SoundCloud sets, likes and tracks, YouTube playlists, public Apple Music playlists and albums, Bandcamp albums, Last.fm profiles and short links (on.soundcloud.com, deezer.page.link, spotify.link) work; pasting such a link into search does the same. Playlist files (CSV, Spotify export, M3U, XSPF) import from the same dialog.
+- Settings > Support > Docs opens the new documentation at docs.glyph.my.
 - Add Discord Rich Presence (Settings > Integrations, off by default): the current song, artist, album and cover appear in your Discord profile. A Discord application ID from the Developer Portal is needed unless this build ships one.
 - Queue: songs added with Play next / Add to queue form an "Up next" section that always plays first; the rest is labelled "Next from: <list>". Click any queued song to continue from there.
 - Shuffle styles (Settings > Playback, or right-click Shuffle): smart shuffle spreads artists and moves recently heard songs back; fully random is uniform.

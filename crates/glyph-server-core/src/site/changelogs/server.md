@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-20
 
+- `/v1/import/spotify` also reads SoundCloud links (sets, a profile's likes or tracks, single songs) with the server's SoundCloud key, so the app's "Transfer music" needs no key of its own.
+- Serve the documentation at `docs.glyph.my` (and `/docs` on other hosts), rendered from the Markdown in github.com/glyphmusic/docs at request time: a push to `main` is live within about a minute without a deploy. `glyph.my/docs` redirects there. Pages have a search (Ctrl+K or /, index at `search.json`); for LLMs there are `llms.txt`, `llms-full.txt` and every page as Markdown at its `.md` address.
 - Relay AI assistants (MCP) to signed-in desktop apps: Streamable HTTP endpoint `/mcp`, OAuth 2.1 with PKCE and dynamic client registration, a sign-in page confirmed in the app, and `glyph remote mcp on|off` for owners (migration 0014).
 - Search YouTube through InnerTube directly before falling back to yt-dlp, and accept the app's YouTube ID hint to skip the search.
 - Add `/changelog`: every release of the desktop app, server, companion and r-dlp, newest first, filterable by part (`scripts/snapshot-changelogs.mjs`).

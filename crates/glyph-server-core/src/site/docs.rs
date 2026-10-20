@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn rewrites_links() {
         let c = ctx();
-        assert_eq!(link("install.md", &c), "/install");
+        assert_eq!(link("install.md", &c), "/getting-started/install");
         assert_eq!(link("../using-glyph/sound.md#play-on-another-computer-mpd", &c), "/using-glyph/sound#play-on-another-computer-mpd");
         assert_eq!(link("../README.md", &c), "/");
         assert_eq!(link("https://github.com/glyphmusic", &c), "https://github.com/glyphmusic");
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(link("../../../etc/passwd", &c), "#");
         assert_eq!(link("#tips", &c), "#tips");
         let d = Ctx { base: "/docs", ..ctx() };
-        assert_eq!(link("first-steps.md", &d), "/docs/first-steps");
+        assert_eq!(link("first-steps.md", &d), "/docs/getting-started/first-steps");
         assert_eq!(image("../.gitbook/assets/shot.png", &c), format!("https://raw.githubusercontent.com/glyphmusic/docs/{SHA}/.gitbook/assets/shot.png"));
         assert_eq!(image("data:image/png;base64,xx", &c), "");
     }
@@ -811,7 +811,7 @@ mod tests {
         let doc = render_markdown(md, &ctx());
         assert_eq!(doc.title, "Install");
         assert_eq!(doc.description.as_deref(), Some("A short lead."));
-        assert!(doc.html.contains("href=\"/first-steps\""));
+        assert!(doc.html.contains("href=\"/getting-started/first-steps\""));
         assert!(doc.html.contains("<div class=\"hint warning\">") && doc.html.contains("Careful."));
         assert!(doc.html.contains("{% not a tag %}"), "code blocks stay as written");
         assert!(doc.html.contains("<p class=\"tab-title\">Native</p>"));
