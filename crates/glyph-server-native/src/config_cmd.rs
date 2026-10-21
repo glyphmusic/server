@@ -51,6 +51,7 @@ const OPTS: &[Opt] = &[
     opt("youtube_daily_budget_units", Kind::Int, Some("YOUTUBE_DAILY_BUDGET_UNITS"), "9000", "YouTube Data API units per day"),
     opt("ytdlp_path", Kind::Text, Some("YTDLP_PATH"), "from PATH", "yt-dlp executable for YouTube"),
     opt("proxy_audio", Kind::Bool, Some("GLYPH_PROXY_AUDIO"), "true", "stream audio through this server"),
+    opt("playlist_max_tracks", Kind::Int, None, "5000", "maximum songs per playlist (1-50000)"),
     opt("import_max_pages", Kind::Int, None, "5", "pages fetched per playlist import"),
     opt("update_repo", Kind::Text, Some("GLYPH_SERVER_REPO"), "glyphmusic/server", "GitHub repository used for updates"),
     opt("tls.domain", Kind::Text, Some("GLYPH_TLS_DOMAIN"), "-", "domain for automatic Let's Encrypt HTTPS"),

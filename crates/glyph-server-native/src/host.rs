@@ -61,6 +61,7 @@ impl AdminHost for NativeHost {
         cfg.require_account = Some(l.require_account);
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
         cfg.import_max_pages = Some(l.import_max_pages);
+        cfg.playlist_max_tracks = Some(l.playlist_max_tracks);
         save(&self.config_path, &cfg).map_err(HostError::Failed)?;
         let switched = if l.companion_enabled {
             std::fs::remove_file(&self.companion_flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
@@ -109,17 +110,18 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 5000, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(host.companion_flag.exists());
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 8000, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
             .await
             .unwrap();
         assert!(!host.companion_flag.exists());
         let cfg = load_file(&host.config_path, true).unwrap();
         assert_eq!(cfg.keys.youtube_api_key.as_deref(), Some("AIzaSECRET"));
         assert_eq!(cfg.rate_limit_per_min, Some(7));
+        assert_eq!(cfg.playlist_max_tracks, Some(8000));
         assert_eq!(cfg.require_account,Some(false));
         // removing
         m.insert("youtube_api_key".to_string(), None);

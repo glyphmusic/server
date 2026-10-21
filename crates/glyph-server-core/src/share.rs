@@ -328,6 +328,14 @@ fn ic(name: &str) -> String {
         "download" => (false, r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#),
         "ellipsis-vertical" => (false, r#"<circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>"#),
         "check" => (false, r#"<path d="M20 6 9 17l-5-5"/>"#),
+        "search" => (false, r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#),
+        "house" => (false, r#"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#),
+        "refresh-cw" => (false, r#"<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>"#),
+        "clock" => (false, r#"<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>"#),
+        "user-round" => (false, r#"<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>"#),
+        "server" => (false, r#"<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>"#),
+        "users" => (false, r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>"#),
+        "book-open" => (false, r#"<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>"#),
         _ => (false, ""),
     };
     format!(
@@ -500,6 +508,111 @@ glyphPlayer({base_js},{count});
     )
 }
 
+// ---- special pages ---------------------------------------------------------
+
+/// A full-page state: the app's empty / error state (`ascii_state`), centred.
+struct State<'a> {
+    status: u16,
+    /// Shown instead of the status in the `[ … ]` tag.
+    tag: Option<&'a str>,
+    icon: &'a str,
+    title: &'a str,
+    sub: &'a str,
+    /// (icon, label, href); the first is the white pill, the rest back pills.
+    actions: &'a [(&'a str, &'a str, &'a str)],
+}
+
+fn state_html(l: Lang, s: &State) -> String {
+    let actions: String = s
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(i, (icon, label, href))| format!(r#"<a class="{}" href="{}">{}{}</a>"#, if i == 0 { "pill" } else { "backpill" }, escape(href), ic(icon), escape(label)))
+        .collect();
+    format!(
+        r#"{head}{BG}<header class="titlebar"><a class="logo" href="/">glyph</a><a class="backpill" href="/download">{dl_ic}{dl}</a></header>
+<main class="state"><div class="state-box"><div class="state-row"><div class="state-ic">{icon}</div><div class="state-txt"><span class="tag mono">[ {status} ]</span><h1>{title}</h1><p>{sub}</p></div></div><div class="state-act">{actions}</div></div></main>
+<script>{GLOW_JS}
+glyphGlow(document.getElementById("glow"),document.getElementById("ascii"),44);
+</script></body></html>"#,
+        head = head(l, &format!("{} · Glyph", escape(s.title)), "", "page"),
+        dl_ic = ic("download"),
+        dl = tr(l, "download"),
+        icon = ic(s.icon),
+        status = s.tag.map_or_else(|| s.status.to_string(), str::to_string),
+        title = escape(s.title),
+        sub = escape(s.sub),
+    )
+}
+
+/// The page a browser gets instead of a JSON error: 404, sign-in needed,
+/// rate limited, server busy, ... `code` is the error code of the JSON body.
+pub fn error_page(status: u16, code: &str, retry_after_s: Option<u64>, l: Lang) -> Response {
+    let de = l == Lang::De;
+    let t = |en: &'static str, de_: &'static str| if de { de_ } else { en };
+    let (icon, title, sub) = match (status, code) {
+        (404, _) => ("search", t("Page not found", "Seite nicht gefunden"), t("This page does not exist or was moved.", "Diese Seite gibt es nicht oder sie wurde verschoben.")),
+        (401, "account_required") => ("user-round", t("Sign in required", "Anmeldung nötig"), t("This server only works with a Glyph account. Sign in in the app.", "Dieser Server funktioniert nur mit einem Glyph-Konto. Melde dich in der App an.")),
+        (401, _) => ("server", t("Private server", "Privater Server"), t("This Glyph server needs an access token. Open it in the Glyph app.", "Dieser Glyph-Server braucht ein Zugangstoken. Öffne ihn in der Glyph-App.")),
+        (403, "https_required") => ("server", t("HTTPS required", "HTTPS nötig"), t("Open this address with https://.", "Öffne diese Adresse mit https://.")),
+        (403, _) => ("server", t("No access", "Kein Zugriff"), t("You cannot open this page.", "Diese Seite kannst du nicht öffnen.")),
+        (429, _) => ("clock", t("Too many requests", "Zu viele Anfragen"), t("Wait a moment, then try again.", "Warte kurz und versuch es dann noch mal.")),
+        (503, _) => ("refresh-cw", t("Server busy", "Server ausgelastet"), t("Glyph is busy right now. Try again in a minute.", "Glyph ist gerade ausgelastet. Versuch es in einer Minute noch mal.")),
+        (500.., _) => ("refresh-cw", t("Something went wrong", "Etwas ist schiefgelaufen"), t("That did not work. Try again in a minute.", "Das hat nicht geklappt. Versuch es in einer Minute noch mal.")),
+        _ => ("music-2", t("That did not work", "Das hat nicht geklappt"), t("The server could not handle this request.", "Der Server konnte diese Anfrage nicht bearbeiten.")),
+    };
+    let sub = match retry_after_s.filter(|_| status == 429) {
+        Some(n) => if de { format!("Versuch es in {n} s noch mal.") } else { format!("Try again in {n} s.") },
+        None => sub.to_string(),
+    };
+    let home = ("house", t("Glyph home", "Zur Startseite"), "/");
+    let actions = if status == 429 || status >= 500 {
+        // An empty href reloads the address the visitor asked for.
+        vec![("refresh-cw", t("Try again", "Nochmal versuchen"), ""), home]
+    } else {
+        vec![home, ("book-open", t("Docs", "Doku"), "https://docs.glyph.my")]
+    };
+    let html = state_html(l, &State { status, tag: None, icon, title, sub: &sub, actions: &actions });
+    let mut r = localized(crate::site::html_response_csp(status, html, "no-store", PLAYER_CSP, false), l);
+    if let Some(n) = retry_after_s {
+        r.headers.push(("retry-after".into(), n.to_string()));
+    }
+    r
+}
+
+/// `/jam/<code>`: an invite to a jam (the QR code in the app points here).
+/// It opens the app on the jam (`glyph://jam/<code>`); without the app it
+/// offers the download. `host` = `None`: the jam is over.
+pub fn jam_page(code: &str, host: Option<&str>, l: Lang) -> Response {
+    let de = l == Lang::De;
+    let Some(host) = host else {
+        let (title, sub) = if de {
+            ("Jam beendet", "Diesen Jam gibt es nicht mehr, oder der Code stimmt nicht.")
+        } else {
+            ("Jam ended", "This Jam is over, or the code is wrong.")
+        };
+        let html = state_html(l, &State { status: 404, tag: None, icon: "users", title, sub, actions: &[("house", tr(l, "what"), "/")] });
+        return localized(crate::site::html_response_csp(404, html, "no-store", PLAYER_CSP, false), l);
+    };
+    let (title, sub, open) = if de {
+        (format!("Jam von @{host}"), format!("Hör mit @{host} zusammen: gleiche Songs, gleiche Stelle. Code {code}"), "In Glyph beitreten")
+    } else {
+        (format!("@{host}'s Jam"), format!("Listen together with @{host}: same songs, same moment. Code {code}"), "Join in Glyph")
+    };
+    let app = format!("glyph://jam/{code}");
+    let html = state_html(
+        l,
+        &State { status: 200, tag: Some("JAM"), icon: "users", title: &title, sub: &sub, actions: &[("play", open, &app), ("download", tr(l, "download"), "/download")] },
+    );
+    // Straight into the app when it is installed (link previews stay put).
+    let html = html.replacen(
+        "</body>",
+        "<script>if(!/bot|crawler|spider|preview/i.test(navigator.userAgent))location.href=document.querySelector('.state-act a').href;</script></body>",
+        1,
+    );
+    localized(crate::site::html_response_csp(200, html, "no-store", PLAYER_CSP, false), l)
+}
+
 /// Page for a link opened in a browser, laid out like the app's list view:
 /// titlebar, cover column left, songs right, the player bar at the bottom.
 /// `found` = `None` renders "not found".
@@ -510,15 +623,7 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
         tr(l, "download")
     );
     let Some((p, link)) = found else {
-        let html = format!(
-            r#"{head}{BG}{titlebar}<div class="empty">{music}<h1>{t}</h1><p>{s}</p><a class="pill" href="/">{w}</a></div>{js}</body></html>"#,
-            head = head(l, "Glyph", "", "page"),
-            music = ic("music-2"),
-            t = tr(l, "nf_title"),
-            s = tr(l, "nf_sub"),
-            w = tr(l, "what"),
-            js = scripts("\"\"", 0, 44),
-        );
+        let html = state_html(l, &State { status: 404, tag: None, icon: "link-2", title: tr(l, "nf_title"), sub: tr(l, "nf_sub"), actions: &[("house", tr(l, "what"), "/")] });
         return localized(crate::site::html_response_csp(404, html, "no-store", PLAYER_CSP, false), l);
     };
     let songs = songs(&p.code);

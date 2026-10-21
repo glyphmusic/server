@@ -13,7 +13,7 @@ use crate::search::{encode_event, search_stream_page};
 use crate::traits::{boxed_stream, BoxStream, Method, RateDecision, Services};
 use futures::StreamExt;
 use glyph_protocol::{
-    HealthResponse, ImportRequest, LyricsResponse, ProviderId, ResolveRequest, SimilarResponse,
+    HealthResponse, LyricsResponse, ProviderId, ResolveRequest, SimilarResponse,
     INSTALL_ID_HEADER, PROTOCOL_VERSION,
 };
 use serde::Serialize;
@@ -199,7 +199,14 @@ impl Server {
         });
     }
 
+    /// Answers one request. Browsers opening a page that fails get the
+    /// site's special page (404, busy, ...) instead of the JSON error.
     pub async fn handle(&self, req: Request) -> Response {
+        let page = crate::site::page_lang(&req);
+        crate::site::as_page(page, self.respond(req).await)
+    }
+
+    async fn respond(&self, req: Request) -> Response {
         if req.path.starts_with("/admin/v1") {
             if let Err(response) = self.check_access(&req) { return response; }
             let svc = self.services();
@@ -368,6 +375,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
             Route::Health => Ok(Response::json(
                 200,
                 &HealthResponse {
+                    playlist_max_tracks: svc.config.playlist_max_tracks,
                     server_auth_required: svc.config.server_bearer_hash.is_some(),
                     account_required: svc.config.require_account,
                     server_version: svc.config.server_version.clone(),
@@ -471,14 +479,38 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 Ok(Response::json(200, &resp))
             }
             Route::Import => {
-                let r: ImportRequest = parse_body(&req)?;
-                let key = format!("import:{}", r.url.trim());
-                if let Some(hit) = cache::get_json::<glyph_protocol::ImportResponse>(&*svc.cache, &key).await {
-                    return Ok(Response::json(200, &hit));
+                let body: serde_json::Value = parse_body(&req)?;
+                let paged = body.get("offset").is_some();
+                let mut r: crate::import::PageRequest = serde_json::from_value(body).map_err(|_| ApiErr::bad_request("invalid import request"))?;
+                // The operator controls this even if the client supplies a different value.
+                r.max_tracks = svc.config.playlist_max_tracks;
+                r.validate()?;
+                r.url = crate::import::canonical_url(&r.url).ok_or_else(|| ApiErr::bad_request("unsupported import link"))?;
+                let response = |page: crate::import::PageResponse| {
+                    if !paged && page.next_offset.is_some() {
+                        return Err(ApiErr::new(409, "import_client_update_required", "update Glyph to import more than 100 songs"));
+                    }
+                    Ok(Response::json(200, &page))
+                };
+                let key = format!("import-page-v2:{}:{}:{}", r.max_tracks, r.url.trim(), r.offset);
+                if let Some(hit) = cache::get_json::<crate::import::PageResponse>(&*svc.cache, &key).await {
+                    return response(hit);
                 }
-                let resp = crate::import::import(svc, &r.url).await?;
-                cache::put_json(&*svc.cache, &key, &resp, HOUR).await;
-                Ok(Response::json(200, &resp))
+                if r.offset == 0 {
+                    let ip = req.client_ip.as_deref().unwrap_or("unknown");
+                    check_rules(svc, &[(format!("import-start:{ip}"), format!("ip:{ip}"), 4)]).await?;
+                }
+                let resp = match svc.cmds.import_page(&r).await {
+                    Some(result) => result?,
+                    None => {
+                        #[cfg(target_arch = "wasm32")]
+                        return Err(ApiErr::unavailable("import companion unavailable; retry later or import locally"));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        crate::import::page(svc, &r).await?
+                    }
+                };
+                cache::put_json(&*svc.cache, &key, &resp, 600).await;
+                response(resp)
             }
         }
     }
@@ -586,6 +618,25 @@ mod tests {
         assert!(hr.providers.contains(&ProviderId::YouTube));
         let dump = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert!(!dump.contains("YT_SECRET_KEY"));
+    }
+
+    #[test]
+    fn import_limit_is_operator_owned_and_old_clients_cannot_save_partial_lists() {
+        let h = harness(all_secrets());
+        h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
+        h.http.on("fields=name", 200, r#"{"name":"Large","tracks":{"total":6000}}"#);
+        h.http.on("/items?", 200, r#"{"items":[{"track":{"id":"a","name":"A","artists":[{"name":"X"}]}}],"next":"yes"}"#);
+        let s = server(&h);
+        let request = |body: &str| Request::new(Method::Post, "/v1/import/spotify", vec![], body.as_bytes().to_vec(), Some("1.2.3.4".into()));
+        let body = r#"{"url":"spotify:playlist:abc","offset":0,"max_tracks":50000}"#;
+        assert_eq!(block_on(s.handle(request(body))).status, 400, "client cannot raise the operator's cap");
+        assert_eq!(h.http.call_count("/items?"), 0);
+        s.update_config(|c| c.playlist_max_tracks = 8000);
+        assert_eq!(json_of(&block_on(s.handle(get("/v1/health"))))["playlist_max_tracks"], 8000);
+        let response = block_on(s.handle(request(body)));
+        assert_eq!(response.status, 200);
+        assert_eq!(json_of(&response)["next_offset"], 100);
+        assert_eq!(block_on(s.handle(request(r#"{"url":"spotify:playlist:abc"}"#))).status, 409);
     }
 
     #[test]

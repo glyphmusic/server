@@ -4,11 +4,13 @@
 //! `YOUTUBE_API_KEY`, `JAMENDO_CLIENT_ID`, `SOUNDCLOUD_CLIENT_ID`,
 //! `SOUNDCLOUD_CLIENT_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`,
 //! `LASTFM_API_KEY`. Optional: D1 `GLYPH_DB` + var `PUBLIC_ORIGIN` enable
-//! accounts and sync, R2 `GLYPH_COVERS` the cover cache. Compiled for wasm32 only.
+//! accounts and sync, R2 `GLYPH_COVERS` the cover cache, Durable Object
+//! `JAM_ROOM` jam pushes. Compiled for wasm32 only.
 #![cfg(target_arch = "wasm32")]
 mod accounts;
 mod abuse;
 mod audio_cache;
+mod jam_room;
 mod storage;
 mod variants;
 mod media;
@@ -221,6 +223,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         config.rate_limit_per_min = l.rate_limit_per_min;
         config.youtube_daily_budget_units = l.youtube_daily_budget_units;
         config.import_max_pages = l.import_max_pages;
+        config.playlist_max_tracks = l.playlist_max_tracks;
         config.companion_enabled = l.companion_enabled;
         config.mcp_relay = l.mcp_relay;
         config.audio_cache_days = l.audio_cache_days;
@@ -256,6 +259,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
             origin: origin.trim_end_matches('/').to_string(),
             extra_origins: secret(env, "ACCOUNT_EXTRA_ORIGINS").map(|v| v.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect()).unwrap_or_default(),
             rp_id: secret(env, "ACCOUNT_RP_ID"),
+            push: env.durable_object(jam_room::BINDING).ok().map(|ns| Arc::new(jam_room::RoomPush { ns }) as Arc<dyn glyph_server_core::accounts::jam::JamPush>),
         }),
         _ => server,
     }
@@ -305,6 +309,31 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
             serde_json::from_slice(&resp.bytes().await.ok()?).ok()
         };
         glyph_server_core::traits::with_timeout(&WorkerRuntime, if req.youtube_only { 55_000 } else { 25_000 }, work).await.flatten()
+    }
+
+    async fn import_page(&self, req: &glyph_server_core::import::PageRequest) -> Option<Result<glyph_server_core::import::PageResponse, glyph_server_core::ApiErr>> {
+        let work = async {
+            let headers = Headers::new();
+            headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
+            headers.set("content-type", "application/json").ok()?;
+            let body = serde_json::to_vec(req).ok()?;
+            let mut init = RequestInit::new();
+            init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
+                .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+            let url = format!("{}/internal/import", self.url.trim_end_matches('/'));
+            let request = worker::Request::new_with_init(&url, &init).ok()?;
+            let mut resp = Fetch::Request(request).send().await.ok()?;
+            let status = resp.status_code();
+            if status != 200 {
+                let message = resp.text().await.ok().filter(|s| s.len() <= 2048 && !s.trim_start().starts_with('<'))
+                    .unwrap_or_else(|| "companion import failed; check playlist access or retry later".into());
+                return Some(Err(glyph_server_core::ApiErr::new(status, "import_failed", message)));
+            }
+            let bytes = resp.bytes().await.ok()?;
+            if bytes.len() > 1024 * 1024 { return None; }
+            Some(serde_json::from_slice(&bytes).map_err(|_| glyph_server_core::ApiErr::unavailable("invalid import response")))
+        };
+        glyph_server_core::traits::with_timeout(&WorkerRuntime, 55_000, work).await.flatten()
     }
 
     /// LRCLIB rate-limits Cloudflare egress, so the companion (home
@@ -517,8 +546,26 @@ fn to_core_method(m: worker::Method) -> Method {
 }
 
 #[event(fetch)]
-async fn fetch(mut req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
+async fn fetch(req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
     console_error_panic_hook::set_once();
+    // A browser gets the site's error page instead of Cloudflare's when a request fails.
+    let page = req.url().ok().and_then(|url| {
+        let headers: Vec<(String, String)> = req.headers().entries().filter(|(k, _)| k == "accept" || k == "accept-language").collect();
+        glyph_server_core::site::page_lang(&glyph_server_core::Request::new(to_core_method(req.method()), url.path(), headers, vec![], None))
+    });
+    match serve(req, env, ctx).await {
+        Err(e) if page.is_some() => {
+            worker::console_error!("request failed: {e}");
+            let resp = glyph_server_core::site::as_page(page, glyph_server_core::Response::error(glyph_server_core::ApiErr::new(500, "internal", "request failed")));
+            let headers = Headers::new();
+            for (k, v) in &resp.headers { headers.set(k, v)?; }
+            Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers))
+        }
+        r => r,
+    }
+}
+
+async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
     let url = req.url()?;
     let target = match url.query() {
         Some(q) => format!("{}?{}", url.path(), q),
@@ -552,6 +599,7 @@ async fn fetch(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
         (!parts.is_empty()).then(|| parts.join(", ").chars().filter(|c| !c.is_control()).take(100).collect())
     });
     if let Err(resp) = server.check_access(&request) {
+        let resp = glyph_server_core::site::as_page(glyph_server_core::site::page_lang(&request), resp);
         let headers = Headers::new();
         for (k,v) in &resp.headers { headers.set(k,v)?; }
         return Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers));
@@ -559,7 +607,20 @@ async fn fetch(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
     if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
         return media::handle(&req, &request, &server, &ctx, &env).await;
     }
+    let path = request.path.clone();
     let resp = server.handle(request).await;
+    if let Some((_, live)) = resp.headers.iter().find(|(k, _)| k == glyph_server_core::accounts::playback::LIVE_HEADER) {
+        let (user, device) = live.split_once(' ').unwrap_or_default();
+        return jam_room::connect(&env, &format!("playback:{user}"), &format!("device {device}")).await;
+    }
+    // A checked jam member's WebSocket goes to the jam's room.
+    if let Some((_, live)) = resp.headers.iter().find(|(k, _)| k == glyph_server_core::accounts::jam::LIVE_HEADER) {
+        let code = path.strip_prefix("/v1/jam/").and_then(|r| r.strip_suffix("/live")).and_then(glyph_protocol::jam::normalize_code);
+        return match code {
+            Some(code) => jam_room::connect(&env, &code, live).await,
+            None => worker::Response::error("bad jam code", 400),
+        };
+    }
 
     let out = match resp.body {
         Body::Bytes(b) => worker::Response::from_bytes(b)?,

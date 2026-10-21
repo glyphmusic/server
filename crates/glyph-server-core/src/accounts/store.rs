@@ -210,6 +210,9 @@ pub trait AccountStore: MaybeSendSync {
         Ok(None)
     }
     /// Removes and returns every live entry of `scope` whose key starts with `prefix`.
+    async fn mcp_list(&self, _scope: &str, _prefix: &str, _now: u64) -> StoreResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
     async fn mcp_take(&self, _scope: &str, _prefix: &str, _now: u64) -> StoreResult<Vec<(String, String)>> {
         Ok(Vec::new())
     }
@@ -411,7 +414,7 @@ impl AccountStore for MemStore {
         let mut accepted = Vec::with_capacity(items.len());
         for it in items {
             let k = (user_id.to_string(), it.kind.clone(), it.key.clone());
-            let ok = m.items.get(&k).is_none_or(|old| wins(it, old));
+            let ok = m.items.get(&k).is_none_or(|old| wins(it, old) && (it.kind != "playlist" || it.rev == old.rev));
             if ok {
                 rev += 1;
                 m.items.insert(k, Item { rev, ..it.clone() });
@@ -485,6 +488,11 @@ impl AccountStore for MemStore {
     async fn mcp_get(&self, scope: &str, key: &str, now: u64) -> StoreResult<Option<String>> {
         let m = self.m.lock().unwrap();
         Ok(m.mailbox.get(&(scope.to_string(), key.to_string())).filter(|(_, e)| *e > now).map(|(v, _)| v.clone()))
+    }
+
+    async fn mcp_list(&self, scope: &str, prefix: &str, now: u64) -> StoreResult<Vec<(String, String)>> {
+        let m = self.m.lock().unwrap();
+        Ok(m.mailbox.iter().filter(|((s, k), (_, expires))| s == scope && k.starts_with(prefix) && *expires > now).take(100).map(|((_, k), (v, _))| (k.clone(), v.clone())).collect())
     }
 
     async fn mcp_take(&self, scope: &str, prefix: &str, now: u64) -> StoreResult<Vec<(String, String)>> {

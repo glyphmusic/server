@@ -23,3 +23,5 @@ console_error_panic_hook = "0.1"
 serde.workspace = true
 # Entropy for account tokens: crypto.getRandomValues via the JS backend.
 getrandom = { version = "0.2", features = ["js"] }
+# #[durable_object] (src/jam_room.rs) expands to wasm-bindgen code.
+wasm-bindgen = "0.2"

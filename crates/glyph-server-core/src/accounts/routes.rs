@@ -3,8 +3,14 @@ use super::*;
 impl Accounts {
     pub(super) async fn dispatch(&self, svc: &Arc<Services>, req: &Request) -> Result<Response, ApiErr> {
         let path = req.path.trim_end_matches('/');
+        if path.starts_with("/v1/devices/playback/") {
+            return self.playback_route(svc, req, path).await;
+        }
         if mcp::owns(path) {
             return self.mcp_route(svc, req, path).await;
+        }
+        if jam::owns(path) {
+            return self.jam_route(svc, req, path).await;
         }
         let m = req.method;
         if m == Method::Options {
@@ -482,6 +488,13 @@ impl Accounts {
                     }
                     let value = match i.value {
                         Some(v) => {
+                            if i.kind == "playlist" {
+                                let tracks = v.get("tracks").and_then(serde_json::Value::as_array)
+                                    .ok_or_else(|| ApiErr::bad_request("playlist tracks must be an array"))?;
+                                if tracks.len() > svc.config.playlist_max_tracks {
+                                    return Err(ApiErr::bad_request(format!("playlists may contain at most {} songs", svc.config.playlist_max_tracks)));
+                                }
+                            }
                             let s = v.to_string();
                             if s.len() > MAX_ITEM_BYTES {
                                 return Err(ApiErr::new(413, "payload_too_large", "sync item too large"));
@@ -497,7 +510,7 @@ impl Accounts {
                         updated_at: i.updated_at.min(now + CLOCK_SKEW),
                         device_id: a.device.id.clone(),
                         deleted: i.deleted,
-                        rev: 0,
+                        rev: i.rev,
                     });
                 }
                 self.store.purge_tombstones(&a.user.id, now.saturating_sub(TOMBSTONE_TTL)).await.map_err(store_err)?;

@@ -133,6 +133,7 @@ pub struct Config {
     pub ytdlp_path: Option<String>,
     /// Max pages fetched per playlist import (Workers free plan: 50 subrequests).
     pub import_max_pages: u32,
+    pub playlist_max_tracks: usize,
     /// Switch for the yt-dlp companion, changed with `remote companion on|off`.
     pub companion_enabled: bool,
     /// AI assistants may reach signed-in apps through this server (MCP relay,
@@ -163,6 +164,7 @@ impl Config {
             youtube_daily_budget_units: 9000,
             ytdlp_path: None,
             import_max_pages: 5,
+            playlist_max_tracks: 5_000,
             companion_enabled: true,
             mcp_relay: true,
             audio_cache_days: 15,

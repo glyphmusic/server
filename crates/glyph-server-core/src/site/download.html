@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>Download Glyph</title>
-<meta name="description" content="Download Glyph for Windows, macOS or Linux.">
+<meta name="description" content="Download Glyph for Windows, macOS, Linux or Android.">
 <link rel="canonical" href="https://glyph.my/download">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Glyph">
 <meta property="og:title" content="Download Glyph">
-<meta property="og:description" content="Glyph for Windows, macOS and Linux. Free, no ads, legal sources only.">
+<meta property="og:description" content="Glyph for Windows, macOS, Linux and Android. Free, no ads, legal sources only.">
 <meta property="og:url" content="https://glyph.my/download">
 <meta property="og:image" content="https://glyph.my/og.png">
 <meta property="og:image:width" content="1200">
@@ -86,7 +86,8 @@ footer a { color: var(--dim); }
   <div class="notes">
     <p>Each file has a <code>.sha256</code> next to it on the release, to check the download.</p>
     <p>Windows: run the setup executable to install Glyph. New versions update the same installation and keep your library and settings. For a portable ZIP, unzip and run <code>glyph.exe</code>. macOS and Linux: unpack the <code>.tar.gz</code> and run <code>glyph</code>.</p>
-    <p>Glyph updates itself from the same releases.</p>
+    <p>Android (preview): open the <code>.apk</code> on your phone and allow installing it. Until Glyph is in the Play Store, uninstall the old version before installing a new one.</p>
+    <p>The desktop app updates itself from the same releases.</p>
   </div>
 </main>
 
@@ -103,7 +104,7 @@ document.querySelectorAll("[data-rule]").forEach(el => {
   el.append("-- ", b, " " + "-".repeat(200));
 });
 
-// Release assets are `glyph-{version}-{target}.zip|.tar.gz` (see the app's
+// Release assets are `glyph-{version}-{target}.zip|.tar.gz|.apk` (see the app's
 // updater). The links point straight at the files, so the browser downloads
 // them and the page stays open.
 (async () => {
@@ -114,9 +115,10 @@ document.querySelectorAll("[data-rule]").forEach(el => {
     { os: "macos-intel", target: "x86_64-apple-darwin", name: "macos", sub: "intel · tar.gz" },
     { os: "linux", target: "x86_64-unknown-linux-gnu", name: "linux", sub: "x64 · tar.gz" },
     { os: "linux-arm", target: "aarch64-unknown-linux-gnu", name: "linux", sub: "arm64 · tar.gz" },
+    { os: "android", target: "android", name: "android", sub: "preview · apk" },
   ];
   const ua = navigator.userAgent;
-  const mine = /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? (/aarch64|arm64/i.test(ua) ? "linux-arm" : "linux") : "";
+  const mine = /Android/.test(ua) ? "android" : /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? (/aarch64|arm64/i.test(ua) ? "linux-arm" : "linux") : "";
   const $ = id => document.getElementById(id);
   const mb = n => (n / 1048576).toFixed(1) + " MB";
 
@@ -128,7 +130,7 @@ document.querySelectorAll("[data-rule]").forEach(el => {
 
   const assetFor = t => rel && (
     (t === "x86_64-pc-windows-msvc" && rel.assets.find(a => /-windows-x64-setup\.exe$/.test(a.name))) ||
-    rel.assets.find(a => a.name.includes(`-${t}.`) && /\.(zip|tar\.gz)$/.test(a.name))
+    rel.assets.find(a => a.name.includes(`-${t}.`) && /\.(zip|tar\.gz|apk)$/.test(a.name))
   );
   if (rel) {
     const date = new Date(rel.published_at).toISOString().slice(0, 10);

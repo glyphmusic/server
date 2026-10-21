@@ -108,6 +108,7 @@ fn limits_of(svc: &Services) -> Limits {
         rate_limit_per_min: svc.config.rate_limit_per_min,
         youtube_daily_budget_units: svc.config.youtube_daily_budget_units,
         import_max_pages: svc.config.import_max_pages,
+        playlist_max_tracks: svc.config.playlist_max_tracks,
         companion_enabled: svc.config.companion_enabled,
         mcp_relay: svc.config.mcp_relay,
         audio_cache_days: svc.config.audio_cache_days,
@@ -257,6 +258,7 @@ impl Server {
                 // Older admin clients must not silently reopen a protected API.
                 let body: serde_json::Value = parse_body(&req)?;
                 if body.get("require_account").is_none() { l.require_account = svc.config.require_account; }
+                if body.get("playlist_max_tracks").is_none() { l.playlist_max_tracks = svc.config.playlist_max_tracks; }
                 if l.require_account && self.accounts.is_none() {
                     return Err(ApiErr::bad_request("require_account needs an enabled account backend"));
                 }
@@ -265,6 +267,9 @@ impl Server {
                 }
                 if !(100..=1_000_000).contains(&l.youtube_daily_budget_units) {
                     return Err(ApiErr::bad_request("youtube_daily_budget_units must be between 100 and 1000000"));
+                }
+                if !(1..=50_000).contains(&l.playlist_max_tracks) {
+                    return Err(ApiErr::bad_request("playlist_max_tracks must be between 1 and 50000"));
                 }
                 if !(1..=50).contains(&l.import_max_pages) {
                     return Err(ApiErr::bad_request("import_max_pages must be between 1 and 50"));
@@ -284,6 +289,7 @@ impl Server {
                     c.rate_limit_per_min = l.rate_limit_per_min;
                     c.youtube_daily_budget_units = l.youtube_daily_budget_units;
                     c.import_max_pages = l.import_max_pages;
+                    c.playlist_max_tracks = l.playlist_max_tracks;
                     c.companion_enabled = l.companion_enabled;
                     c.mcp_relay = l.mcp_relay;
                     c.audio_cache_days = l.audio_cache_days;

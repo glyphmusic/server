@@ -17,6 +17,8 @@ routes = [
   { pattern = "glyph.my/docs*", zone_name = "glyph.my" },
   { pattern = "glyph.my/", zone_name = "glyph.my" },
   { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
+  # Jam invites (the QR code in the app).
+  { pattern = "glyph.my/jam/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/download*", zone_name = "glyph.my" },
   { pattern = "glyph.my/changelog*", zone_name = "glyph.my" },
   { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
@@ -72,6 +74,17 @@ binding = "GLYPH_DB"
 database_name = "glyph"
 database_id = "a25fcd70-4ff2-4a66-9e89-7b7f72cf9099"
 migrations_dir = "migrations"
+
+# Jam pushes (src/jam_room.rs): one Durable Object per jam relays to the
+# apps' WebSockets and stores nothing. The Free plan only allows
+# SQLite-backed classes; the core keeps pushes within the free daily requests.
+[[durable_objects.bindings]]
+name = "JAM_ROOM"
+class_name = "JamRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JamRoom"]
 
 # Cover cache (R2).
 [[r2_buckets]]

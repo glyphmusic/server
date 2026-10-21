@@ -120,6 +120,8 @@ pub struct Limits {
     pub rate_limit_per_min: u32,
     pub youtube_daily_budget_units: u64,
     pub import_max_pages: u32,
+    #[serde(default = "playlist_tracks")]
+    pub playlist_max_tracks: usize,
     /// yt-dlp companion (YouTube search and audio). Off = YouTube answers 403.
     #[serde(default = "enabled")]
     pub companion_enabled: bool,
@@ -145,6 +147,7 @@ impl Default for Limits {
             rate_limit_per_min: config.rate_limit_per_min,
             youtube_daily_budget_units: config.youtube_daily_budget_units,
             import_max_pages: config.import_max_pages,
+            playlist_max_tracks: config.playlist_max_tracks,
             companion_enabled: config.companion_enabled,
             mcp_relay: config.mcp_relay,
             audio_cache_days: config.audio_cache_days,
@@ -249,3 +252,5 @@ pub struct MaintenanceResponse {
     pub restart_required: bool,
     pub message: String,
 }
+
+fn playlist_tracks() -> usize { 5_000 }

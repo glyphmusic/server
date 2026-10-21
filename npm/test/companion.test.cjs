@@ -7,7 +7,7 @@ function runner(calls,{wrong=false,unhealthy=false}={}) {
     if(args[0]==='image') return 'sha256:expected';
     if(args.includes('ps')) return 'container';
     if(args[0]==='inspect') return JSON.stringify({Image:wrong?'sha256:old':'sha256:expected',State:{Running:true,Health:{Status:unhealthy?'unhealthy':'healthy'}}});
-    if(args.includes('glyph')) return 'glyph 0.4.1';
+    if(args.includes('glyph')) return 'glyph '+require('../package.json').version;
     if(args.includes('r-dlp')) return '0.1.1';
     return '';
   };

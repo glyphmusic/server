@@ -12,6 +12,87 @@ const ORIGIN: &str = "https://glyph.example";
 const RP: &str = "glyph.example";
 
 #[test]
+fn account_playback_requires_target_ack_and_retains_unacknowledged_delivery() {
+    let relay = Arc::new(RecPush::default());
+    let t = setup_with(Some(relay.clone()));
+    let (owner, _, _) = sign_up(&t, "ack_owner");
+    let (outsider, _, _) = sign_up(&t, "ack_other");
+    let login = start(&t, "Phone");
+    call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code":login.user_code}), Some(&owner.access_token));
+    let LoginPollResponse::Done { session: phone } = poll(&t, &login) else { panic!() };
+    let state = serde_json::json!({"track":null,"playing":false,"position_ms":0,"duration_ms":null,"volume":0.5,"available":true,"acknowledgements":true});
+    let poll_path = "/v1/devices/playback/poll";
+    call(&t, Method::Post, poll_path, state.clone(), Some(&phone.access_token));
+    let command = serde_json::json!({"target":phone.device_id,"command":{"action":"pause"}});
+    let (status, response) = call(&t, Method::Post, "/v1/devices/playback/command?confirm=1", command, Some(&owner.access_token));
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(relay.take()[0].1, jam::To::Member(phone.device_id.clone()));
+    let id = response["id"].as_str().unwrap();
+    let receipt = serde_json::json!({"id":id,"done":false,"error":null});
+    for _ in 0..2 {
+        let (_, response) = call(&t, Method::Post, poll_path, state.clone(), Some(&phone.access_token));
+        assert_eq!(response["deliveries"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(call(&t, Method::Post, "/v1/devices/playback/ack", receipt.clone(), Some(&owner.access_token)).0, 404);
+    assert_eq!(call(&t, Method::Post, "/v1/devices/playback/receipt", receipt.clone(), Some(&outsider.access_token)).0, 404);
+    let (_, pending) = call(&t, Method::Post, "/v1/devices/playback/receipt", receipt.clone(), Some(&owner.access_token));
+    assert_eq!(pending["done"], false);
+    assert_eq!(call(&t, Method::Post, "/v1/devices/playback/ack", receipt.clone(), Some(&phone.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Post, "/v1/devices/playback/receipt", receipt, Some(&owner.access_token)).1["done"], true);
+    assert!(call(&t, Method::Post, poll_path, state, Some(&phone.access_token)).1["deliveries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn stale_playlist_writes_cannot_overwrite_a_newer_membership_version() {
+    let t = setup();
+    let (owner, _, _) = sign_up(&t, "playlist_cas");
+    let push = |rev, at, name: &str| call(&t, Method::Post, "/v1/sync/push", serde_json::json!({"items":[{"kind":"playlist","key":"shared","value":{"name":name,"tracks":[]},"deleted":false,"updated_at":at,"rev":rev}]}), Some(&owner.access_token));
+    assert_eq!(push(0, 1, "Original").1["accepted"], 1);
+    let stale = push(0, 2, "Stale");
+    assert_eq!(stale.1["accepted"], 0);
+    let rev = stale.1["stale"][0]["rev"].as_u64().unwrap();
+    assert_eq!(push(rev, 3, "Merged").1["accepted"], 1);
+}
+
+#[test]
+fn account_playback_is_private_expires_and_delivers_controls_once() {
+    let t = setup();
+    let (owner, _, _) = sign_up(&t, "playback_owner");
+    let (other, _, _) = sign_up(&t, "playback_other");
+    let login = start(&t, "Phone");
+    assert_eq!(call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code":login.user_code}), Some(&owner.access_token)).0, 200);
+    let LoginPollResponse::Done { session: phone } = poll(&t, &login) else { panic!("phone login failed") };
+    let state = serde_json::json!({"track":null,"playing":false,"position_ms":0,"duration_ms":null,"volume":0.5,"available":true});
+    let poll = "/v1/devices/playback/poll";
+    let send = "/v1/devices/playback/command";
+    assert_eq!(call(&t, Method::Post, poll, state.clone(), None).0, 401);
+    let (status, own) = call(&t, Method::Post, poll, state.clone(), Some(&owner.access_token));
+    assert_eq!(status, 200, "{own}");
+    assert_eq!(own["devices"].as_array().unwrap().len(), 2);
+    assert!(own["devices"].as_array().unwrap().iter().any(|d| d["device"]["id"] == phone.device_id && d["online"] == false));
+    let (_, outsiders) = call(&t, Method::Post, poll, state.clone(), Some(&other.access_token));
+    assert!(outsiders["devices"].as_array().unwrap().iter().all(|d| d["device"]["id"] != owner.device_id));
+    assert_eq!(call(&t, Method::Post, poll, state.clone(), Some(&phone.access_token)).0, 200);
+    let command = serde_json::json!({"target":phone.device_id,"command":{"action":"pause"}});
+    assert_eq!(call(&t, Method::Post, send, command.clone(), Some(&other.access_token)).0, 404);
+    assert_eq!(call(&t, Method::Post, send, command.clone(), Some(&owner.access_token)).0, 200);
+    let (_, own_commands) = call(&t, Method::Post, poll, state.clone(), Some(&owner.access_token));
+    assert!(own_commands["commands"].as_array().unwrap().is_empty());
+    let (_, received) = call(&t, Method::Post, poll, state.clone(), Some(&phone.access_token));
+    assert_eq!(received["commands"].as_array().unwrap().len(), 1);
+    let (_, again) = call(&t, Method::Post, poll, state.clone(), Some(&phone.access_token));
+    assert!(again["commands"].as_array().unwrap().is_empty());
+    let bad = serde_json::json!({"target":phone.device_id,"command":{"action":"volume","volume":2.0}});
+    assert_eq!(call(&t, Method::Post, send, bad, Some(&owner.access_token)).0, 400);
+    assert_eq!(call(&t, Method::Post, send, command.clone(), Some(&owner.access_token)).0, 200);
+    t.h.rt.advance(31_000);
+    let (_, expired) = call(&t, Method::Post, poll, state, Some(&phone.access_token));
+    assert!(expired["commands"].as_array().unwrap().is_empty());
+    t.h.rt.advance(46_000);
+    assert_eq!(call(&t, Method::Post, send, command, Some(&owner.access_token)).0, 409);
+}
+
+#[test]
 fn optional_account_gate_covers_api_and_media_and_tracks_session_lifecycle() {
     let t = setup();
     t.s.update_config(|c| { c.require_account = true; c.rate_limit_per_min = 1000; });
@@ -125,6 +206,10 @@ struct T {
 }
 
 fn setup() -> T {
+    setup_with(None)
+}
+
+fn setup_with(push: Option<Arc<dyn jam::JamPush>>) -> T {
     let h = harness(Default::default());
     h.rt.advance(1_760_000_000_000);
     let blobs = Arc::new(MemBlobs::default());
@@ -135,6 +220,7 @@ fn setup() -> T {
         origin: ORIGIN.into(),
         extra_origins: vec![],
         rp_id: None,
+        push,
     });
     T { h, s, blobs }
 }
@@ -424,6 +510,11 @@ fn sync_last_writer_wins_with_tombstones() {
     let (_, v) = push(&b, vec![item("liked", "audius:9", None, now + 10 * MIN)]);
     assert_eq!(v["accepted"], 1);
 
+    let (s, _) = push(&a, vec![item("playlist", "oversized", Some(serde_json::json!({"tracks": vec![serde_json::json!({}); 5001]})), now)]);
+    assert_eq!(s, 400);
+    let (s, _) = push(&a, vec![item("playlist", "invalid", Some(serde_json::json!({"tracks": "untrusted"})), now)]);
+    assert_eq!(s, 400);
+
     // Validation.
     let (s, _) = push(&a, vec![item("Bad Kind", "k", Some(serde_json::json!(1)), now)]);
     assert_eq!(s, 400);
@@ -656,6 +747,7 @@ fn passkey_domain_must_contain_the_origin() {
         origin: origin.into(),
         extra_origins: vec![],
         rp_id: rp.map(Into::into),
+        push: None,
     };
     assert_eq!(make("https://api.glyph.my", Some("glyph.my")).rp_id(), "glyph.my");
     assert_eq!(make("https://api.glyph.my", None).rp_id(), "api.glyph.my");
@@ -845,4 +937,350 @@ fn device_location_is_host_derived_and_logout_revokes_both_tokens() {
     assert_eq!(call(&t,Method::Delete,&format!("/v1/devices/{}",alice.device_id),serde_json::Value::Null,Some(&alice.access_token)).0,200);
     assert_eq!(call(&t,Method::Get,"/v1/devices",serde_json::Value::Null,Some(&alice.access_token)).0,401);
     assert_eq!(call(&t,Method::Post,"/v1/account/token/refresh",serde_json::json!({"refresh_token":alice.refresh_token}),None).0,401);
+}
+
+#[test]
+fn jam_relays_between_host_and_members() {
+    let t = setup();
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let none = serde_json::Value::Null;
+    let song = serde_json::json!({"id": "7", "source": "audius", "title": "Song", "artist": "Band", "duration_ms": 200000});
+    assert_eq!(call(&t, Method::Post, "/v1/jam", none.clone(), None).0, 401);
+    let (host, _, _) = sign_up(&t, "jam_host");
+    let (ana, _, _) = sign_up(&t, "jam_ana");
+    let (ben, _, _) = sign_up(&t, "jam_ben");
+
+    let (s, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    assert_eq!(s, 200, "{v}");
+    let code = v["code"].as_str().unwrap().to_string();
+    assert!(glyph_protocol::jam::normalize_code(&code).is_some());
+    assert_eq!((v["rev"].as_u64(), v["host"].as_str(), v["host_online"].as_bool()), (Some(1), Some("jam_host"), Some(true)));
+    assert_eq!(v["link"].as_str().map(String::from), Some(format!("{ORIGIN}/jam/{code}")));
+    // The invite page needs no sign-in and opens the app.
+    let page = block_on(t.s.handle(Request::new(Method::Get, &format!("/jam/{}", code.to_lowercase()), vec![], vec![], None)));
+    assert_eq!(page.status, 200);
+    let html = String::from_utf8_lossy(page.bytes().unwrap()).to_string();
+    assert!(html.contains(&format!("glyph://jam/{code}")) && html.contains("@jam_host"));
+    assert_eq!(block_on(t.s.handle(Request::new(Method::Get, "/jam/AAAAAA", vec![], vec![], None))).status, 404);
+    let at = |p: &str| format!("/v1/jam/{code}{p}");
+
+    // Clock sync.
+    let (s, v) = call(&t, Method::Get, &at("/time"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["server_ms"].as_u64()), (200, Some(t.h.rt.now_ms())));
+
+    // Only members read the state; joining tells the host.
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&ana.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Post, "/v1/jam/AAAAAA/join", none.clone(), Some(&ana.access_token)).0, 404);
+    let (s, v) = call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["state"]["code"].as_str(), v["waiting"].as_bool()), (200, Some(code.as_str()), None), "{v}");
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&ana.access_token)).1["rev"], 1);
+    // A guest asks for a song; only the host picks requests up and publishes.
+    let (s, _) = call(&t, Method::Post, &at("/op"), serde_json::json!({"op": "add", "track": song}), Some(&ana.access_token));
+    assert_eq!(s, 200);
+    assert_eq!(call(&t, Method::Post, &at("/op"), serde_json::json!({"op": "react", "reaction": "fire"}), Some(&ana.access_token)).0, 200);
+    for fake in ["join", "knock", "leave"] {
+        assert_eq!(call(&t, Method::Post, &at("/op"), serde_json::json!({"op": fake}), Some(&ana.access_token)).0, 400);
+    }
+    assert_eq!(call(&t, Method::Post, &at("/op"), serde_json::json!({"op": "vote", "item": "x", "up": true}), Some(&ben.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Get, &at("/ops"), none.clone(), Some(&ana.access_token)).0, 403);
+    let (s, v) = call(&t, Method::Get, &at("/ops"), none.clone(), Some(&host.access_token));
+    assert_eq!(s, 200, "{v}");
+    let ops = v["ops"].as_array().unwrap();
+    assert_eq!(ops.len(), 3);
+    assert_eq!((ops[0]["from"].as_str(), ops[0]["op"]["op"].as_str()), (Some("jam_ana"), Some("join")));
+    assert_eq!(ops[1]["op"]["track"]["id"], "7");
+    assert_eq!(ops[2]["op"]["reaction"], "fire");
+
+    let now_ms = t.h.rt.now_ms();
+    let state = serde_json::json!({
+        "code": "IGNORED", "rev": 99, "host": "someone_else", "host_online": false,
+        "members": [{"handle": "jam_ana", "host": true}],
+        "now": {"track": song, "position_ms": 5000, "playing": true, "at_ms": now_ms - 300},
+        "queue": [{"id": "audius:7", "track": song, "by": "jam_ana"}],
+        "feed": [{"at_ms": 1, "who": "jam_ana", "what": {"kind": "joined"}}],
+    });
+    assert_eq!(call(&t, Method::Post, &at("/state"), state.clone(), Some(&ana.access_token)).0, 403);
+    let (s, v) = call(&t, Method::Post, &at("/state"), state.clone(), Some(&host.access_token));
+    assert_eq!((s, v["rev"].as_u64()), (200, Some(2)), "{v}");
+    let (_, v) = call(&t, Method::Get, &at("?rev=1"), none.clone(), Some(&ana.access_token));
+    assert_eq!((v["rev"].as_u64(), v["code"].as_str(), v["host"].as_str()), (Some(2), Some(code.as_str()), Some("jam_host")));
+    assert_eq!(v["members"][0], serde_json::json!({"handle": "jam_host", "host": true}));
+    assert_eq!(v["members"][1], serde_json::json!({"handle": "jam_ana"}));
+    // The host's clock estimate stays when it is close to the server's.
+    assert_eq!(v["now"]["at_ms"].as_u64(), Some(now_ms - 300));
+    assert_eq!((v["host_online"].as_bool(), v["feed"][0]["what"]["kind"].as_str()), (Some(true), Some("joined")));
+    // A far-off estimate is replaced.
+    let mut skewed = state.clone();
+    skewed["now"]["at_ms"] = serde_json::json!(1);
+    call(&t, Method::Post, &at("/state"), skewed, Some(&host.access_token));
+    assert_eq!(call(&t, Method::Get, &at("?rev=2"), none.clone(), Some(&ana.access_token)).1["now"]["at_ms"].as_u64(), Some(now_ms));
+
+    // Removed members cannot come back, not even under another handle.
+    assert_eq!(call(&t, Method::Post, &at("/kick"), serde_json::json!({"handle": "@jam_ana"}), Some(&ana.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Post, &at("/kick"), serde_json::json!({"handle": "@jam_ana"}), Some(&host.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&ana.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token)).0, 403);
+    let (s, _) = call(&t, Method::Patch, "/v1/account", serde_json::json!({"handle": "jam_ana2"}), Some(&ana.access_token));
+    assert_eq!(s, 200);
+    let (s, v) = call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["code"].as_str()), (403, Some("jam_removed")));
+    // Leaving tells the host too.
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ben.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Post, &at("/leave"), none.clone(), Some(&ben.access_token)).0, 200);
+    let (_, v) = call(&t, Method::Get, &at("/ops"), none.clone(), Some(&host.access_token));
+    let kinds: Vec<&str> = v["ops"].as_array().unwrap().iter().filter_map(|o| o["op"]["op"].as_str()).collect();
+    assert_eq!(kinds, ["join", "leave"]);
+
+    // A new jam ends the old one; ending it is for the host only.
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code2 = v["code"].as_str().unwrap().to_string();
+    assert_ne!(code2, code);
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ben.access_token)).0, 404);
+    assert_eq!(call(&t, Method::Post, &format!("/v1/jam/{code2}/join"), none.clone(), Some(&ben.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Delete, &format!("/v1/jam/{code2}"), none.clone(), Some(&ben.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Delete, &format!("/v1/jam/{code2}"), none.clone(), Some(&host.access_token)).0, 200);
+    let (s, v) = call(&t, Method::Get, &format!("/v1/jam/{code2}?rev=0"), none.clone(), Some(&ben.access_token));
+    assert_eq!((s, v["code"].as_str()), (404, Some("jam_ended")));
+
+    // Jams end by themselves.
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code3 = v["code"].as_str().unwrap().to_string();
+    t.h.rt.advance(glyph_protocol::jam::MAX_AGE_MS + 1);
+    let fresh = call(&t, Method::Post, "/v1/account/token/refresh", serde_json::json!({"refresh_token": host.refresh_token}), None).1;
+    let tok = fresh["access_token"].as_str().unwrap().to_string();
+    assert_eq!(call(&t, Method::Get, &format!("/v1/jam/{code3}?rev=0"), none, Some(&tok)).0, 404);
+}
+
+#[test]
+fn jam_host_lets_people_in_and_hands_over_when_gone() {
+    let t = setup();
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let none = serde_json::Value::Null;
+    let (host, _, _) = sign_up(&t, "jam_h2");
+    let (ana, _, _) = sign_up(&t, "jam_a2");
+    let (ben, _, _) = sign_up(&t, "jam_b2");
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code = v["code"].as_str().unwrap().to_string();
+    let at = |p: &str| format!("/v1/jam/{code}{p}");
+    let publish = |extra: serde_json::Value| {
+        let mut s = serde_json::json!({"code": code, "host": "jam_h2", "members": [{"handle": "jam_a2"}]});
+        if let (Some(s), Some(e)) = (s.as_object_mut(), extra.as_object()) {
+            s.extend(e.clone());
+        }
+        call(&t, Method::Post, &at("/state"), s, Some(&host.access_token))
+    };
+    assert_eq!(publish(serde_json::json!({"approve_joins": true})).0, 200);
+
+    // Knocking waits for the host; asking again does not knock twice.
+    let (s, v) = call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["waiting"].as_bool()), (202, Some(true)), "{v}");
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token)).0, 202);
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ben.access_token)).0, 202);
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&ana.access_token)).0, 403);
+    let (_, v) = call(&t, Method::Get, &at("/ops"), none.clone(), Some(&host.access_token));
+    let knocks: Vec<&str> = v["ops"].as_array().unwrap().iter().filter(|o| o["op"]["op"] == "knock").filter_map(|o| o["from"].as_str()).collect();
+    assert_eq!(knocks, ["jam_a2", "jam_b2"]);
+    assert_eq!(call(&t, Method::Post, &at("/admit"), serde_json::json!({"handle": "jam_a2", "allow": true}), Some(&ana.access_token)).0, 403);
+    assert_eq!(call(&t, Method::Post, &at("/admit"), serde_json::json!({"handle": "jam_a2", "allow": true}), Some(&host.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Post, &at("/admit"), serde_json::json!({"handle": "jam_b2", "allow": false}), Some(&host.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Post, &at("/admit"), serde_json::json!({"handle": "nobody", "allow": true}), Some(&host.access_token)).0, 404);
+    let (s, v) = call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["state"]["code"].as_str()), (200, Some(code.as_str())));
+    let (s, v) = call(&t, Method::Post, &at("/join"), none.clone(), Some(&ben.access_token));
+    assert_eq!((s, v["code"].as_str()), (403, Some("jam_denied")));
+    let (_, v) = call(&t, Method::Get, &at("/ops"), none.clone(), Some(&host.access_token));
+    assert_eq!(v["ops"][0]["op"]["op"], "join");
+
+    // The host is around: no takeover.
+    assert_eq!(call(&t, Method::Post, &at("/claim"), none.clone(), Some(&ana.access_token)).1["code"], "host_online");
+    // The host's app is gone for a while.
+    t.h.rt.advance(glyph_protocol::jam::HOST_TIMEOUT_MS + 1);
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&ana.access_token)).1["host_online"], false);
+    assert_eq!(call(&t, Method::Post, &at("/claim"), none.clone(), Some(&ben.access_token)).0, 403);
+    t.h.rt.advance(glyph_protocol::jam::HANDOVER_MS);
+    let (s, v) = call(&t, Method::Post, &at("/claim"), none.clone(), Some(&ana.access_token));
+    assert_eq!((s, v["host"].as_str(), v["host_online"].as_bool()), (200, Some("jam_a2"), Some(true)), "{v}");
+    assert_eq!(v["members"][0], serde_json::json!({"handle": "jam_a2", "host": true}));
+    // The old host is a guest now; the new one runs the jam.
+    let (s, v) = call(&t, Method::Get, &at("/ops"), none.clone(), Some(&host.access_token));
+    assert_eq!((s, v["code"].as_str()), (403, Some("not_jam_host")));
+    assert_eq!(call(&t, Method::Get, &at("?rev=0"), none.clone(), Some(&host.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Post, &at("/state"), serde_json::json!({"code": code, "host": "x"}), Some(&ana.access_token)).0, 200);
+}
+
+/// Records what the server pushes.
+#[derive(Default)]
+struct RecPush(std::sync::Mutex<Vec<(String, jam::To, Option<String>, Option<u16>)>>);
+
+#[async_trait::async_trait]
+impl jam::JamPush for RecPush {
+    async fn send(&self, code: &str, to: jam::To, msg: Option<&str>, close: Option<u16>) {
+        self.0.lock().unwrap().push((code.to_string(), to, msg.map(String::from), close));
+    }
+}
+
+impl RecPush {
+    fn take(&self) -> Vec<(String, jam::To, Option<String>, Option<u16>)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// `GET /live` as a WebSocket upgrade: (status, relay header, error code).
+fn live(t: &T, code: &str, token: &str, upgrade: bool) -> (u16, Option<String>, Option<String>) {
+    let mut headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+    if upgrade {
+        headers.push(("upgrade".to_string(), "websocket".to_string()));
+    }
+    let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/jam/{code}/live"), headers, vec![], Some("1.2.3.4".into()))));
+    let relay = r.headers.iter().find(|(k, _)| k == jam::LIVE_HEADER).map(|(_, v)| v.clone());
+    let v: serde_json::Value = serde_json::from_slice(r.bytes().unwrap_or_default()).unwrap_or_default();
+    (r.status, relay, v["code"].as_str().map(String::from))
+}
+
+#[test]
+fn jam_pushes_once_someone_listens() {
+    use glyph_protocol::jam::{Live, LIVE_CLOSE_AGAIN, LIVE_CLOSE_ENDED, LIVE_CLOSE_REMOVED};
+    let none = serde_json::Value::Null;
+    // Without a relay there is no /live: the apps long poll.
+    let t = setup();
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let (host, _, _) = sign_up(&t, "live_h0");
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code = v["code"].as_str().unwrap().to_string();
+    assert_eq!(live(&t, &code, &host.access_token, true), (404, None, Some("jam_push_off".into())));
+
+    let push = Arc::new(RecPush::default());
+    let t = setup_with(Some(push.clone()));
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let (host, _, _) = sign_up(&t, "live_h");
+    let (ana, _, _) = sign_up(&t, "live_a");
+    let (ben, _, _) = sign_up(&t, "live_b");
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code = v["code"].as_str().unwrap().to_string();
+    let at = |p: &str| format!("/v1/jam/{code}{p}");
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token)).0, 200);
+    // Nobody connected yet: no push spent.
+    assert!(push.take().is_empty());
+
+    // Only members, and only as a WebSocket.
+    assert_eq!(live(&t, &code, &ben.access_token, true).0, 403);
+    assert_eq!(live(&t, &code, &ana.access_token, false).0, 426);
+    assert_eq!(live(&t, &code, &ana.access_token, true), (200, Some("guest live_a".into()), None));
+    assert_eq!(live(&t, &code, &host.access_token, true), (200, Some("host live_h".into()), None));
+
+    // A publish reaches the guests, as GET would answer it.
+    let state = serde_json::json!({"code": code, "host": "live_h", "members": [{"handle": "live_a"}]});
+    assert_eq!(call(&t, Method::Post, &at("/state"), state, Some(&host.access_token)).0, 200);
+    let sent = push.take();
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0].0.as_str(), &sent[0].1, sent[0].3), (code.as_str(), &jam::To::Guests, None));
+    match serde_json::from_str::<Live>(sent[0].2.as_deref().unwrap()).unwrap() {
+        Live::State { state } => {
+            assert_eq!((state.rev, state.host.as_str(), state.host_online), (2, "live_h", true));
+            assert_eq!(state.link, Some(format!("{ORIGIN}/jam/{code}")));
+            assert_eq!(state.server_ms, t.h.rt.now_ms());
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Requests ring the host, who picks them up without waiting.
+    assert_eq!(call(&t, Method::Post, &at("/op"), serde_json::json!({"op": "react", "reaction": "fire"}), Some(&ana.access_token)).0, 200);
+    let sent = push.take();
+    assert_eq!((&sent[0].1, sent[0].2.as_deref()), (&jam::To::Host, Some(r#"{"t":"ops"}"#)));
+    // Ana's join from the start is still waiting too.
+    let (s, v) = call(&t, Method::Get, &at("/ops?wait=0"), none.clone(), Some(&host.access_token));
+    assert_eq!((s, v["ops"].as_array().map(Vec::len)), (200, Some(2)));
+    let (_, v) = call(&t, Method::Get, &at("/ops?wait=0"), none.clone(), Some(&host.access_token));
+    assert_eq!(v["ops"].as_array().map(Vec::len), Some(0));
+
+    // Removed members are cut off.
+    assert_eq!(call(&t, Method::Post, &at("/kick"), serde_json::json!({"handle": "live_a"}), Some(&host.access_token)).0, 200);
+    let sent = push.take();
+    assert_eq!((&sent[0].1, sent[0].3), (&jam::To::Member("live_a".into()), Some(LIVE_CLOSE_REMOVED)));
+
+    // A takeover sends everyone to connect again.
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ben.access_token)).0, 200);
+    push.take();
+    t.h.rt.advance(glyph_protocol::jam::HANDOVER_MS + 1);
+    let fresh = call(&t, Method::Post, "/v1/account/token/refresh", serde_json::json!({"refresh_token": ben.refresh_token}), None).1;
+    let ben_tok = fresh["access_token"].as_str().unwrap().to_string();
+    assert_eq!(call(&t, Method::Post, &at("/claim"), none.clone(), Some(&ben_tok)).0, 200);
+    let sent = push.take();
+    assert_eq!((&sent[0].1, sent[0].3), (&jam::To::All, Some(LIVE_CLOSE_AGAIN)));
+    assert_eq!(live(&t, &code, &ben_tok, true).1, Some("host live_b".into()));
+
+    // Ending closes every socket.
+    assert_eq!(call(&t, Method::Delete, &at(""), none, Some(&ben_tok)).0, 200);
+    let sent = push.take();
+    assert_eq!((&sent[0].1, sent[0].3), (&jam::To::All, Some(LIVE_CLOSE_ENDED)));
+}
+
+#[test]
+fn jam_push_budget_ends_in_one_fallback() {
+    use crate::traits::RateLimiter;
+    use glyph_protocol::jam::Live;
+    let none = serde_json::Value::Null;
+    let push = Arc::new(RecPush::default());
+    let t = setup_with(Some(push.clone()));
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let (host, _, _) = sign_up(&t, "budget_h");
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code = v["code"].as_str().unwrap().to_string();
+    assert_eq!(live(&t, &code, &host.access_token, true).0, 200);
+    // Use up the rest of today's budget.
+    let key = format!("jamdo:{}", t.h.rt.now_ms() / (24 * 3600 * 1000));
+    block_on(async {
+        for _ in 1..jam::PUSH_BUDGET {
+            t.h.svc.limiter.check(&key, jam::PUSH_BUDGET, 86_400).await;
+        }
+    });
+    assert_eq!(live(&t, &code, &host.access_token, true).2, Some("jam_push_busy".into()));
+    let state = serde_json::json!({"code": code, "host": "budget_h"});
+    for _ in 0..3 {
+        assert_eq!(call(&t, Method::Post, &format!("/v1/jam/{code}/state"), state.clone(), Some(&host.access_token)).0, 200);
+    }
+    // Publishing still works; the sockets got one goodbye, then nothing.
+    let sent = push.take();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(serde_json::from_str::<Live>(sent[0].2.as_deref().unwrap()).unwrap(), Live::Fallback);
+}
+
+#[test]
+fn jam_position_updates_are_small() {
+    use glyph_protocol::jam::Live;
+    let none = serde_json::Value::Null;
+    let push = Arc::new(RecPush::default());
+    let t = setup_with(Some(push.clone()));
+    t.s.update_config(|c| c.rate_limit_per_min = 1000);
+    let (host, _, _) = sign_up(&t, "now_h");
+    let (ana, _, _) = sign_up(&t, "now_a");
+    let (_, v) = call(&t, Method::Post, "/v1/jam", none.clone(), Some(&host.access_token));
+    let code = v["code"].as_str().unwrap().to_string();
+    let at = |p: &str| format!("/v1/jam/{code}{p}");
+    assert_eq!(call(&t, Method::Post, &at("/join"), none.clone(), Some(&ana.access_token)).0, 200);
+    assert_eq!(live(&t, &code, &ana.access_token, true).0, 200);
+    let song = serde_json::json!({"id": "7", "source": "audius", "title": "Song", "artist": "Band", "duration_ms": 200000});
+    let state = serde_json::json!({"code": code, "host": "now_h", "members": [{"handle": "now_a"}], "queue": [{"id": "audius:7", "track": song, "by": "now_a"}],
+        "now": {"track": song, "position_ms": 1000, "playing": true, "at_ms": t.h.rt.now_ms()}});
+    assert_eq!(call(&t, Method::Post, &at("/state"), state.clone(), Some(&host.access_token)).1["rev"], 2);
+    push.take();
+
+    // Only the host moves the position; it raises the revision and keeps the rest.
+    let moved = serde_json::json!({"track": song, "position_ms": 90000, "playing": true, "at_ms": t.h.rt.now_ms()});
+    assert_eq!(call(&t, Method::Post, &at("/now"), moved.clone(), Some(&ana.access_token)).0, 403);
+    let (s, v) = call(&t, Method::Post, &at("/now"), moved, Some(&host.access_token));
+    assert_eq!((s, v["rev"].as_u64()), (200, Some(3)), "{v}");
+    let sent = push.take();
+    assert_eq!(&sent[0].1, &jam::To::Guests);
+    match serde_json::from_str::<Live>(sent[0].2.as_deref().unwrap()).unwrap() {
+        Live::Now { rev, now, .. } => assert_eq!((rev, now.position_ms), (3, 90000)),
+        other => panic!("{other:?}"),
+    }
+    let (_, v) = call(&t, Method::Get, &at("?rev=2"), none.clone(), Some(&ana.access_token));
+    assert_eq!((v["rev"].as_u64(), v["now"]["position_ms"].as_u64(), v["queue"][0]["id"].as_str()), (Some(3), Some(90000), Some("audius:7")));
+
+    // A full publish after it wins again.
+    assert_eq!(call(&t, Method::Post, &at("/state"), state, Some(&host.access_token)).1["rev"], 4);
+    let (_, v) = call(&t, Method::Get, &at("?rev=3"), none, Some(&ana.access_token));
+    assert_eq!((v["rev"].as_u64(), v["now"]["position_ms"].as_u64()), (Some(4), Some(1000)));
 }

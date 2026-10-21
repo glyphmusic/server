@@ -137,14 +137,16 @@ pub(super) async fn companion_variant(
             tokio::spawn(async move {
                 let job = task_job;
                 let (_encoder, _background) = (encoder, bg);
-                let ok = matches!(
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(90),
-                        encode(&svc, &id, variant, permit, &job)
-                    )
-                    .await,
-                    Ok(Ok(()))
-                );
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    encode(&svc, &id, variant, permit, &job),
+                ).await;
+                let ok = matches!(result, Ok(Ok(())));
+                match result {
+                    Ok(Err(error)) => tracing::warn!(%id, quality = variant.name(), %error, "audio transcode failed"),
+                    Err(_) => tracing::warn!(%id, quality = variant.name(), "audio transcode timed out"),
+                    _ => {}
+                }
                 let mut active = jobs().lock().unwrap();
                 if ok {
                     let out = job.output.lock().unwrap();
@@ -235,12 +237,13 @@ async fn transcode(
     job: &Job,
 ) -> Result<(), std::io::Error> {
     let error = || std::io::Error::other("audio encoding failed");
+    let mut source_bytes = 0usize;
     let mut prefix = Vec::new();
     while prefix.len() < 65_536 {
-        let Some(bytes) = source.next().await else {
+        let Some(bytes) = next_source_chunk(&mut source, &mut source_bytes).await? else {
             break;
         };
-        prefix.extend_from_slice(&bytes.map_err(|_| error())?);
+        prefix.extend_from_slice(&bytes);
         if pipe_format(&prefix).is_some() {
             break;
         }
@@ -254,13 +257,7 @@ async fn transcode(
         }
         let mut file = tokio::fs::File::create(&input).await?;
         file.write_all(&prefix).await?;
-        let mut size = prefix.len();
-        while let Some(bytes) = source.next().await {
-            let bytes = bytes.map_err(|_| error())?;
-            size += bytes.len();
-            if size > MAX_AUDIO_BYTES as usize {
-                return Err(error());
-            }
+        while let Some(bytes) = next_source_chunk(&mut source, &mut source_bytes).await? {
             file.write_all(&bytes).await?;
         }
         file.flush().await?;
@@ -284,7 +281,7 @@ async fn transcode(
     } else {
         command.arg(&input);
     }
-    command.args(["-map", "0:a:0", "-vn"]);
+    command.args(["-map", "0:a:0", "-vn", "-sn", "-dn"]);
     if variant == glyph_server_core::media::AudioVariant::High && format.unwrap_or("mov") == "mov" {
         command.args(["-c:a", "copy"]);
     } else {
@@ -300,6 +297,8 @@ async fn transcode(
             "+frag_keyframe+empty_moov+default_base_moof",
             "-frag_duration",
             "250000",
+            "-flush_packets",
+            "1",
             "-f",
             "mp4",
             "pipe:1",
@@ -314,8 +313,8 @@ async fn transcode(
     let feed = async {
         if format.is_some() {
             stdin.write_all(&prefix).await?;
-            while let Some(bytes) = source.next().await {
-                stdin.write_all(&bytes.map_err(|_| error())?).await?;
+            while let Some(bytes) = next_source_chunk(&mut source, &mut source_bytes).await? {
+                stdin.write_all(&bytes).await?;
             }
         }
         drop(stdin);
@@ -349,9 +348,36 @@ async fn transcode(
     Ok(())
 }
 
+/// Apply the source bound to both piped and seekable inputs; a stalled source
+/// must release its encoder slot instead of occupying it until the job deadline.
+async fn next_source_chunk(
+    source: &mut (impl futures::Stream<Item = Result<Bytes, axum::Error>> + Unpin),
+    size: &mut usize,
+) -> Result<Option<Bytes>, std::io::Error> {
+    let next = tokio::time::timeout(std::time::Duration::from_secs(30), source.next()).await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "audio source stalled"))?;
+    let Some(chunk) = next else { return Ok(None) };
+    let chunk = chunk.map_err(std::io::Error::other)?;
+    *size = size.checked_add(chunk.len()).ok_or_else(|| std::io::Error::other("audio source too large"))?;
+    if *size > MAX_AUDIO_BYTES as usize { return Err(std::io::Error::other("audio source too large")); }
+    Ok(Some(chunk))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn piped_sources_enforce_the_same_byte_bound_as_seekable_sources() {
+        let mut source = Body::from(Bytes::from_static(b"abc")).into_data_stream();
+        let mut size = MAX_AUDIO_BYTES as usize - 2;
+        let error = next_source_chunk(&mut source, &mut size).await.unwrap_err();
+        assert!(error.to_string().contains("too large"));
+        let mut source = Body::from(Bytes::from_static(b"ab")).into_data_stream();
+        let mut size = MAX_AUDIO_BYTES as usize - 2;
+        assert_eq!(next_source_chunk(&mut source, &mut size).await.unwrap().unwrap(), "ab");
+        assert!(next_source_chunk(&mut source, &mut size).await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn readers_receive_prefix_before_completion_and_late_readers_replay_it() {

@@ -205,6 +205,12 @@ pub trait CommandRunner: MaybeSendSync {
         None
     }
 
+    /// Imports must stay off the Worker's CPU budget. Failure is explicit;
+    /// callers must not restart the provider traversal inside the Worker.
+    async fn import_page(&self, _req: &crate::import::PageRequest) -> Option<Result<crate::import::PageResponse, crate::ApiErr>> {
+        None
+    }
+
     /// Look lyrics up on the companion machine. Cloudflare egress is
     /// rate-limited by LRCLIB, so the Worker asks this machine (home
     /// connection) first and only falls back to its own lookup on `None`.

@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>
 /*BASE*/
-.wrap { max-width: 860px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
 nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
 nav .brand { font-weight: 700; text-decoration: none; }
 /*BRAND*/
@@ -34,9 +34,25 @@ h1 { font-size: clamp(24px, 4vw, 34px); margin: 24px 0 6px; letter-spacing: -0.0
 .rel .date { color: var(--dim); font-size: 12px; margin-left: auto; }
 .tag { font-size: 12px; padding: 1px 1ch; border: 1px solid var(--line); color: var(--dim); }
 .tag.desktop { color: var(--pink); border-color: var(--pink); }
-.rel ul { margin: 10px 0 0; padding-left: 2.5ch; }
+.layout { display: grid; grid-template-columns: 22ch minmax(0, 1fr); gap: 4ch; align-items: start; }
+.versions { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; border-top: 1px solid var(--line); padding: 12px 0; scrollbar-width: thin; }
+.versions a { display: flex; justify-content: space-between; gap: 1ch; padding: 2px 1ch; color: var(--dim); text-decoration: none; border-left: 2px solid transparent; }
+.versions a:hover { color: var(--fg); }
+.versions a[aria-current] { color: var(--fg); border-left-color: var(--pink); }
+.versions a[hidden] { display: none; }
+.versions .r { font-size: 11px; }
+.versions .r.desktop { color: var(--pink); }
+.rel .sum { margin: 10px 0 0; color: var(--fg); }
+.rel h3 { font-size: 12px; font-weight: 600; text-transform: lowercase; color: var(--dim); margin: 14px 0 0; }
+.rel h3.added { color: var(--pink); }
+.rel ul { margin: 6px 0 0; padding-left: 2.5ch; }
 .rel li { margin: 4px 0; color: var(--fg); }
 .rel li::marker { color: var(--dim); }
+.rel strong { font-weight: 700; }
+@media (max-width: 760px) {
+  .layout { display: block; }
+  .versions { display: none; }
+}
 code { background: var(--panel-2); padding: 0 .4ch; }
 .empty { color: var(--dim); }
 footer { border-top: 1px solid var(--line); margin-top: 32px; padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
@@ -64,9 +80,12 @@ footer a { color: var(--dim); }
   <button type="button" data-repo="r-dlp" aria-pressed="false">r-dlp</button>
 </div>
 
+<div class="layout">
+<aside class="versions" aria-label="Versions"><!--VERSIONS--></aside>
 <main id="releases">
 <!--RELEASES-->
 </main>
+</div>
 
 <footer>
   <span>glyph · mit / apache-2.0</span>
@@ -79,7 +98,7 @@ footer a { color: var(--dim); }
   const buttons = [...document.querySelectorAll(".filters button")];
   const show = repo => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.repo === repo));
-    for (const r of document.querySelectorAll(".rel")) r.hidden = Boolean(repo) && r.dataset.repo !== repo;
+    for (const r of document.querySelectorAll(".rel, .versions a")) r.hidden = Boolean(repo) && r.dataset.repo !== repo;
     const url = new URL(location.href);
     if (repo) url.searchParams.set("repo", repo); else url.searchParams.delete("repo");
     history.replaceState(null, "", url);
@@ -87,6 +106,22 @@ footer a { color: var(--dim); }
   for (const b of buttons) b.addEventListener("click", () => show(b.dataset.repo));
   const wanted = new URLSearchParams(location.search).get("repo");
   if (wanted && buttons.some(b => b.dataset.repo === wanted)) show(wanted);
+})();
+// Mark the release at the top of the screen in the version list.
+(() => {
+  const links = new Map([...document.querySelectorAll(".versions a")].map(a => [a.hash.slice(1), a]));
+  const visible = new Set();
+  const mark = () => {
+    const top = [...document.querySelectorAll(".rel")].find(r => !r.hidden && visible.has(r.id));
+    for (const [id, a] of links) a.toggleAttribute("aria-current", Boolean(top) && id === top.id);
+    const current = top && links.get(top.id);
+    if (current) current.scrollIntoView({ block: "nearest" });
+  };
+  const seen = new IntersectionObserver(entries => {
+    for (const e of entries) e.isIntersecting ? visible.add(e.target.id) : visible.delete(e.target.id);
+    mark();
+  }, { rootMargin: "0px 0px -60% 0px" });
+  for (const r of document.querySelectorAll(".rel")) seen.observe(r);
 })();
 </script>
 </body>

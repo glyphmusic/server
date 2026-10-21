@@ -43,6 +43,8 @@ pub struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_max_pages: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist_max_tracks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub update_repo: Option<String>,
     pub admin: FileAdmin,
     pub tls: FileTls,
@@ -161,6 +163,7 @@ pub struct Settings {
     /// Whether `/v1/resolve` hands out `/v1/audio/...` URLs (default true).
     pub proxy_audio: bool,
     pub import_max_pages: u32,
+    pub playlist_max_tracks: usize,
     pub update_repo: String,
     pub admin_password_hash: Option<String>,
     pub tls: Option<TlsSettings>,
@@ -309,6 +312,7 @@ impl Settings {
             rdlp_path: env("GLYPH_RDLP_PATH").or(file.rdlp_path),
             proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
+            playlist_max_tracks: file.playlist_max_tracks.unwrap_or(5_000).clamp(1, 50_000),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,

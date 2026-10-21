@@ -470,7 +470,7 @@ impl AccountStore for D1Store {
             .map(|i| {
                 serde_json::json!({
                     "kind": i.kind, "key": i.key, "value": i.value, "updated_at": i.updated_at,
-                    "device_id": i.device_id, "deleted": if i.deleted { 1 } else { 0 },
+                    "device_id": i.device_id, "deleted": if i.deleted { 1 } else { 0 }, "base_rev": i.rev,
                 })
             })
             .collect();
@@ -489,8 +489,11 @@ impl AccountStore for D1Store {
                      ON CONFLICT (user_id, kind, key) DO UPDATE SET
                        value = excluded.value, updated_at = excluded.updated_at, device_id = excluded.device_id,
                        deleted = excluded.deleted, rev = excluded.rev
-                     WHERE excluded.updated_at > sync_items.updated_at
-                        OR (excluded.updated_at = sync_items.updated_at AND excluded.device_id > sync_items.device_id)
+                     WHERE (excluded.updated_at > sync_items.updated_at
+                        OR (excluded.updated_at = sync_items.updated_at AND excluded.device_id > sync_items.device_id))
+                       AND (excluded.kind != 'playlist' OR sync_items.rev = (
+                         SELECT j.value ->> 'base_rev' FROM json_each(?3) AS j
+                         WHERE j.value ->> 'kind' = excluded.kind AND j.value ->> 'key' = excluded.key LIMIT 1))
                      RETURNING rev",
                     &[uid.clone(), n(count), s(&json)],
                 )?,
@@ -656,6 +659,12 @@ impl AccountStore for D1Store {
             .await?;
         let rows: Vec<Row> = r.first().map(|x| x.results::<Row>().unwrap_or_default()).unwrap_or_default();
         Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
+    async fn mcp_list(&self, scope: &str, prefix: &str, now: u64) -> StoreResult<Vec<(String, String)>> {
+        #[derive(Deserialize)]
+        struct Row { key: String, value: String }
+        Ok(self.all::<Row>("SELECT key, value FROM mcp_mailbox WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2 AND expires > ?3 ORDER BY key LIMIT 100", &[s(scope), s(prefix), n(now)]).await?.into_iter().map(|r| (r.key, r.value)).collect())
     }
 
     async fn mcp_delete(&self, scope: &str, key: &str) -> StoreResult<()> {

@@ -175,6 +175,23 @@ img { display: block; }
 .empty p { margin: 0 0 8px; font-size: 12.5px; color: var(--dim); }
 .empty .pill { flex: none; }
 
+/* Special pages (404, errors): widgets/bars.rs ascii_state (44 px circle,
+   text 8 %, 18 px icon dim, gap 14, title md semibold, hint sm dim, gap 2),
+   centred on the page; the buttons line up under the text. */
+.state { min-height: calc(100vh - 44px); display: flex; align-items: center; justify-content: center; padding: 0 16px 80px; }
+.state-box { display: flex; flex-direction: column; gap: 14px; max-width: 460px; }
+.state-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; }
+.state-ic { flex: none; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(242, 242, 242, .08); color: var(--dim); }
+.state-ic .ic { width: 18px; height: 18px; }
+.state-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.state-txt .tag { font-size: 11px; line-height: 14px; color: var(--faint); text-transform: uppercase; }
+.state-txt h1 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.state-txt p { margin: 0; font-size: 12.5px; color: var(--dim); }
+.state-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-left: 58px; }
+.state-act .pill { flex: none; }
+.state-act .backpill { height: 36px; }
+@media (max-width: 480px) { .state-act { padding-left: 0; } }
+
 @media (max-width: 1180px) { .al { display: none; } }
 @media (max-width: 900px) {
   .titlebar { padding: 0 8px 0 16px; }

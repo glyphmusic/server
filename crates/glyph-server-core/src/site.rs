@@ -115,6 +115,7 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
             .replace("/*BASE*/", BASE_CSS)
             .replace("/*BRAND*/", &brand_icon_css("nav .brand"))
             .replace("<!--COUNT-->", &format!("{} releases.", releases.len()))
+            .replace("<!--VERSIONS-->", &changelog::render_index(&releases))
             .replace("<!--RELEASES-->", &changelog::render(&releases));
         return Ok(html_response(200, html, "public, max-age=300"));
     }
@@ -124,6 +125,27 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
     }
     let html = include_str!("site/index.html").replace("/*BASE*/", BASE_CSS).replace("/*NOTE*/", NOTE_JS).replace("/*BRAND*/", &brand_icon_css("nav .brand"));
     Ok(html_response(200, html, "public, max-age=300"))
+}
+
+/// API prefixes whose errors stay JSON even in a browser.
+const API_PREFIXES: &[&str] = &["/v1/", "/admin", "/internal/", "/oauth/", "/mcp", "/.well-known/oauth-"];
+
+/// `Some(language)` when a failed request should get a special page instead
+/// of the JSON error: a browser (asks for HTML) loading a page, not an API call.
+pub fn page_lang(req: &Request) -> Option<crate::share::Lang> {
+    let html = req.header("accept").is_some_and(|a| a.contains("text/html"));
+    (req.method == Method::Get && html && !API_PREFIXES.iter().any(|p| req.path.starts_with(p)))
+        .then(|| crate::share::lang(req.header("accept-language")))
+}
+
+/// Swaps a JSON error for the matching special page (`share::error_page`)
+/// when [`page_lang`] said the visitor is a browser.
+pub fn as_page(lang: Option<crate::share::Lang>, r: Response) -> Response {
+    let json = r.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("application/json"));
+    let Some(l) = lang.filter(|_| r.status >= 400 && json) else { return r };
+    let err: Option<glyph_protocol::ApiError> = r.bytes().and_then(|b| serde_json::from_slice(b).ok());
+    let code = err.as_ref().map_or("", |e| e.code.as_str());
+    crate::share::error_page(r.status, code, err.as_ref().and_then(|e| e.retry_after_s), l)
 }
 
 /// An HTML page of the site with its security headers.
@@ -178,6 +200,29 @@ mod tests {
         assert_eq!(dl.status, 200);
         assert!(dl_html.contains("releases/latest") && !dl_html.contains("/*BASE*/"));
         assert!(shot.bytes().unwrap().starts_with(&[0xff, 0xd8]));
+    }
+
+    #[test]
+    fn special_pages_for_browsers() {
+        let h = harness(Default::default());
+        let s = Server::from_arc(h.svc.clone());
+        let browser = |p: &str, lang: &str| Request::new(Method::Get, p, vec![("accept".into(), "text/html,*/*;q=0.8".into()), ("accept-language".into(), lang.into())], vec![], Some("1.2.3.4".into()));
+        let r = block_on(s.handle(browser("/nope", "en")));
+        let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
+        assert_eq!(r.status, 404);
+        assert!(r.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("text/html")));
+        assert!(html.contains("Page not found") && html.contains("[ 404 ]") && html.contains("glyphGlow") && html.contains("noindex"));
+        let de = String::from_utf8_lossy(block_on(s.handle(browser("/nope", "de-DE"))).bytes().unwrap()).to_string();
+        assert!(de.contains("Seite nicht gefunden") && de.contains(r#"<html lang="de">"#));
+        // API calls and non-browsers keep the JSON error.
+        let api = block_on(s.handle(browser("/v1/nope", "en")));
+        assert!(api.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("application/json")));
+        let curl = block_on(s.handle(Request::new(Method::Get, "/nope", vec![], vec![], Some("1.2.3.4".into()))));
+        assert!(curl.headers.iter().any(|(k, v)| k == "content-type" && v.starts_with("application/json")));
+        let busy = crate::share::error_page(429, "rate_limited", Some(7), crate::share::Lang::En);
+        let busy_html = String::from_utf8_lossy(busy.bytes().unwrap()).to_string();
+        assert!(busy_html.contains("Try again in 7 s.") && busy.headers.iter().any(|(k, v)| k == "retry-after" && v == "7"));
+        assert!(String::from_utf8_lossy(crate::share::error_page(503, "queue_full", None, crate::share::Lang::En).bytes().unwrap()).contains("Server busy"));
     }
 
     #[test]

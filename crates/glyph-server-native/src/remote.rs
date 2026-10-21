@@ -63,6 +63,9 @@ pub enum RemoteCmd {
         /// Max pages per playlist import
         #[arg(long)]
         import_pages: Option<u32>,
+        /// Maximum songs per playlist (1-50000)
+        #[arg(long)]
+        playlist_max_tracks: Option<usize>,
         /// Days companion audio stays in R2 (Worker)
         #[arg(long)]
         audio_days: Option<u32>,
@@ -447,10 +450,10 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { require_account, rate, youtube_budget, import_pages, audio_days, audio_max_gb, d1_max_mb } => {
+        RemoteCmd::Limits { require_account, rate, youtube_budget, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb } => {
             let c = Client::connect(a.server).await?;
             let mut l: Limits = c.get("limits").await?;
-            if require_account.is_some() || rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() || d1_max_mb.is_some() {
+            if playlist_max_tracks.is_some() || require_account.is_some() || rate.is_some() || youtube_budget.is_some() || import_pages.is_some() || audio_days.is_some() || audio_max_gb.is_some() || d1_max_mb.is_some() {
                 if let Some(v) = require_account { l.require_account = v; }
                 if let Some(v) = d1_max_mb { l.d1_max_mb = v; }
                 if let Some(v) = audio_days {
@@ -465,6 +468,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
                 if let Some(v) = youtube_budget {
                     l.youtube_daily_budget_units = v;
                 }
+                if let Some(v) = playlist_max_tracks { l.playlist_max_tracks = v; }
                 if let Some(v) = import_pages {
                     l.import_max_pages = v;
                 }
@@ -474,6 +478,7 @@ pub async fn run(a: RemoteArgs) -> Result<(), String> {
             println!("Account required               {}", l.require_account);
             println!("Requests per minute per client  {}", l.rate_limit_per_min);
             println!("YouTube units per day           {}", l.youtube_daily_budget_units);
+            println!("Songs per playlist              {}", l.playlist_max_tracks);
             println!("Pages per playlist import       {}", l.import_max_pages);
             println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
             println!("AI assistants (MCP relay)       {}", if l.mcp_relay { "on" } else { "off" });
@@ -615,6 +620,15 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["test","limits","--require-account"]).is_err());
     }
+    #[test]
+    fn playlist_limit_has_an_operator_cli_flag() {
+        use clap::Parser;
+        #[derive(Parser)] struct Cli { #[command(flatten)] remote: super::RemoteArgs }
+        let cli = Cli::try_parse_from(["test", "limits", "--playlist-max-tracks", "8000"]).unwrap();
+        let super::RemoteCmd::Limits { playlist_max_tracks, .. } = cli.remote.cmd else { panic!("wrong command") };
+        assert_eq!(playlist_max_tracks, Some(8000));
+    }
+
     #[test]
     fn storage_limits_have_independent_cli_flags_and_legacy_alias() {
         use clap::Parser;

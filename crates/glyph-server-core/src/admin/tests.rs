@@ -341,6 +341,15 @@ fn limits_get_set_and_validate() {
     let invalid = separate.replace("\"d1_max_mb\":250", "\"d1_max_mb\":0");
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &invalid, tok)).0, 400);
     assert_eq!(t.server.services().config.d1_max_mb, 250);
+    let changed = separate.replace("\"import_max_pages\":3", "\"import_max_pages\":3,\"playlist_max_tracks\":8000");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &changed, tok)).0, 200);
+    assert_eq!(t.server.services().config.playlist_max_tracks, 8000);
+    let invalid = changed.replace("8000", "0");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &invalid, tok)).0, 400);
+    assert_eq!(t.server.services().config.playlist_max_tracks, 8000);
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", separate, tok)).0, 200);
+    assert_eq!(t.server.services().config.playlist_max_tracks, 8000, "older admin clients must preserve the operator's cap");
+
 }
 
 #[test]
@@ -354,7 +363,7 @@ fn account_gate_requires_a_backend_and_old_admin_clients_preserve_it() {
     impl crate::accounts::Entropy for Entropy { fn fill(&self, bytes: &mut [u8]) { bytes.fill(1); } }
     t.server = t.server.with_accounts(crate::accounts::Accounts {
         store:Arc::new(crate::accounts::store::MemStore::default()),blobs:None,entropy:Arc::new(Entropy),
-        origin:"https://glyph.example".into(),extra_origins:vec![],rp_id:None,
+        origin:"https://glyph.example".into(),extra_origins:vec![],rp_id:None,push:None,
     });
     assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",required,token)).0,200);
     assert!(t.server.services().config.require_account);

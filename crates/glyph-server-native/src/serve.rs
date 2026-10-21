@@ -38,6 +38,7 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     config.proxy_audio = s.proxy_audio;
     config.server_bearer_hash = s.server_bearer_hash.clone();
     config.import_max_pages = s.import_max_pages;
+        config.playlist_max_tracks = s.playlist_max_tracks;
     config.companion_enabled = !companion_off_flag(s).exists();
     config.admin_password_hash = s
         .admin_password_hash
@@ -253,11 +254,13 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
     };
 
-    if matches!(path_only.as_str(),"/internal/ytdlp"|"/internal/resolve"|"/internal/lyrics"|"/internal/status"
+    if matches!(path_only.as_str(),"/internal/import"|"/internal/ytdlp"|"/internal/resolve"|"/internal/lyrics"|"/internal/status"
         |"/internal/update/check"|"/internal/update/apply"|"/internal/r-dlp/check"|"/internal/r-dlp/apply") || path_only.starts_with("/internal/audio/") {
         return companion(&st.server, &path_only, &headers, method, &body).await;
     }
-    if let Err(resp) = st.server.check_access(&Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local)) {
+    let probe = Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local);
+    if let Err(resp) = st.server.check_access(&probe) {
+        let resp = glyph_server_core::site::as_page(glyph_server_core::site::page_lang(&probe), resp);
         let mut out = Response::builder().status(resp.status);
         for (k,v) in &resp.headers { out = out.header(k.as_str(),v.as_str()); }
         return out.body(Body::from(resp.bytes().unwrap_or_default().to_vec())).unwrap();
@@ -519,6 +522,10 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
     static RESOLVE_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     static LYRICS_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let slots = if path.starts_with("/internal/audio/") { audio_slots() }
+        else if path == "/internal/import" {
+            static IMPORT_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+            IMPORT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        }
         else if path == "/internal/resolve" { RESOLVE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
         else if path == "/internal/lyrics" { LYRICS_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
         else { SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4))) };
@@ -548,6 +555,15 @@ async fn companion(server: &Server, path: &str, headers: &[(String, String)], me
         return retry_stale_youtube(&svc, id, range, out, &mut permit).await;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
+    if path == "/internal/import" {
+        let Ok(req) = serde_json::from_slice::<glyph_server_core::import::PageRequest>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid import request") };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(50), import_jobs::page(&svc, &req)).await;
+        return match result {
+            Ok(Ok(page)) => Response::builder().header("content-type", "application/json").header("cache-control", "no-store").body(Body::from(serde_json::to_vec(&page).unwrap())).unwrap(),
+            Ok(Err(e)) => plain(StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY), &e.body.message),
+            Err(_) => plain(StatusCode::GATEWAY_TIMEOUT, "import timed out; retry later"),
+        };
+    }
     if path == "/internal/lyrics" {
         // LRCLIB rate-limits Cloudflare egress; this machine may ask instead.
         let Ok(query) = serde_json::from_slice::<glyph_server_core::LyricsQuery>(body) else { return plain(StatusCode::BAD_REQUEST, "invalid lyrics request") };
@@ -608,6 +624,7 @@ async fn slice_variant(response:Response,range:Option<&str>) -> Response {
 
 mod variant_stream;
 use variant_stream::companion_variant;
+mod import_jobs;
 
 fn plain(status: StatusCode, msg: &str) -> Response {
     Response::builder().status(status).body(Body::from(msg.to_string())).unwrap()
@@ -686,6 +703,12 @@ mod tests {
             assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED,"{path}");
         }
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
+
+        let request = axum::http::Request::builder().uri("/internal/import").method("POST").body(Body::from("{}" )).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
+        let bad_import = serde_json::json!({"url":"http://127.0.0.1/private","offset":0}).to_string();
+        let request = axum::http::Request::builder().uri("/internal/import").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from(bad_import)).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
 
         // `/internal/lyrics` follows the same private contract: token required,

@@ -80,7 +80,7 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         items: Vec<SpTrack>,
     }
     let tok = token(svc).await?;
-    let url = build_url("https://api.spotify.com/v1/search", &[("q", q), ("type", "track"), ("limit", "15")]);
+    let url = build_url("https://api.spotify.com/v1/search", &[("q", q), ("type", "track"), ("limit", "10")]);
     let (k, v) = auth(&tok);
     let resp: Resp = fetch_json(svc, HttpRequest::get(url).header(k, v)).await?;
     Ok(resp.tracks.items.into_iter().filter_map(to_track).map(|t| candidate(t, None)).collect())

@@ -6,8 +6,167 @@
 use crate::error::ApiErr;
 use crate::providers::{self, build_url, fetch_json, new_track, spotify, ProviderError};
 use crate::traits::{HttpRequest, Services};
-use glyph_protocol::{ImportResponse, ProviderId, Track};
-use serde::Deserialize;
+use glyph_protocol::{ImportResponse, ProviderId};
+
+pub const DEFAULT_PLAYLIST_TRACKS: usize = 5_000;
+pub const HARD_MAX_PLAYLIST_TRACKS: usize = 50_000;
+fn default_max_tracks() -> usize { DEFAULT_PLAYLIST_TRACKS }
+pub const IMPORT_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageRequest {
+    pub url: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_max_tracks")]
+    pub max_tracks: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PageResponse {
+    #[serde(flatten)]
+    pub list: ImportResponse,
+    pub next_offset: Option<usize>,
+}
+
+impl PageRequest {
+    pub fn validate(&self) -> Result<(), ApiErr> {
+        if self.url.len() > 2048 || self.offset >= self.max_tracks || !(1..=HARD_MAX_PLAYLIST_TRACKS).contains(&self.max_tracks) || self.offset % IMPORT_PAGE_SIZE != 0 || parse_url(&self.url).is_none() {
+            return Err(ApiErr::bad_request("invalid import URL or page offset"));
+        }
+        Ok(())
+    }
+}
+
+/// Native orchestration: each request reads at most 100 metadata rows.
+/// The Worker only proxies and caches this bounded response.
+pub async fn page(svc: &Services, req: &PageRequest) -> Result<PageResponse, ApiErr> {
+    req.validate()?;
+    let canonical = canonical_url(&req.url).ok_or_else(|| ApiErr::bad_request("unsupported import link"))?;
+    let key = format!("import-native-page-v3:{}:{}:{}", req.max_tracks, canonical, req.offset);
+    if let Some(page) = crate::cache::get_json::<PageResponse>(&*svc.cache, &key).await { return Ok(page); }
+    let page = provider_page(svc, req).await?;
+    crate::cache::put_json(&*svc.cache, &key, &page, 600).await;
+    Ok(page)
+}
+
+/// Each request performs bounded native work: at most two provider pages.
+/// Only validated offsets or companion-cached opaque cursors are used.
+async fn provider_page(svc: &Services, req: &PageRequest) -> Result<PageResponse, ApiErr> {
+    async fn read(svc: &Services, request: HttpRequest) -> Result<serde_json::Value, ApiErr> {
+        fetch_json(svc, request).await.map_err(map_err)
+    }
+    fn check_size(total: Option<u64>, limit: usize) -> Result<(), ApiErr> {
+        if total.is_some_and(|n| n > limit as u64) {
+            return Err(ApiErr::bad_request(format!("playlists may contain at most {limit} songs")));
+        }
+        Ok(())
+    }
+    let target = parse_url(&req.url).ok_or_else(|| ApiErr::bad_request("unsupported import link"))?;
+    let offset = req.offset.to_string();
+    let limit = (req.max_tracks - req.offset).min(IMPORT_PAGE_SIZE);
+    let count = limit.to_string();
+    let (name, source, tracks, more) = match target {
+        Target::Spotify(id) => {
+            let tok = spotify::token(svc).await.map_err(map_err)?;
+            let (k, v) = spotify::auth(&tok);
+            let base = format!("https://api.spotify.com/v1/playlists/{id}");
+            let meta = read(svc, HttpRequest::get(build_url(&base, &[("fields", "name,items(total)")])).header(k, v.clone())).await?;
+            check_size(meta["items"]["total"].as_u64().or_else(|| meta["tracks"]["total"].as_u64()), req.max_tracks)?;
+            let mut tracks = Vec::new();
+            let mut more = false;
+            for step in (0..limit).step_by(50) {
+                let offset = (req.offset + step).to_string();
+                let count = (limit - step).min(50).to_string();
+                let page = read(svc, HttpRequest::get(build_url(&format!("{base}/items"), &[("limit", &count), ("offset", &offset)])).header(k, v.clone())).await?;
+                check_size(page["total"].as_u64(), req.max_tracks)?;
+                let rows = page["items"].as_array().ok_or_else(|| ApiErr::unavailable("invalid Spotify page"))?;
+                for row in rows {
+                    let Some(item) = row.get("item").filter(|t| !t.is_null()).or_else(|| row.get("track").filter(|t| !t.is_null())) else { continue };
+                    if item["type"].as_str().is_some_and(|kind| kind != "track") || row["is_local"].as_bool() == Some(true) { continue; }
+                    let song: spotify::SpTrack = serde_json::from_value(item.clone()).map_err(|_| ApiErr::unavailable("invalid Spotify track metadata"))?;
+                    if let Some(track) = spotify::to_track(song) { tracks.push(track); }
+                }
+                more = page["next"].as_str().is_some();
+                if !more { break; }
+            }
+            (meta["name"].as_str().unwrap_or("Spotify playlist").to_string(), ProviderId::Spotify, tracks, more)
+        }
+        Target::Deezer(id) | Target::DeezerUser(id) => {
+            let favorites = matches!(parse_url(&req.url), Some(Target::DeezerUser(_)));
+            let base = if favorites { format!("https://api.deezer.com/user/{id}") } else { format!("https://api.deezer.com/playlist/{id}") };
+            let name = if favorites { format!("Deezer favorites ({id})") } else {
+                let meta = read(svc, HttpRequest::get(base.clone())).await?;
+                check_size(meta["nb_tracks"].as_u64(), req.max_tracks)?;
+                meta["title"].as_str().unwrap_or("Deezer playlist").to_string()
+            };
+            let page = read(svc, HttpRequest::get(build_url(&format!("{base}/tracks"), &[("limit", &count), ("index", &offset)]))).await?;
+            check_size(page["total"].as_u64(), req.max_tracks)?;
+            let rows = page["data"].as_array().ok_or_else(|| ApiErr::unavailable("invalid Deezer page"))?;
+            let tracks = rows.iter().filter_map(|t| serde_json::from_value::<providers::deezer::DzTrack>(t.clone()).ok()).map(|t| providers::deezer::to_candidate(t).track).collect();
+            (name, ProviderId::Deezer, tracks, page["next"].as_str().is_some())
+        }
+        Target::LastFm(user) => {
+            let key = svc.config.secrets.lastfm_api_key.as_deref().ok_or_else(|| map_err(ProviderError::NotConfigured))?;
+            let page_num = (req.offset / IMPORT_PAGE_SIZE + 1).to_string();
+            let page = read(svc, HttpRequest::get(build_url("https://ws.audioscrobbler.com/2.0/", &[("method", "user.getlovedtracks"), ("api_key", key), ("format", "json"), ("user", &user), ("limit", "100"), ("page", &page_num)]))).await?;
+            if page["error"].is_number() { return Err(ApiErr::unavailable("Last.fm import failed")); }
+            let list = &page["lovedtracks"];
+            check_size(list["@attr"]["total"].as_str().and_then(|n| n.parse().ok()), req.max_tracks)?;
+            let rows = list["track"].as_array().cloned().unwrap_or_else(|| if list["track"].is_object() { vec![list["track"].clone()] } else { vec![] });
+            let tracks = rows.iter().filter_map(|t| {
+                let title = t["name"].as_str()?;
+                let artist = t["artist"]["name"].as_str().or_else(|| t["artist"].as_str()).unwrap_or("");
+                Some(new_track(format!("{artist}|{title}"), ProviderId::LastFm, title, artist))
+            }).collect();
+            let pages = list["@attr"]["totalPages"].as_str().and_then(|n| n.parse::<usize>().ok()).unwrap_or(1);
+            (format!("{user} (Last.fm loved)"), ProviderId::LastFm, tracks, req.offset / IMPORT_PAGE_SIZE + 1 < pages)
+        }
+        Target::YouTube(id) => {
+            let key = svc.config.secrets.youtube_api_key.as_deref().ok_or_else(|| map_err(ProviderError::NotConfigured))?;
+            let canonical = canonical_url(&req.url).ok_or_else(|| ApiErr::bad_request("unsupported import link"))?;
+            let cursor_key = |offset: usize| format!("import-cursor-v3:{}:{}:{offset}", req.max_tracks, canonical);
+            let mut token = if req.offset == 0 { None } else {
+                Some(crate::cache::get_json::<String>(&*svc.cache, &cursor_key(req.offset)).await.ok_or_else(|| ApiErr::new(409, "import_expired", "import cursor expired; restart the import"))?)
+            };
+            let meta = read(svc, HttpRequest::get(build_url("https://www.googleapis.com/youtube/v3/playlists", &[("part", "snippet,contentDetails"), ("id", &id), ("key", key)]))).await?;
+            let item = &meta["items"][0];
+            if !item.is_object() { return Err(ApiErr::not_found("playlist not found or not public")); }
+            check_size(item["contentDetails"]["itemCount"].as_u64(), req.max_tracks)?;
+            let name = item["snippet"]["title"].as_str().unwrap_or("YouTube playlist").to_string();
+            let mut tracks = Vec::new();
+            for _ in 0..2 {
+                let page_size = (limit - tracks.len()).min(50).to_string();
+                if page_size == "0" { break; }
+                let mut params = vec![("part", "snippet"), ("playlistId", &id), ("maxResults", &page_size), ("key", key)];
+                if let Some(t) = token.as_deref() { params.push(("pageToken", t)); }
+                let page = read(svc, HttpRequest::get(build_url("https://www.googleapis.com/youtube/v3/playlistItems", &params))).await?;
+                check_size(page["pageInfo"]["totalResults"].as_u64(), req.max_tracks)?;
+                let rows = page["items"].as_array().ok_or_else(|| ApiErr::unavailable("invalid YouTube page"))?;
+                for row in rows {
+                    let s = &row["snippet"];
+                    let Some(id) = s["resourceId"]["videoId"].as_str() else { continue };
+                    let title = s["title"].as_str().unwrap_or("");
+                    if matches!(title, "Private video" | "Deleted video" | "") { continue; }
+                    let artist = s["videoOwnerChannelTitle"].as_str().unwrap_or("").trim_end_matches(" - Topic");
+                    let mut track = new_track(id, ProviderId::YouTube, title, artist);
+                    track.permalink = Some(format!("https://www.youtube.com/watch?v={id}"));
+                    tracks.push(track);
+                }
+                token = page["nextPageToken"].as_str().map(str::to_string);
+                if token.is_none() { break; }
+            }
+            if let Some(t) = &token { crate::cache::put_json(&*svc.cache, &cursor_key(req.offset + IMPORT_PAGE_SIZE), t, 600).await; }
+            (name, ProviderId::YouTube, tracks, token.is_some())
+        }
+        Target::SoundCloud(segs) => return providers::soundcloud::import_page(svc, &req.url, &segs, req.offset, req.max_tracks).await.map_err(map_err),
+    };
+    if tracks.len() > limit || (more && req.offset + IMPORT_PAGE_SIZE >= req.max_tracks) {
+        return Err(ApiErr::bad_request(format!("playlists may contain at most {} songs", req.max_tracks)));
+    }
+    Ok(PageResponse { list: ImportResponse { name, source, tracks }, next_offset: more.then_some(req.offset + IMPORT_PAGE_SIZE) })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -31,11 +190,12 @@ fn valid_id(s: &str) -> bool {
 
 pub fn parse_url(raw: &str) -> Option<Target> {
     let raw = raw.trim();
+    if raw.len() > 2048 { return None; }
     if let Some(id) = raw.strip_prefix("spotify:playlist:") {
         return valid_id(id).then(|| Target::Spotify(id.to_string()));
     }
     let u = url::Url::parse(raw).ok()?;
-    if !matches!(u.scheme(), "http" | "https") {
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some() || u.port().is_some() {
         return None;
     }
     let host = u.host_str()?.trim_start_matches("www.").to_ascii_lowercase();
@@ -64,207 +224,41 @@ pub fn parse_url(raw: &str) -> Option<Target> {
     }
 }
 
+/// Strip share/tracking parameters before cache lookup; varying a client URL
+/// must not force another expensive read of the same provider collection.
+pub fn canonical_url(raw: &str) -> Option<String> {
+    Some(match parse_url(raw)? {
+        Target::Spotify(id) => format!("spotify:playlist:{id}"),
+        Target::Deezer(id) => format!("https://www.deezer.com/playlist/{id}"),
+        Target::DeezerUser(id) => format!("https://www.deezer.com/profile/{id}"),
+        Target::LastFm(user) => format!("https://www.last.fm/user/{user}"),
+        Target::YouTube(id) => format!("https://www.youtube.com/playlist?list={id}"),
+        Target::SoundCloud(segs) => format!("https://soundcloud.com/{}", segs.join("/")),
+    })
+}
+
 fn map_err(e: ProviderError) -> ApiErr {
     match e {
         ProviderError::Http(404) => ApiErr::not_found("playlist not found or not public"),
         ProviderError::Http(401) | ProviderError::Http(403) => {
-            ApiErr::new(403, "playlist_not_accessible", "the playlist is private or the provider denied access")
+            ApiErr::new(403, "playlist_not_accessible", "the provider denied playlist access; use an authorized account or import a playlist file")
         }
         ProviderError::NotConfigured => ApiErr::unavailable("this server has no key for that provider"),
         other => ApiErr::unavailable(format!("provider error: {other}")),
     }
 }
 
+/// Native callers that need a complete list use the same bounded page reader.
 pub async fn import(svc: &Services, url: &str) -> Result<ImportResponse, ApiErr> {
-    let target = parse_url(url)
-        .ok_or_else(|| ApiErr::bad_request("unsupported link; expected a public Spotify, Deezer or YouTube playlist URL"))?;
-    match target {
-        Target::Spotify(id) => spotify_playlist(svc, &id).await.map_err(map_err),
-        Target::Deezer(id) => deezer_playlist(svc, &id).await.map_err(map_err),
-        Target::DeezerUser(id) => deezer_favorites(svc, &id).await.map_err(map_err),
-        Target::LastFm(user) => lastfm_loved(svc, &user).await.map_err(map_err),
-        Target::YouTube(id) => youtube_playlist(svc, &id).await.map_err(map_err),
-        Target::SoundCloud(segs) => {
-            let link = format!("https://soundcloud.com/{}", segs.join("/"));
-            let (name, tracks) = providers::soundcloud::import_link(svc, &link, &segs).await.map_err(map_err)?;
-            Ok(ImportResponse { name, source: ProviderId::SoundCloud, tracks })
-        }
+    let mut req = PageRequest { url: url.to_string(), offset: 0, max_tracks: svc.config.playlist_max_tracks };
+    let mut page = page(svc, &req).await?;
+    let mut result = page.list;
+    while let Some(offset) = page.next_offset {
+        req.offset = offset;
+        page = self::page(svc, &req).await?;
+        result.tracks.extend(page.list.tracks);
     }
-}
-
-async fn deezer_favorites(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {
-    #[derive(Deserialize)]
-    struct Page { data: Vec<providers::deezer::DzTrack>, next: Option<String> }
-    let mut tracks = Vec::new();
-    for page in 0..svc.config.import_max_pages {
-        let offset = (page * 100).to_string();
-        let url = build_url(&format!("https://api.deezer.com/user/{id}/tracks"), &[("limit", "100"), ("index", &offset)]);
-        let page: Page = fetch_json(svc, HttpRequest::get(url)).await?;
-        tracks.extend(page.data.into_iter().map(|t| providers::deezer::to_candidate(t).track));
-        if page.next.is_none() { break; }
-    }
-    Ok(ImportResponse { name: format!("Deezer favorites ({id})"), source: ProviderId::Deezer, tracks })
-}
-
-async fn lastfm_loved(svc: &Services, user: &str) -> Result<ImportResponse, ProviderError> {
-    let key = svc.config.secrets.lastfm_api_key.as_deref().ok_or(ProviderError::NotConfigured)?;
-    let mut tracks = Vec::new();
-    for page in 1..=svc.config.import_max_pages {
-        let page_s = page.to_string();
-        let url = build_url("https://ws.audioscrobbler.com/2.0/", &[("method","user.getlovedtracks"),("api_key",key),("format","json"),("user",user),("limit","200"),("page",&page_s)]);
-        let v: serde_json::Value = fetch_json(svc, HttpRequest::get(url)).await?;
-        if v["error"].is_number() { return Err(ProviderError::Parse); }
-        let list = &v["lovedtracks"]["track"];
-        let items = list.as_array().cloned().unwrap_or_else(|| if list.is_object() { vec![list.clone()] } else { vec![] });
-        for item in items {
-            let Some(title) = item["name"].as_str() else { continue };
-            let artist = item["artist"]["name"].as_str().or_else(|| item["artist"].as_str()).unwrap_or("");
-            let mut t = new_track(format!("{artist}|{title}"), ProviderId::LastFm, title, artist);
-            t.permalink = item["url"].as_str().map(str::to_string);
-            tracks.push(t);
-        }
-        let total = v["lovedtracks"]["@attr"]["totalPages"].as_str().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-        if page >= total { break; }
-    }
-    Ok(ImportResponse { name: format!("{user} (Last.fm loved)"), source: ProviderId::LastFm, tracks })
-}
-
-async fn spotify_playlist(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {
-    #[derive(Deserialize)]
-    struct Name {
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct Page {
-        #[serde(default)]
-        items: Vec<Entry>,
-        next: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        track: Option<spotify::SpTrack>,
-    }
-    let tok = spotify::token(svc).await?;
-    let (k, v) = spotify::auth(&tok);
-    let base = format!("https://api.spotify.com/v1/playlists/{id}");
-    let name: Name = fetch_json(svc, HttpRequest::get(build_url(&base, &[("fields", "name")])).header(k, v.clone())).await?;
-    let mut tracks = Vec::new();
-    let mut offset = 0u32;
-    for _ in 0..svc.config.import_max_pages {
-        let off = offset.to_string();
-        let url = build_url(
-            &format!("{base}/tracks"),
-            &[
-                ("limit", "100"),
-                ("offset", &off),
-                ("fields", "items(track(id,name,duration_ms,artists(name),album(name,images),external_ids(isrc),external_urls(spotify))),next"),
-            ],
-        );
-        let page: Page = fetch_json(svc, HttpRequest::get(url).header(k, v.clone())).await?;
-        tracks.extend(page.items.into_iter().filter_map(|e| e.track).filter_map(spotify::to_track));
-        if page.next.is_none() {
-            break;
-        }
-        offset += 100;
-    }
-    Ok(ImportResponse { name: name.name, source: ProviderId::Spotify, tracks })
-}
-
-async fn deezer_playlist(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {
-    #[derive(Deserialize)]
-    struct Pl {
-        #[serde(default)]
-        title: String,
-        tracks: Option<Tracks>,
-    }
-    #[derive(Deserialize)]
-    struct Tracks {
-        #[serde(default)]
-        data: Vec<providers::deezer::DzTrack>,
-    }
-    let pl: Pl = fetch_json(svc, HttpRequest::get(format!("https://api.deezer.com/playlist/{id}"))).await?;
-    let tracks: Vec<Track> = pl
-        .tracks
-        .map(|t| t.data)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| providers::deezer::to_candidate(t).track)
-        .collect();
-    Ok(ImportResponse { name: pl.title, source: ProviderId::Deezer, tracks })
-}
-
-async fn youtube_playlist(svc: &Services, id: &str) -> Result<ImportResponse, ProviderError> {
-    #[derive(Deserialize)]
-    struct Items {
-        #[serde(default)]
-        items: Vec<Item>,
-        #[serde(rename = "nextPageToken")]
-        next: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Item {
-        snippet: Snip,
-    }
-    #[derive(Deserialize)]
-    struct Snip {
-        #[serde(default)]
-        title: String,
-        #[serde(rename = "videoOwnerChannelTitle", default)]
-        channel: String,
-        #[serde(rename = "resourceId")]
-        resource: Option<Res>,
-    }
-    #[derive(Deserialize)]
-    struct Res {
-        #[serde(rename = "videoId")]
-        video_id: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Pls {
-        #[serde(default)]
-        items: Vec<Pl>,
-    }
-    #[derive(Deserialize)]
-    struct Pl {
-        snippet: PlSnip,
-    }
-    #[derive(Deserialize)]
-    struct PlSnip {
-        #[serde(default)]
-        title: String,
-    }
-    let key = svc.config.secrets.youtube_api_key.as_deref().ok_or(ProviderError::NotConfigured)?;
-    let pls: Pls = fetch_json(
-        svc,
-        HttpRequest::get(build_url(
-            "https://www.googleapis.com/youtube/v3/playlists",
-            &[("part", "snippet"), ("id", id), ("key", key)],
-        )),
-    )
-    .await
-    .map_err(|e| if e == ProviderError::Http(403) { ProviderError::Quota } else { e })?;
-    let name = pls.items.into_iter().next().ok_or(ProviderError::Http(404))?.snippet.title;
-    let mut tracks = Vec::new();
-    let mut token: Option<String> = None;
-    for _ in 0..svc.config.import_max_pages {
-        let mut params = vec![("part", "snippet"), ("playlistId", id), ("maxResults", "50"), ("key", key)];
-        if let Some(t) = token.as_deref() {
-            params.push(("pageToken", t));
-        }
-        let page: Items = fetch_json(svc, HttpRequest::get(build_url("https://www.googleapis.com/youtube/v3/playlistItems", &params))).await?;
-        for it in page.items {
-            let Some(vid) = it.snippet.resource.and_then(|r| r.video_id) else { continue };
-            let artist = it.snippet.channel.trim_end_matches(" - Topic").to_string();
-            let mut t = new_track(&vid, ProviderId::YouTube, &it.snippet.title, &artist);
-            t.permalink = Some(format!("https://www.youtube.com/watch?v={vid}"));
-            tracks.push(t);
-        }
-        token = page.next;
-        if token.is_none() {
-            break;
-        }
-    }
-    Ok(ImportResponse { name, source: ProviderId::YouTube, tracks })
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -272,6 +266,65 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn page_offsets_and_urls_are_server_validated() {
+        for offset in [1, 99, 5000, usize::MAX] {
+            assert!(PageRequest { url: "spotify:playlist:abc".into(), offset, max_tracks: 5000 }.validate().is_err());
+        }
+        for offset in [0, 100, 4900] {
+            assert!(PageRequest { url: "spotify:playlist:abc".into(), offset, max_tracks: 5000 }.validate().is_ok());
+        }
+        for url in ["https://localhost/playlist/a", "https://user:secret@open.spotify.com/playlist/a", "https://open.spotify.com:444/playlist/a"] {
+            assert!(PageRequest { url: url.into(), offset: 0, max_tracks: 5000 }.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn companion_reads_bounded_spotify_pages_and_caches_retries() {
+        let h = harness(all_secrets());
+        h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
+        h.http.on("fields=name", 200, r#"{"name":"Full list","tracks":{"total":201}}"#);
+        h.http.on("offset=50", 200, r#"{"items":[],"next":"ignored"}"#);
+        h.http.on("offset=150", 200, r#"{"items":[],"next":"ignored"}"#);
+        h.http.on("offset=100", 200, r#"{"items":[{"item":{"id":"second","name":"B","artists":[{"name":"X"}]}}],"next":"ignored"}"#);
+        h.http.on("/items?", 200, r#"{"items":[{"track":{"id":"first","name":"A","artists":[{"name":"X"}]}},{"track":null}],"next":"ignored"}"#);
+        let mut req = PageRequest { url: "spotify:playlist:abc".into(), offset: 0, max_tracks: 5000 };
+        let r = block_on(page(&h.svc, &req)).unwrap();
+        assert_eq!(r.list.tracks[0].id, "first");
+        assert_eq!(r.next_offset, Some(100));
+        block_on(page(&h.svc, &req)).unwrap();
+        assert_eq!(h.http.call_count("/items?"), 2);
+        let shared_link = PageRequest { url: "https://open.spotify.com/playlist/abc?si=another-share-id".into(), ..req.clone() };
+        block_on(page(&h.svc, &shared_link)).unwrap();
+        assert_eq!(h.http.call_count("/items?"), 2, "share parameters must reuse the native page cache");
+        req.offset = 100;
+        let r = block_on(page(&h.svc, &req)).unwrap();
+        assert_eq!(r.list.tracks[0].id, "second");
+        assert_eq!(r.next_offset, Some(200));
+        assert_eq!(h.http.call_count("/items?"), 4);
+    }
+
+    #[test]
+    fn oversized_provider_playlist_is_rejected_before_fetching_tracks() {
+        let h = harness(all_secrets());
+        h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
+        h.http.on("fields=name", 200, r#"{"name":"Too large","items":{"total":6000}}"#);
+        let req = PageRequest { url: "spotify:playlist:abc".into(), offset: 0, max_tracks: 5000 };
+        assert_eq!(block_on(page(&h.svc, &req)).unwrap_err().status, 400);
+        assert_eq!(h.http.call_count("/items?"), 0);
+    }
+
+    #[test]
+    fn deezer_import_reads_the_tracks_endpoint_beyond_the_embedded_preview() {
+        let h = harness(all_secrets());
+        h.http.on("index=100", 200, r#"{"data":[{"id":2,"title":"Second"}],"total":101}"#);
+        h.http.on("/tracks?", 200, r#"{"data":[{"id":1,"title":"First"}],"total":101,"next":"ignored"}"#);
+        h.http.on("playlist/1", 200, r#"{"title":"Full list","nb_tracks":101,"tracks":{"data":[]}}"#);
+        let list = block_on(import(&h.svc, "https://www.deezer.com/playlist/1")).unwrap();
+        assert_eq!(list.tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
+        assert_eq!(h.http.call_count("/tracks?"), 2);
+    }
 
     #[test]
     fn url_parsing() {
@@ -300,7 +353,7 @@ mod tests {
         h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
         h.http.on("fields=name", 200, r#"{"name":"My List"}"#);
         h.http.on(
-            "/tracks?",
+            "/items?",
             200,
             r#"{"items":[{"track":{"id":"1","name":"A","artists":[{"name":"X"}],"duration_ms":1000}},{"track":{"id":null,"name":"Local","artists":[]}},{"track":null}],"next":null}"#,
         );

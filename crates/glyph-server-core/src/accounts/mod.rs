@@ -6,8 +6,10 @@
 //! behind [`Entropy`] (this crate has no RNG of its own). Hosts enable accounts
 //! with [`crate::Server::with_accounts`]; without it every route here is a 404.
 
+pub mod jam;
 pub mod mcp;
 pub mod profile;
+pub mod playback;
 pub mod store;
 pub mod webauthn;
 
@@ -72,13 +74,20 @@ pub struct Accounts {
     /// Passkey domain, e.g. `glyph.my` for `https://api.glyph.my`; must be the
     /// origin's host or a parent of it. `None` uses the origin's host.
     pub rp_id: Option<String>,
+    /// Jam pushes over WebSockets (the Worker's Durable Object); `None`:
+    /// the apps long poll.
+    pub push: Option<Arc<dyn jam::JamPush>>,
 }
 
 /// Largest request body a route accepts (hosts cap uploads with this).
 pub fn max_body_bytes(path: &str) -> Option<usize> {
-    if path == "/v1/sync/push" {
+    if path.starts_with("/v1/devices/playback/") {
+        Some(256 * 1024)
+    } else if path == "/v1/sync/push" {
         Some(MAX_PUSH_BYTES)
     } else if let Some(n) = crate::share::max_body_bytes(path) {
+        Some(n)
+    } else if let Some(n) = jam::max_body_bytes(path) {
         Some(n)
     } else if path.starts_with("/v1/sync/covers/") || path == "/v1/profile/avatar" {
         Some(MAX_OWN_COVER)
@@ -92,6 +101,7 @@ pub fn max_body_bytes(path: &str) -> Option<usize> {
 /// Paths owned by this module.
 pub fn owns(path: &str) -> bool {
     mcp::owns(path)
+        || jam::owns(path)
         || ["/v1/account", "/v1/devices", "/v1/sync", "/v1/covers/", "/account/", "/v1/share", "/p/", "/embed/p/", "/oembed", "/v1/profile", "/v1/profiles/"]
             .iter()
             .any(|p| path == p.trim_end_matches('/') || path.starts_with(&format!("{}/", p.trim_end_matches('/'))))

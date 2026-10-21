@@ -1,100 +1,143 @@
 # Changelog
 
+## 0.5.0 - 2026-10-21
+
+Live jams, device control and the Android app.
+
+### Added
+
+- **Your devices**: apps signed in to the same account can see each other and send playback commands. Commands only reach devices of the same account and expire on their own; offline or busy devices turn them down.
+- **Live jams**: `GET /v1/jam/{code}/live` (WebSocket) pushes changes to everyone in a jam the moment they happen, through one Durable Object per jam (`JAM_ROOM`, created on deploy). It stores nothing and stays within the Cloudflare free plan (at most 70,000 pushes and connections per day); past that, the apps fall back to asking every few seconds.
+- Jam invite links at glyph.my/jam/... for the QR code in the app.
+
+### Changed
+
+- Jams use much less Worker CPU: waiting for changes reads a small revision key instead of the whole jam, and `POST /v1/jam/{code}/now` sends only the host's position for seeks and regular updates.
+- The download page and changelog include the Android app.
+
 ## 0.4.1 - 2026-10-20
 
-- Restyle the AI assistant (MCP) sign-in page to match the desktop app.
+### Changed
+
+- The sign-in page for AI assistants now matches the look of the desktop app.
 
 ## 0.4.0 - 2026-10-20
 
-- `/v1/import/spotify` also reads SoundCloud links (sets, a profile's likes or tracks, single songs) with the server's SoundCloud key, so the app's "Transfer music" needs no key of its own.
-- Serve the documentation at `docs.glyph.my` (and `/docs` on other hosts), rendered from the Markdown in github.com/glyphmusic/docs at request time: a push to `main` is live within about a minute without a deploy. `glyph.my/docs` redirects there. Pages have a search (Ctrl+K or /, index at `search.json`); for LLMs there are `llms.txt`, `llms-full.txt` and every page as Markdown at its `.md` address.
-- Relay AI assistants (MCP) to signed-in desktop apps: Streamable HTTP endpoint `/mcp`, OAuth 2.1 with PKCE and dynamic client registration, a sign-in page confirmed in the app, and `glyph remote mcp on|off` for owners (migration 0014).
-- Search YouTube through InnerTube directly before falling back to yt-dlp, and accept the app's YouTube ID hint to skip the search.
-- Add `/changelog`: every release of the desktop app, server, companion and r-dlp, newest first, filterable by part (`scripts/snapshot-changelogs.mjs`).
-- Add a questions section to the landing page, with FAQ structured data.
-- Add `glyph config list|get|set|unset|path` to read and change `server.toml` with validation, sources and defaults; API keys are never printed.
-- Add `glyph cloudflare list|set|unset|secret|domain` to change a Cloudflare deployment's values, secrets and custom domain.
+Documentation, a public changelog and easier configuration.
+
+### Added
+
+- **Documentation** at docs.glyph.my, with search (Ctrl+K or /) and versions of every page for AI tools. Changes to the docs go live within a minute.
+- **This changelog**: every release of the app, server, companion and r-dlp in one place.
+- **AI assistants** can reach your desktop app through your server, with a secure sign-in that you confirm in the app. Owners switch it with `glyph remote mcp on|off`.
+- `glyph config` reads and changes `server.toml` with checks and defaults; API keys are never printed.
+- `glyph cloudflare` changes a Cloudflare deployment's settings, secrets and custom domain.
+- A questions section on the landing page.
+
+### Changed
+
+- "Transfer music" in the app can read SoundCloud links through the server, so the app needs no SoundCloud key.
+- YouTube search is faster: the server asks YouTube directly first and accepts a hint from the app to skip the search entirely.
 
 ## 0.3.0 - 2026-10-19
 
-- Distribute the `glyph` CLI through the `glyph-server` npm package, with verified native downloads and a legacy command alias.
-- Add component version/check/update commands for CLI, server, companion and r-dlp, plus authenticated companion maintenance.
-- Ship the prebuilt Worker and migrations; add guided self-hosted Cloudflare setup and deployments using the owner's resources.
-- Support scoped Docker companion updates with pulled-image and health verification.
-- Make source/Docker/CI builds self-contained with a shared protocol snapshot.
-- Stream and coalesce encoded audio, reuse connections, move cache stats off the playback path and bound parallel resolution.
-- Add optional account-only API/media access while preserving login and refresh.
+Glyph on npm, and self-hosting made simple.
+
+### Added
+
+- Install the `glyph` command line tool with npm (`glyph-server` package).
+- `glyph` can check and update every part of Glyph: CLI, server, companion and r-dlp.
+- A guided setup for hosting your own Glyph on your own Cloudflare account.
+- An option to allow only signed-in accounts on your server.
+- Safe updates for the Docker companion, checked before they go live.
+
+### Changed
+
+- Faster audio streaming with less waiting on the first bytes.
+- Building from source no longer needs other repositories.
 
 ## 0.2.6 - 2026-10-19
 
-- Serve lyrics from the companion first (`POST /internal/lyrics`) and fall back to the Worker's own lookup, so LRCLIB's rate limit on data-centre addresses no longer breaks lyrics.
-- Answer `/v1/lyrics` with "no lyrics" (404) when the upstream is rate-limited or down, instead of a 502/503; a failed lookup is retried after five minutes, a confirmed miss after an hour.
-- Answer `/v1/similar` with an empty list (200) when Last.fm is not configured or fails, instead of a 503/502.
-- Build against desktop protocol v0.2.4.
+### Fixed
+
+- Lyrics broke when the lyrics service rate-limited the server. They now come from your companion first.
+- Missing lyrics or radio suggestions return an empty answer instead of an error, and failed lookups are retried later.
 
 ## 0.2.5 - 2026-10-19
 
-- Add persistent native r-dlp workers through GLYPH_RDLP_PATH, retaining the existing yt-dlp extraction fallback.
-- Route YouTube downloads through the same companion streaming, quality and stale-URL recovery paths as playback.
-- Honor the client youtube_only flag, allow bounded additional search variants, and reject other sources and previews in this mode.
-- Accept both legacy track bodies and resolve request bodies at the download endpoint.
-- Build against desktop protocol v0.2.4.
+### Added
 
-## 0.2.4 — 2026-10-19
+- Support for the faster r-dlp YouTube resolver, with yt-dlp as fallback.
+- The "Only YouTube" option from the app is respected: no other sources, no previews.
 
-- Retry higher-priority full sources when a Deezer preview or a previous miss is cached; refresh outdated resolver mappings.
-- Read artists from YouTube video titles, tolerate nullable channel metadata, and continue text searches after transient ISRC lookup failures.
-- Retry empty YouTube searches instead of keeping temporary extraction failures cached.
-- Reduce Worker overhead by batching abuse-limit checks, reusing request-local account lookups and avoiding redundant cache requests.
-- Associate batched rate-limit results by their stable key.
-- Reduce repeated search-result normalization and avoid copying full audio bodies through Wasm for supported range responses.
-- Keep full-song quality warming out of the foreground streaming request CPU budget.
+### Changed
 
-## 0.2.3 — 2026-10-18
+- YouTube downloads take the same route as playback, including quality choice and recovery from expired links.
 
-- Resolve Worker cache misses on the companion (`POST /internal/resolve`), so the Worker parses one small answer instead of several provider searches. Without a companion, or when it is busy or offline, the Worker resolves itself as before.
-- Never share the admission queue between Worker requests. A permit handed across requests woke the waiter in the other request's context, which Cloudflare reported as hung requests and exceeded CPU limits.
-- Accept Audius' presigned R2 audio redirects (`*.r2.cloudflarestorage.com`) as redirect targets only; Audius playback and downloads returned HTTP 502.
+## 0.2.4 - 2026-10-19
 
-## 0.2.2 — 2026-10-18
+### Fixed
 
-- Reuse three prestarted yt-dlp extractors in parallel, coalesce duplicate video lookups, and separate audio transfer capacity from metadata requests. Keep a bounded CLI fallback.
-- Preserve upstream ETags and modification dates so clients can check downloaded audio revisions without blocking playback.
+- Songs stuck on a 30-second preview: the server tries full sources again before falling back to a cached preview.
+- Wrong artists for some YouTube videos, and searches that gave up after a temporary error.
 
-- Reuse resolved YouTube URLs in bounded companion memory, avoiding repeated yt-dlp extraction on seeks and audio refills without storing audio on disk.
+### Changed
 
-- Signed-in sharing copies short Glyph links for songs, artists and playlists, with rich previews and desktop deep links. Shared playlists open as a preview with an explicit Add to library action.
+- Less work per request on the Worker, so it stays fast and well within its limits.
 
-- Avoid a Worker crash when a long cache key contains Unicode characters at the truncation boundary.
-- Start background quality preparation for partial audio responses and let companion encodes finish after a request disconnects.
+## 0.2.3 - 2026-10-18
 
-- Match YouTube by ISRC when available, then retry artist/title without the audio suffix if necessary (fixes Blender's LUVME falling back to a preview).
-- Prepare two quality variants concurrently in the background, keeping an encoder available for foreground work.
+### Changed
 
-- Forward requested byte ranges through the Worker and companion to YouTube, avoiding repeated downloads of the entire prefix when seeking or refilling the decoder.
+- The companion now does the heavy searching, so the Worker only handles one small answer per song.
 
-- Stream uncached high-quality YouTube audio immediately instead of waiting for a whole download and remux.
-- Publish one `SHA256SUMS.txt` for the complete release; self-update matches exact filenames and retains support for old sidecars.
+### Fixed
 
-- Search for song audio through the configured companion when resolving a YouTube match; avoid unrelated video results and duration mismatches.
-- Explicitly slice full edge-cache hits for range requests; re-fetch entries missing the byte length instead of returning inconsistent audio responses.
+- Requests that hung and hit Cloudflare's CPU limits.
+- Audius songs failing to play or download.
 
-- Retry full playback sources before a cached Deezer preview and shorten preview caching to five minutes. Invalidate earlier resolver mappings.
-- Skip per-video metadata extraction when YouTube flat results already include duration.
-- Do not disable all YouTube requests for ten minutes after one network failure or timeout.
+## 0.2.2 - 2026-10-18
 
-## 0.2.0 — 2026-10-18
+Faster YouTube and smoother seeking.
 
-- Prefer the Windows setup executable on the download page when a release includes one. Keep the portable ZIP as the fallback for earlier releases.
+### Added
 
-- Account-aware request admission, abuse limits and bounded media work.
-- Persistent audio cache inventory, storage reservations and audio quality variants.
-- Updated account, admin and native companion behavior.
-- Corrected the native updater repository to `glyphmusic/server`.
-- Published native archives for five platform targets with SHA-256 checksums.
-- Deployed the Cloudflare Worker and companion, including database migrations through `0013_audio_variant_jobs.sql`.
-- Fixed missing Cloudflare routes for the download page, landing screenshots, favicon, app icons, web manifest and crawler files.
+- **Share links**: short Glyph links for songs, artists and playlists, with rich previews.
+- Matching by ISRC on YouTube, so the right song is found more often (for example Blender's "LUVME" no longer falls back to a preview).
+
+### Changed
+
+- Several YouTube lookups run in parallel, and duplicate lookups are shared.
+- High-quality YouTube audio starts streaming right away instead of after a full download.
+- Seeking only fetches the part of the song you need.
+- Downloaded songs can be checked for updates without delaying playback.
+- Releases come with a single checksum file.
+
+### Fixed
+
+- A crash with some long, non-English cache keys.
+- Wrong or mismatched videos picked for a song.
+- One network error no longer turns off YouTube for ten minutes.
+
+## 0.2.0 - 2026-10-18
+
+### Added
+
+- Builds for five platforms, with checksums.
+- Protection against abuse and limits on heavy work per account.
+- Several audio qualities per song, and a persistent audio cache.
+
+### Changed
+
+- The download page offers the Windows installer when there is one.
+
+### Fixed
+
+- The updater looked in the wrong repository.
+- Missing images, favicon and download page on the website.
 
 ## 0.1.0
 
-- Initial server implementation, provider search and resolution, streaming audio, optional accounts and synchronization, Cloudflare Worker and native companion.
+### Added
+
+- The first server: search across providers, streaming audio, optional accounts and sync, running on Cloudflare with a companion on your own machine.

@@ -110,16 +110,66 @@ fn import_track(v: &serde_json::Value) -> Option<Track> {
 async fn import_paged(svc: &Services, tok: &str, first: String) -> PResult<Vec<Track>> {
     let mut out = Vec::new();
     let mut url = first;
-    for _ in 0..svc.config.import_max_pages.max(1) {
+    for page in 0..=svc.config.playlist_max_tracks / 200 {
         let v: serde_json::Value = fetch_json(svc, HttpRequest::get(url.clone()).header("authorization", format!("OAuth {tok}"))).await?;
         let items = v["collection"].as_array().cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
         out.extend(items.iter().filter_map(import_track));
+        if out.len() > svc.config.playlist_max_tracks { return Err(ProviderError::Parse); }
         match v["next_href"].as_str().filter(|s| !s.is_empty()) {
-            Some(n) => url = n.to_string(),
+            Some(n) => {
+                let next = url::Url::parse(n).map_err(|_| ProviderError::Parse)?;
+                if page == svc.config.playlist_max_tracks / 200 || next.scheme() != "https" || next.host_str() != Some("api.soundcloud.com")
+                    || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
+                    return Err(ProviderError::Parse);
+                }
+                url = next.into();
+            },
             None => break,
         }
     }
     Ok(out)
+}
+
+/// Bounded Companion import. Continuation URLs stay in the native cache;
+/// the public client can only request a validated integer offset.
+pub(crate) async fn import_page(svc: &Services, link: &str, segs: &[String], offset: usize, max_tracks: usize) -> PResult<crate::import::PageResponse> {
+    use crate::import::{PageResponse, IMPORT_PAGE_SIZE};
+    let tok = token(svc).await?;
+    let likes = segs.get(1).is_some_and(|s| s == "likes");
+    let user_tracks = segs.len() == 1 || segs.get(1).is_some_and(|s| s == "tracks");
+    let target = if likes || user_tracks { format!("https://soundcloud.com/{}", segs[0]) } else { link.to_string() };
+    let meta: serde_json::Value = fetch_json(svc, HttpRequest::get(build_url("https://api.soundcloud.com/resolve", &[("url", &target)])).header("authorization", format!("OAuth {tok}"))).await?;
+    if meta["kind"] == "track" {
+        if offset != 0 { return Err(ProviderError::Parse); }
+        let t = import_track(&meta).ok_or(ProviderError::Parse)?;
+        return Ok(PageResponse { list: glyph_protocol::ImportResponse { name: t.title.clone(), source: ProviderId::SoundCloud, tracks: vec![t] }, next_offset: None });
+    }
+    if meta["kind"] == "playlist" && meta["track_count"].as_u64().is_some_and(|n| n > max_tracks as u64) { return Err(ProviderError::Parse); }
+    let urn = meta["urn"].as_str().map(str::to_string).or_else(|| meta["id"].as_u64().map(|n| n.to_string())).ok_or(ProviderError::Parse)?;
+    let name = meta["title"].as_str().or_else(|| meta["username"].as_str()).unwrap_or("SoundCloud").to_string();
+    let cursor_key = |offset: usize| format!("sc-import-next:{max_tracks}:{link}:{offset}");
+    let limit = (max_tracks - offset).min(IMPORT_PAGE_SIZE);
+    let first = if offset == 0 {
+        let path = match meta["kind"].as_str() {
+            Some("playlist") => format!("/playlists/{urn}/tracks"),
+            Some("user") if likes => format!("/users/{urn}/likes/tracks"),
+            Some("user") => format!("/users/{urn}/tracks"),
+            _ => return Err(ProviderError::Parse),
+        };
+        build_url(&format!("https://api.soundcloud.com{path}"), &[("linked_partitioning", "true"), ("limit", &limit.to_string())])
+    } else {
+        cache::get_json::<String>(&*svc.cache, &cursor_key(offset)).await.ok_or(ProviderError::Parse)?
+    };
+    let next = url::Url::parse(&first).map_err(|_| ProviderError::Parse)?;
+    if next.scheme() != "https" || next.host_str() != Some("api.soundcloud.com") || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() { return Err(ProviderError::Parse); }
+    let page: serde_json::Value = fetch_json(svc, HttpRequest::get(first).header("authorization", format!("OAuth {tok}"))).await?;
+    let rows = page["collection"].as_array().or_else(|| page.as_array()).ok_or(ProviderError::Parse)?;
+    let tracks: Vec<_> = rows.iter().filter_map(import_track).collect();
+    let next = page["next_href"].as_str().filter(|s| !s.is_empty());
+    if tracks.len() > limit || (next.is_some() && offset + IMPORT_PAGE_SIZE >= max_tracks) { return Err(ProviderError::Parse); }
+    let next_offset = next.map(|_| offset + IMPORT_PAGE_SIZE);
+    if let Some(next) = next { cache::put_json(&*svc.cache, &cursor_key(offset + IMPORT_PAGE_SIZE), &next, 600).await; }
+    Ok(PageResponse { list: glyph_protocol::ImportResponse { name, source: ProviderId::SoundCloud, tracks }, next_offset })
 }
 
 /// Name and songs of a soundcloud.com link: a set, a user's likes
