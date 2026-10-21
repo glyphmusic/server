@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-10-21
+
+### Changed
+
+- The download page explains that a new Android APK installs over the old one; uninstalling first is no longer needed.
+- glyph.my/changelog lists Glyph 0.6.0.
+
 ## 0.5.0 - 2026-10-21
 
 Live jams, device control and the Android app.
