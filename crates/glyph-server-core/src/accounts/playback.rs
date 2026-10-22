@@ -23,8 +23,10 @@ impl Accounts {
         let now = svc.rt.now_ms();
         let scope = format!("playback:{}", a.user.id);
         let devices = self.store.devices(&a.user.id).await.map_err(store_err)?;
-        self.limit(svc, &format!("playback:{}", a.device.id), 600, 60)
-            .await?;
+        // Every report passes here: counted where it costs no database write.
+        if let RateDecision::Limited { retry_after_s } = svc.limiter.check_often(&format!("playback:{}", a.device.id), 600, 60).await {
+            return Err(ApiErr::rate_limited(retry_after_s));
+        }
         match path.strip_prefix(PREFIX) {
             Some("live") => {
                 if self.push.is_none() { return Err(ApiErr::not_found("playback push unavailable")); }
@@ -55,36 +57,14 @@ impl Accounts {
                 if !state.volume.is_finite() || !(0.0..=1.0).contains(&state.volume) {
                     return Err(ApiErr::bad_request("invalid volume"));
                 }
-                self.store
-                    .mcp_put(
-                        &scope,
-                        &format!("state:{}", a.device.id),
-                        &serde_json::to_string(&state).unwrap(),
-                        now + PRESENCE_TTL,
-                    )
-                    .await
-                    .map_err(store_err)?;
+                let mut online = self.playback_states(&scope, &a.device.id, Some(&state), &devices, now).await?;
                 let mut outputs = Vec::new();
                 for device in devices {
-                    if let Some(raw) = self
-                        .store
-                        .mcp_get(&scope, &format!("state:{}", device.id), now)
-                        .await
-                        .map_err(store_err)?
-                    {
-                        if let Ok(state) = serde_json::from_str::<State>(&raw) {
-                            outputs.push(Output {
-                                device: wire_device(&device, &a.device.id),
-                                online: true,
-                                state,
-                            });
-                            continue;
-                        }
-                    }
+                    let state = online.remove(&device.id);
                     outputs.push(Output {
                         device: wire_device(&device, &a.device.id),
-                        online: false,
-                        state: State::default(),
+                        online: state.is_some(),
+                        state: state.unwrap_or_default(),
                     });
                 }
                 let commands = self
@@ -116,12 +96,7 @@ impl Accounts {
                 if !devices.iter().any(|d| d.id == send.target) {
                     return Err(ApiErr::not_found("device is not in this account"));
                 }
-                let state = self
-                    .store
-                    .mcp_get(&scope, &format!("state:{}", send.target), now)
-                    .await
-                    .map_err(store_err)?
-                    .and_then(|s| serde_json::from_str::<State>(&s).ok());
+                let state = self.playback_states(&scope, &a.device.id, None, &devices, now).await?.remove(&send.target);
                 let confirm = req.query.get("confirm").is_some_and(|s| s == "1");
                 if !state.is_some_and(|s| s.available && (!confirm || s.acknowledgements)) {
                     return Err(ApiErr::new(
@@ -174,5 +149,42 @@ impl Accounts {
             }
             _ => Err(ApiErr::not_found("unknown playback endpoint")),
         }
+    }
+
+    /// States of the account's online devices, after storing `report` as
+    /// `me`'s. The push room keeps them when there is one (no database
+    /// writes); otherwise they expire in the account store.
+    async fn playback_states(
+        &self,
+        scope: &str,
+        me: &str,
+        report: Option<&State>,
+        devices: &[Device],
+        now: u64,
+    ) -> Result<std::collections::HashMap<String, State>, ApiErr> {
+        if let Some(push) = &self.push {
+            if let Some(states) = push.playback_states(scope, me, report).await {
+                return Ok(states.into_iter().collect());
+            }
+        }
+        if let Some(state) = report {
+            self.store
+                .mcp_put(scope, &format!("state:{me}"), &serde_json::to_string(state).unwrap(), now + PRESENCE_TTL)
+                .await
+                .map_err(store_err)?;
+        }
+        let mut online = std::collections::HashMap::new();
+        for device in devices {
+            if let Some(state) = self
+                .store
+                .mcp_get(scope, &format!("state:{}", device.id), now)
+                .await
+                .map_err(store_err)?
+                .and_then(|raw| serde_json::from_str::<State>(&raw).ok())
+            {
+                online.insert(device.id.clone(), state);
+            }
+        }
+        Ok(online)
     }
 }

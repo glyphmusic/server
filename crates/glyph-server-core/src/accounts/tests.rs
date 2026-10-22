@@ -1125,6 +1125,43 @@ impl RecPush {
     }
 }
 
+/// A push room that also keeps the devices' playback states.
+#[derive(Default)]
+struct StatePush(std::sync::Mutex<std::collections::HashMap<String, glyph_protocol::playback::State>>);
+
+#[async_trait::async_trait]
+impl jam::JamPush for StatePush {
+    async fn send(&self, _code: &str, _to: jam::To, _msg: Option<&str>, _close: Option<u16>) {}
+
+    async fn playback_states(&self, _scope: &str, device: &str, report: Option<&glyph_protocol::playback::State>) -> Option<Vec<(String, glyph_protocol::playback::State)>> {
+        let mut states = self.0.lock().unwrap();
+        if let Some(state) = report {
+            states.insert(device.to_string(), state.clone());
+        }
+        Some(states.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+}
+
+#[test]
+fn account_playback_states_live_in_the_push_room() {
+    let room = Arc::new(StatePush::default());
+    let t = setup_with(Some(room.clone()));
+    let (owner, _, _) = sign_up(&t, "room_owner");
+    let login = start(&t, "Phone");
+    call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code":login.user_code}), Some(&owner.access_token));
+    let LoginPollResponse::Done { session: phone } = poll(&t, &login) else { panic!() };
+    let state = serde_json::json!({"track":null,"playing":true,"position_ms":1000,"duration_ms":null,"volume":0.5,"available":true});
+    let poll_path = "/v1/devices/playback/poll";
+    assert_eq!(call(&t, Method::Post, poll_path, state.clone(), Some(&phone.access_token)).0, 200);
+    assert!(room.0.lock().unwrap().contains_key(&phone.device_id));
+    // The room answers for presence: the phone is online without a store entry.
+    let (_, own) = call(&t, Method::Post, poll_path, state, Some(&owner.access_token));
+    let phone_row = own["devices"].as_array().unwrap().iter().find(|d| d["device"]["id"] == phone.device_id).unwrap().clone();
+    assert_eq!((phone_row["online"].as_bool(), phone_row["state"]["playing"].as_bool()), (Some(true), Some(true)));
+    let command = serde_json::json!({"target":phone.device_id,"command":{"action":"pause"}});
+    assert_eq!(call(&t, Method::Post, "/v1/devices/playback/command", command, Some(&owner.access_token)).0, 200);
+}
+
 /// `GET /live` as a WebSocket upgrade: (status, relay header, error code).
 fn live(t: &T, code: &str, token: &str, upgrade: bool) -> (u16, Option<String>, Option<String>) {
     let mut headers = vec![("authorization".to_string(), format!("Bearer {token}"))];

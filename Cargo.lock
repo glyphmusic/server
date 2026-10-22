@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-native"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-worker"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "console_error_panic_hook",

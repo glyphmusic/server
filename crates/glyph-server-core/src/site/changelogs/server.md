@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1 - 2026-10-22
+
+### Changed
+
+- Device states (what plays where) live in each account's Durable Object instead of D1. Changes reach the other devices over their live connection at once, and reports no longer write to the database.
+- Abuse limits count ordinary requests in the Cache API; D1 only stores bans, strikes and exact limits such as sign-ins and budgets. A Cloudflare deployment now writes a small fraction of what it did to D1.
+- glyph.my/changelog lists Glyph 0.6.1.
+
+### Fixed
+
+- When D1 stopped accepting writes (for example the free plan's daily limit), the Worker answered every request, site and docs included, with 429. It now falls back to the Cache API limiter.
+
 ## 0.6.0 - 2026-10-21
 
 ### Changed

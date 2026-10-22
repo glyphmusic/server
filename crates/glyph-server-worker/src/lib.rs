@@ -246,7 +246,7 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         .filter(|h| glyph_server_core::admin::auth::is_valid_hash(h));
     // Short playlist links (`/p/<id>`); the domain must route `/p/*` to this Worker.
     config.share_origin = secret(env, "SHARE_ORIGIN").filter(|o| o.starts_with("https://"));
-    // Abuse counters must be atomic and shared across locations. Requires 0009.
+    // Bans and exact limits in D1 (requires 0009); per-request quotas in the Cache API.
     let api_cache = api.clone();
     let limiter = Arc::new(abuse::D1Limiter { db: env.d1("GLYPH_DB").ok(), rt: rt.clone(), admin: Arc::new(glyph_server_core::ratelimit::CacheRateLimiter::new(api.clone(), rt.clone())) });
     let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_token:secret(env,"YTDLP_SERVICE_TOKEN"), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));

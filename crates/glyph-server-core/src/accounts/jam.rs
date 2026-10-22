@@ -90,6 +90,19 @@ pub trait JamPush: MaybeSendSync {
     /// their sockets with this code. Failures are dropped: the apps catch up
     /// by asking.
     async fn send(&self, code: &str, to: To, msg: Option<&str>, close: Option<u16>);
+    /// Account playback rooms (`playback:{user}`) also keep the devices'
+    /// states, so reports cost no database writes: stores `report` for
+    /// `device` (when given; changes go to the other devices at once) and
+    /// answers the state of every device online there. `None`: unsupported
+    /// or failed, the core keeps states in the account store instead.
+    async fn playback_states(
+        &self,
+        _scope: &str,
+        _device: &str,
+        _report: Option<&glyph_protocol::playback::State>,
+    ) -> Option<Vec<(String, glyph_protocol::playback::State)>> {
+        None
+    }
 }
 
 /// Paths this module serves.

@@ -146,6 +146,12 @@ pub enum RateDecision {
 pub trait RateLimiter: MaybeSendSync {
     /// Count one hit for `key`; allow at most `limit` hits per `window_s`.
     async fn check(&self, key: &str, limit: u32, window_s: u64) -> RateDecision;
+    /// Like [`check`](Self::check), for counters most requests hit: may be
+    /// approximate where exact counting costs a database write per request.
+    /// Not for sign-in attempts or budgets.
+    async fn check_often(&self, key: &str, limit: u32, window_s: u64) -> RateDecision {
+        self.check(key, limit, window_s).await
+    }
     /// Administrative recovery must remain usable when database growth stops.
     async fn check_admin(&self, key: &str, limit: u32, window_s: u64) -> RateDecision {
         self.check(key, limit, window_s).await
