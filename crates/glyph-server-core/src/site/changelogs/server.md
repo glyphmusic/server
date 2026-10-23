@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-23
+
+### Security
+
+- Release files are verified and signed together before publication. Concurrent builds cannot overwrite archives or checksums of a published release.
+
 ### Added
+
+- **Explicit rating for YouTube results**: before a search ends, YouTube results no rating source knows are looked up at Deezer and sent again with the Deezer id and its explicit flag. Answers are cached (found: 90 days, not found: 7 days), at most 25 lookups and 6 seconds per search. `/v1/health` lists `ratings`, so the apps stop asking Deezer themselves.
 
 - **Pairing that hands over the library's key**: `/v1/account/login/start` takes an optional `pake` message from the new device, and `/v1/account/login/approve` returns it to the approving device, so the apps can pass the end-to-end encryption key between each other. Pairing codes may have four more characters that only the apps know; the server reads the first eight. `/v1/health` lists `pair_keys`.
 - **End-to-end encrypted sync**: the apps send `sealed`, `sealed_playlist` and `keyring` items the server stores without reading. Encrypted playlists get the same revision check as plain ones, so edits from two devices are merged instead of one being lost; `/v1/health` lists `e2e_sync`. No migration is needed.

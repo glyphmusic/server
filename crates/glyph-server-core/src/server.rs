@@ -441,6 +441,7 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (youtube, YOUTUBE_AUDIO),
         (youtube && svc.config.youtube_require_account, YOUTUBE_ACCOUNT_REQUIRED),
         (true, YOUTUBE_HINTS),
+        (true, RATINGS),
     ]
     .into_iter()
     .filter(|(on, _)| *on)

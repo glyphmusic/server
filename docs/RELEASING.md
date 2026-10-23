@@ -20,14 +20,17 @@ credentials belong in the source tree or npm payload.
    and `SHA256SUMS.txt` are available. Installers require that matching release.
 4. Publish the prepared tarball after `npm login`, or use the separate
    **Publish npm CLI** workflow with the release tag and an appropriately scoped
-   repository `NPM_TOKEN` secret. The workflow verifies the tarball checksum
+   repository `NPM_TOKEN` secret. The workflow verifies the signed, repository- and version-bound checksum manifest and the tarball checksum
    before publishing it. npm may require account-specific 2FA/OTP approval.
 
 ```sh
-gh release download v0.5.0 --repo glyphmusic/server --pattern glyph-server-0.5.0.tgz --pattern SHA256SUMS.txt
-# Verify the exact tarball checksum against SHA256SUMS.txt first.
+gh release download v0.8.0 --repo glyphmusic/server --pattern glyph-server-0.8.0.tgz --pattern SHA256SUMS.txt --pattern SHA256SUMS.txt.minisig
+# Verify the signature with the checked-in release-key.pub first:
+minisign -Vm SHA256SUMS.txt -p release-key.pub -Q
+# Its trusted comment must be: glyph-release repo=glyphmusic/server tag=v0.8.0
+# Then verify the exact tarball checksum against SHA256SUMS.txt.
 npm login
-npm publish ./glyph-server-0.5.0.tgz --access public
+npm publish ./glyph-server-0.8.0.tgz --access public
 ```
 
 Verify `npm view glyph-server version`, then install into a clean prefix and run

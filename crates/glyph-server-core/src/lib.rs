@@ -25,6 +25,7 @@ pub mod media;
 pub mod params;
 pub mod providers;
 pub mod ratelimit;
+pub mod rating;
 pub mod resolver;
 pub mod search;
 pub mod server;

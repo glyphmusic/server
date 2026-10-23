@@ -89,26 +89,38 @@ pub fn search_stream_page(svc: Arc<Services>, q: String, page: usize) -> BoxStre
             (id, r)
         }));
     }
-    let state = (futs, Merger::default(), false);
-    let s = futures::stream::unfold(state, |(mut futs, mut merger, done)| async move {
-        if done {
-            return None;
-        }
-        loop {
-            match futs.next().await {
-                None => return Some((SearchEvent::Done, (futs, merger, true))),
-                Some((provider, Ok(cands))) => {
-                    let tracks = merger.absorb(cands.into_iter().map(|c| c.track).collect());
-                    if tracks.is_empty() {
-                        continue;
+    let state = (futs, Merger::default(), false, false);
+    let s = futures::stream::unfold(state, move |(mut futs, mut merger, rated, done)| {
+        let svc = svc.clone();
+        async move {
+            if done {
+                return None;
+            }
+            loop {
+                match futs.next().await {
+                    // Before the end: ask Deezer about the YouTube songs nothing
+                    // rated yet (see `rating`); each answer replaces its song.
+                    None if !rated => {
+                        let tracks = crate::rating::rate_unknown(&svc, &merger.seen).await;
+                        if tracks.is_empty() {
+                            return Some((SearchEvent::Done, (futs, merger, true, true)));
+                        }
+                        return Some((SearchEvent::Results { provider: ProviderId::Deezer, tracks }, (futs, merger, true, false)));
                     }
-                    return Some((SearchEvent::Results { provider, tracks }, (futs, merger, false)));
-                }
-                Some((provider, Err(e))) => {
-                    return Some((
-                        SearchEvent::ProviderError { provider, message: e.to_string() },
-                        (futs, merger, false),
-                    ));
+                    None => return Some((SearchEvent::Done, (futs, merger, true, true))),
+                    Some((provider, Ok(cands))) => {
+                        let tracks = merger.absorb(cands.into_iter().map(|c| c.track).collect());
+                        if tracks.is_empty() {
+                            continue;
+                        }
+                        return Some((SearchEvent::Results { provider, tracks }, (futs, merger, rated, false)));
+                    }
+                    Some((provider, Err(e))) => {
+                        return Some((
+                            SearchEvent::ProviderError { provider, message: e.to_string() },
+                            (futs, merger, rated, false),
+                        ));
+                    }
                 }
             }
         }

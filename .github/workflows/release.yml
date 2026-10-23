@@ -3,8 +3,12 @@ on:
   push:
     tags: ["v*"]
 
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -54,16 +58,13 @@ jobs:
             (cd dist && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
           fi
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-      - uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          body_path: glyph-server/RELEASE_NOTES.md
-          files: |
-            glyph-server/${{ env.ARCHIVE }}
       - uses: actions/upload-artifact@v4
         with:
-          name: checksums-${{ matrix.target }}
-          path: glyph-server/dist/*.sha256
+          name: release-${{ matrix.target }}
+          path: |
+            glyph-server/dist/*.zip
+            glyph-server/dist/*.tar.gz
+            glyph-server/dist/*.sha256
           if-no-files-found: error
 
   npm-package:
@@ -89,38 +90,29 @@ jobs:
           test "$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME#v}"
           npm test
           npm pack
-          sha256sum glyph-server-*.tgz > npm.sha256
-      - uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: glyph-server/npm/*.tgz
+          sha256sum glyph-server-*.tgz > glyph-server-${GITHUB_REF_NAME#v}.tgz.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: checksums-npm
-          path: glyph-server/npm/npm.sha256
+          name: release-npm
+          path: |
+            glyph-server/npm/*.tgz
+            glyph-server/npm/*.tgz.sha256
           if-no-files-found: error
 
   publish:
     needs: [build, npm-package]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: checksums-*
+          pattern: release-*
           merge-multiple: true
-          path: checksums
-      - name: Combine checksums
-        run: cat checksums/*.sha256 | sort > SHA256SUMS.txt
-      # `glyph update` and the npm installer accept only signed checksums.
-      - name: Sign checksums
-        env:
-          GLYPH_RELEASE_KEY: ${{ secrets.GLYPH_RELEASE_KEY }}
-        run: sh scripts/sign-release.sh SHA256SUMS.txt "${{ github.repository }}" "${{ github.ref_name }}"
-      - name: Publish complete release
+          path: release-assets
+      - name: Verify, sign and publish the complete release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt SHA256SUMS.txt.minisig --clobber
-          gh release edit "${{ github.ref_name }}" --draft=false --latest
+          GLYPH_RELEASE_KEY: ${{ secrets.GLYPH_RELEASE_KEY }}
+        run: python3 scripts/publish-release.py server "${{ github.ref_name }}" "${{ github.repository }}" release-assets

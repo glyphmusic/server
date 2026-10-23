@@ -1,6 +1,6 @@
 {
   "name": "glyph-server",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Glyph CLI: install, diagnose and manage Glyph servers and companions",
   "license": "MIT OR Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/glyphmusic/server.git" },
