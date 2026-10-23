@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Pairing that hands over the library's key**: `/v1/account/login/start` takes an optional `pake` message from the new device, and `/v1/account/login/approve` returns it to the approving device, so the apps can pass the end-to-end encryption key between each other. Pairing codes may have four more characters that only the apps know; the server reads the first eight. `/v1/health` lists `pair_keys`.
+- **End-to-end encrypted sync**: the apps send `sealed`, `sealed_playlist` and `keyring` items the server stores without reading. Encrypted playlists get the same revision check as plain ones, so edits from two devices are merged instead of one being lost; `/v1/health` lists `e2e_sync`. No migration is needed.
 - **YouTube only for accounts**: `glyph remote limits --youtube-require-account true` (or the Worker variable `YOUTUBE_REQUIRE_ACCOUNT`) keeps YouTube audio and downloads for signed-in accounts, which carry quotas and bans; guests keep every other source.
 - `/v1/health` lists `capabilities` by name (`jam`, `mcp_relay`, `youtube_audio`, `youtube_account_required`, ...), so apps test for a feature instead of a version.
 - AI assistants connected through the server see only the tools the user allows in the app (Settings › AI assistants); the app refuses the rest.

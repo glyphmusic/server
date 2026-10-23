@@ -523,7 +523,7 @@ impl AccountStore for D1Store {
                        deleted = excluded.deleted, rev = excluded.rev
                      WHERE (excluded.updated_at > sync_items.updated_at
                         OR (excluded.updated_at = sync_items.updated_at AND excluded.device_id > sync_items.device_id))
-                       AND (excluded.kind != 'playlist' OR sync_items.rev = (
+                       AND (excluded.kind NOT IN ('playlist', 'sealed_playlist') OR sync_items.rev = (
                          SELECT j.value ->> 'base_rev' FROM json_each(?3) AS j
                          WHERE j.value ->> 'kind' = excluded.kind AND j.value ->> 'key' = excluded.key LIMIT 1))
                      RETURNING rev",

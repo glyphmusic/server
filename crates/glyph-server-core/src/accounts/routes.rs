@@ -110,6 +110,12 @@ impl Accounts {
                     ..Default::default()
                 };
                 self.store.put_login(&login).await.map_err(store_err)?;
+                // Relayed to the approving device only; the server cannot use
+                // it without the part of the code it never sees.
+                // Without a mailbox the devices pair as before, without the key.
+                if let Some(pake) = r.pake.as_deref().filter(|p| valid_pake(p)) {
+                    let _ = self.store.mcp_put(PAIR_SCOPE, &login.id, pake, login.expires).await;
+                }
                 Ok(Response::json(
                     200,
                     &LoginStartResponse {
@@ -159,9 +165,10 @@ impl Accounts {
                 login.challenge = None;
                 self.store.put_login(&login).await.map_err(store_err)?;
                 let n = self.store.devices(&a.user.id).await.map_err(store_err)?.len();
+                let pake = self.store.mcp_get(PAIR_SCOPE, &login.id, now).await.ok().flatten();
                 Ok(Response::json(
                     200,
-                    &ApproveResponse { device_name: login.device_name, platform: login.platform, device_limit_reached: n >= a.user.device_limit as usize },
+                    &ApproveResponse { device_name: login.device_name, platform: login.platform, device_limit_reached: n >= a.user.device_limit as usize, pake },
                 ))
             }
             ("/v1/account/login/devices", Method::Post) | ("/v1/account/login/remove_device", Method::Post) => {

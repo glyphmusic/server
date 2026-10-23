@@ -55,6 +55,50 @@ fn stale_playlist_writes_cannot_overwrite_a_newer_membership_version() {
 }
 
 #[test]
+fn encrypted_playlists_get_the_same_revision_check() {
+    let t = setup();
+    let (owner, _, _) = sign_up(&t, "e2e_cas");
+    let value = serde_json::json!({"v": 1, "kid": "k1", "n": "AAAA", "ct": "BBBB"});
+    let push = |rev, at| call(&t, Method::Post, "/v1/sync/push", serde_json::json!({"items":[{"kind":"sealed_playlist","key":"ab12","value":value,"deleted":false,"updated_at":at,"rev":rev}]}), Some(&owner.access_token));
+    assert_eq!(push(0, 1).1["accepted"], 1);
+    let stale = push(0, 2);
+    assert_eq!(stale.1["accepted"], 0);
+    let rev = stale.1["stale"][0]["rev"].as_u64().unwrap();
+    assert_eq!(push(rev, 3).1["accepted"], 1);
+    // Other encrypted items: last writer wins, as before.
+    let item = |at| serde_json::json!({"items":[{"kind":"sealed","key":"cd34","value":value,"deleted":false,"updated_at":at,"rev":0}]});
+    assert_eq!(call(&t, Method::Post, "/v1/sync/push", item(1), Some(&owner.access_token)).1["accepted"], 1);
+    assert_eq!(call(&t, Method::Post, "/v1/sync/push", item(2), Some(&owner.access_token)).1["accepted"], 1);
+}
+
+#[test]
+fn pairing_relays_the_new_devices_message_to_the_approving_one() {
+    let t = setup();
+    let (owner, _, _) = sign_up(&t, "pair_keys");
+    let msg = "U".repeat(44);
+    let (s, v) = call(&t, Method::Post, "/v1/account/login/start", serde_json::json!({"device_name": "Phone", "platform": "android", "pake": msg}), None);
+    assert_eq!(s, 200, "{v}");
+    let l: LoginStartResponse = serde_json::from_value(v).unwrap();
+    // The app shows four more characters; the server only knows its own part.
+    let shown = format!("{}-H4XA", l.user_code);
+    let (s, v) = call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code": shown}), Some(&owner.access_token));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["pake"].as_str(), Some(msg.as_str()));
+    assert!(matches!(poll(&t, &l), LoginPollResponse::Done { .. }));
+    // Without a message (older apps) nothing is relayed; junk is not kept.
+    let l = start(&t, "Old");
+    let (_, v) = call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code": l.user_code}), Some(&owner.access_token));
+    assert!(v.get("pake").is_none());
+    let (_, v) = call(&t, Method::Post, "/v1/account/login/start", serde_json::json!({"device_name": "X", "platform": "linux", "pake": "<script>"}), None);
+    let l: LoginStartResponse = serde_json::from_value(v).unwrap();
+    let (_, v) = call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code": l.user_code}), Some(&owner.access_token));
+    assert!(v.get("pake").is_none());
+    let (_, h) = call(&t, Method::Get, "/v1/health", serde_json::Value::Null, None);
+    let h: HealthResponse = serde_json::from_value(h).unwrap();
+    assert!(h.supports(glyph_protocol::capability::PAIR_KEYS) && h.supports(glyph_protocol::capability::E2E_SYNC));
+}
+
+#[test]
 fn account_playback_is_private_expires_and_delivers_controls_once() {
     let t = setup();
     let (owner, _, _) = sign_up(&t, "playback_owner");
@@ -686,6 +730,8 @@ fn helpers() {
     assert_eq!(normalize_handle("ünï"), Err("invalid"));
     assert_eq!(normalize_user_code("k7px 2qmd"), Some("K7PX-2QMD".into()));
     assert_eq!(normalize_user_code("K7PX-2QM0"), None);
+    assert_eq!(normalize_user_code("k7px-2qmd-h4xa"), Some("K7PX-2QMD".into()));
+    assert_eq!(normalize_user_code("K7PX-2QMD-H4X"), None);
     assert!(owns("/v1/account") && owns("/v1/sync/pull") && owns("/account/login/x") && owns("/v1/covers/ab"));
     assert!(!owns("/v1/accounts") && !owns("/v1/search") && !owns("/v1/cover"));
     assert_eq!(crate::server::max_body_bytes("/v1/sync/push"), MAX_PUSH_BYTES);

@@ -436,6 +436,8 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (accounts, JAM),
         (accounts, SHARE),
         (accounts && svc.config.mcp_relay, MCP_RELAY),
+        (accounts, PAIR_KEYS),
+        (accounts, E2E_SYNC),
         (youtube, YOUTUBE_AUDIO),
         (youtube && svc.config.youtube_require_account, YOUTUBE_ACCOUNT_REQUIRED),
         (true, YOUTUBE_HINTS),

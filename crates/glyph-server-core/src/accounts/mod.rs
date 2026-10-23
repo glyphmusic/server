@@ -157,9 +157,20 @@ fn clean_platform(raw: &str) -> String {
     if ["windows", "macos", "linux", "android", "ios"].contains(&p.as_str()) { p } else { "other".into() }
 }
 
+/// `K7PX-2QMD` from a typed code. Codes may carry four more characters that
+/// only the two devices know (`K7PX-2QMD-H4XA`, see
+/// `glyph_protocol::capability::PAIR_KEYS`); they are dropped here.
 pub fn normalize_user_code(raw: &str) -> Option<String> {
     let c: String = raw.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect();
-    (c.len() == 8 && c.bytes().all(|b| USER_CODE_ALPHABET.contains(&b))).then(|| format!("{}-{}", &c[..4], &c[4..]))
+    ((c.len() == 8 || c.len() == 12) && c.bytes().all(|b| USER_CODE_ALPHABET.contains(&b))).then(|| format!("{}-{}", &c[..4], &c[4..8]))
+}
+
+/// Mailbox scope of the pairing messages (`LoginStartRequest::pake`) by login id.
+const PAIR_SCOPE: &str = "_pair";
+
+/// A SPAKE2 message as the apps send it: base64url, 33 bytes.
+fn valid_pake(s: &str) -> bool {
+    (40..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn is_sha256_hex(s: &str) -> bool {

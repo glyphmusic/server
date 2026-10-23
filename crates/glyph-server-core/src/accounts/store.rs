@@ -149,6 +149,12 @@ pub struct Profile {
     pub updated_at: u64,
 }
 
+/// Kinds whose pushes must name the revision they replace (playlists, plain
+/// or end-to-end encrypted), so concurrent edits are merged, not lost.
+pub fn checks_rev(kind: &str) -> bool {
+    kind == glyph_protocol::sync_kind::PLAYLIST || kind == glyph_protocol::sync_kind::E2E_PLAYLIST
+}
+
 /// Last writer wins: newer timestamp, ties broken by the larger device id.
 pub fn wins(new: &Item, old: &Item) -> bool {
     (new.updated_at, new.device_id.as_str()) > (old.updated_at, old.device_id.as_str())
@@ -451,7 +457,7 @@ impl AccountStore for MemStore {
         let mut accepted = Vec::with_capacity(items.len());
         for it in items {
             let k = (user_id.to_string(), it.kind.clone(), it.key.clone());
-            let ok = m.items.get(&k).is_none_or(|old| wins(it, old) && (it.kind != "playlist" || it.rev == old.rev));
+            let ok = m.items.get(&k).is_none_or(|old| wins(it, old) && (!checks_rev(&it.kind) || it.rev == old.rev));
             if ok {
                 rev += 1;
                 m.items.insert(k, Item { rev, ..it.clone() });
