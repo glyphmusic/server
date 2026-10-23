@@ -73,7 +73,8 @@ pub async fn rate_unknown(svc: &Services, tracks: &[Track]) -> Vec<Track> {
         return Vec::new();
     }
     let mut rated = Vec::new();
-    let mut lookups = stream::iter(todo).map(|t: &Track| rate_one(svc, t)).buffer_unordered(PARALLEL);
+    let pending: Vec<_> = todo.into_iter().map(|t| rate_one(svc, t)).collect();
+    let mut lookups = stream::iter(pending).buffer_unordered(PARALLEL);
     let collect = async {
         while let Some(r) = lookups.next().await {
             rated.extend(r);
