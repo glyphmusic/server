@@ -21,6 +21,8 @@ routes = [
   { pattern = "glyph.my/jam/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/download*", zone_name = "glyph.my" },
   { pattern = "glyph.my/changelog*", zone_name = "glyph.my" },
+  # Plugin catalog and detail pages (/plugins, /plugins/<id>).
+  { pattern = "glyph.my/plugins*", zone_name = "glyph.my" },
   { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
   { pattern = "glyph.my/favicon.ico", zone_name = "glyph.my" },
   { pattern = "glyph.my/icon.png", zone_name = "glyph.my" },
