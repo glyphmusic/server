@@ -134,6 +134,7 @@ function httpsOrigin(v) {
   catch {return false;}
 }
 function writeConfig(file,config) {fs.writeFileSync(file,JSON.stringify(config,null,2)+'\n');}
+const BEARER_WARNING='Warning: with GLYPH_SERVER_BEARER every request needs the token: the apps, and also the site, docs, /p/ links and jam invites this Worker serves (only /v1/health stays open). Remove it with: npx wrangler secret delete GLYPH_SERVER_BEARER';
 const PASSKEY_WARNING='Warning: passkeys registered on the old origin stop working on the new one; password sign-in keeps working.';
 function configHelp() {
   const pad=Math.max(...Object.keys({...VARS,...SECRETS}).map(k=>k.length));
@@ -142,7 +143,9 @@ function configHelp() {
     'glyph cloudflare unset <NAME>            back to the default, then run glyph deploy',
     'glyph cloudflare secret <NAME>           store a secret in Cloudflare (asked without echo, applies at once)',
     'glyph cloudflare domain <host>           serve on your own domain (custom domain + PUBLIC_ORIGIN)',
-    'All take [--config wrangler.json]. Runtime limits (rate, accounts, companion, MCP) also change live with glyph remote.',
+    'All take [--config wrangler.json]. Runtime limits (rate, accounts, companion, MCP) also change live:',
+    '  glyph config set rate_limit_per_min 120 --server https://your.worker',
+    'glyph config list|set|unset --worker-config wrangler.json is the same as glyph cloudflare list|set|unset.',
     '','Values:',...Object.entries(VARS).map(([k,v])=>`  ${k.padEnd(pad)}  ${v.help}`),
     '','Secrets:',...Object.entries(SECRETS).map(([k,v])=>`  ${k.padEnd(pad)}  ${v}`)].join('\n');
 }
@@ -174,6 +177,7 @@ function configure(file,action,name,value,{run=wrangler,log=console.log}={}) {
   }
   if(action==='secret') {
     if(!SECRETS[key]) throw new Error(`Unknown secret ${name||''}. ${VARS[key]?`${key} is a plain value: glyph cloudflare set ${key} <value>`:'See glyph cloudflare --help.'}`);
+    if(key==='GLYPH_SERVER_BEARER') log(BEARER_WARNING);
     run(['secret','put',key,'--config',file]);
     log(`${key} stored in Cloudflare; the Worker uses it right away.`);
     return;

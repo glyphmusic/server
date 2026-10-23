@@ -53,6 +53,7 @@ const OPTS: &[Opt] = &[
     opt("proxy_audio", Kind::Bool, Some("GLYPH_PROXY_AUDIO"), "true", "stream audio through this server"),
     opt("playlist_max_tracks", Kind::Int, None, "5000", "maximum songs per playlist (1-50000)"),
     opt("import_max_pages", Kind::Int, None, "5", "pages fetched per playlist import"),
+    opt("youtube_per_day", Kind::Int, None, "0 (no limit)", "YouTube songs per account or address and day"),
     opt("update_repo", Kind::Text, Some("GLYPH_SERVER_REPO"), "glyphmusic/server", "GitHub repository used for updates"),
     opt("tls.domain", Kind::Text, Some("GLYPH_TLS_DOMAIN"), "-", "domain for automatic Let's Encrypt HTTPS"),
     opt("tls.email", Kind::Text, Some("GLYPH_TLS_EMAIL"), "-", "contact address for Let's Encrypt"),

@@ -35,6 +35,10 @@ pub trait AdminHost: MaybeSendSync {
             "this server cannot change limits at runtime".into(),
         ))
     }
+    /// Save the ban list (it keeps its salt).
+    async fn persist_bans(&self, _bans: &crate::bans::BanList) -> Result<(), HostError> {
+        Err(HostError::Unsupported("this server cannot store bans".into()))
+    }
     async fn logs(&self, _max_lines: usize, _after: Option<u64>) -> Result<LogsResponse, HostError> {
         Err(HostError::Unsupported("logs are not available on this server".into()))
     }

@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>{{page_title}}</title>
+<meta name="description" content="{{page_desc}}">
+<meta property="og:title" content="{{page_title}}">
+<meta property="og:description" content="{{page_desc}}">
+<meta property="og:image" content="/og.png">
+<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>/*SHARE*/
+/* Plugin catalog: the app's Settings > Plugins page (glyph/src/ui/settings/plugins.rs)
+   inside the settings modal's page card (settings/modal.rs modal_inner). Rows
+   from settings.rs row_full / controls.rs rows, section_label, link_button;
+   buttons from widgets/buttons.rs button / primary_button; chips from
+   widgets/indicators.rs kind_chip; (i) from widgets/tooltip.rs info_tip. */
+.pg { display: flex; justify-content: center; padding: 20px 16px 48px; }
+/* modal.rs: page card hsla(0 0 4.5%), 1 px white 8 %, radius 12, px 28 py 22 */
+.card { width: 100%; max-width: 760px; border-radius: 12px; background: #0b0b0b; border: 1px solid rgba(255, 255, 255, .08); padding: 22px 28px; }
+.hd { display: flex; flex-direction: column; gap: 4px; }
+.hd h1 { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 17px; font-weight: 600; min-width: 0; }
+.hd h1 .crumb { color: rgba(255, 255, 255, .5); cursor: pointer; }
+.hd h1 .crumb:hover { color: #fff; }
+.hd h1 .ic { width: 16px; height: 16px; color: rgba(255, 255, 255, .4); }
+.hd p { margin: 0; font-size: 13px; color: rgba(255, 255, 255, .55); }
+#view { padding-top: 10px; animation: fadein .18s ease-out; }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+/* settings.rs row_full: py 14, gap 24, label 14 medium, status 12.5 white 55 % */
+.rows > * + * { border-top: 1px solid rgba(255, 255, 255, .06); }
+.srow { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 0; }
+.srow .lbl { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.srow .lt { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: #fff; }
+.srow .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
+.srow .ctl { flex: none; display: flex; align-items: center; gap: 8px; }
+.val { font-size: 13px; color: rgba(255, 255, 255, .75); text-align: right; }
+.val.mono { font-size: 12px; }
+/* controls.rs section_label: pt 18 pb 2, 11.5 semibold white 45 %, upper case */
+.sec { display: flex; align-items: center; gap: 6px; }
+.sec .sl { padding: 18px 0 2px; font-size: 11.5px; font-weight: 600; color: rgba(255, 255, 255, .45); text-transform: uppercase; }
+.sec .ii { margin-top: 16px; }
+/* tooltip.rs info_tip: 18 px, radius 9, 13 px info icon white 42 % */
+.ii { flex: none; width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; color: rgba(255, 255, 255, .42); }
+.ii:hover { background: rgba(255, 255, 255, .08); }
+.ii .ic { width: 13px; height: 13px; }
+/* plugins.rs plugin_row: py 14, gap 8; open area gap 14, px 8 py 4, radius 8, hover white 4 % */
+.prow { display: flex; align-items: center; gap: 8px; padding: 14px 0; }
+.open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; margin: 0 -8px; padding: 4px 8px; border-radius: 8px; cursor: pointer; }
+.open:hover { background: rgba(255, 255, 255, .04); }
+.open .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.open .nm { font-size: 14px; font-weight: 500; color: #fff; }
+.open .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
+.prow .ctl { flex: none; display: flex; align-items: center; gap: 8px; }
+/* plugins.rs preview: glow ring, accent inside at 57 % (Appearance swatch) */
+.pv { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
+.pv i { width: 57%; height: 57%; border-radius: 50%; }
+.pv.big { width: 64px; height: 64px; }
+.pv.code { border-radius: 8px; background: rgba(255, 255, 255, .07); color: rgba(255, 255, 255, .7); }
+.pv.code .ic { width: 15px; height: 15px; }
+.pv.big.code { border-radius: 18px; }
+.pv.big.code .ic { width: 34px; height: 34px; }
+/* buttons.rs button: h 32, px 14, radius 8, card fill, 1 px white 12 %, 12.5 */
+.btn { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px; background: rgba(20, 20, 20, .75); border: 1px solid rgba(255, 255, 255, .12); font-size: 12.5px; color: var(--text); cursor: pointer; white-space: nowrap; }
+.btn:hover { background: rgba(31, 31, 31, .82); }
+.btn:active { background: rgba(255, 255, 255, .10); }
+.btn .ic { width: 13px; height: 13px; color: rgba(255, 255, 255, .7); }
+/* buttons.rs primary_button: white, black 12.5 semibold, px 16, hover .88 */
+.btn.pri { background: var(--text); border: 0; padding: 0 16px; color: #000; font-weight: 600; }
+.btn.pri:hover { opacity: .88; }
+.btn.pri .ic { color: #000; }
+/* indicators.rs kind_chip: h 18, px 6, radius 4, white 8 %, 11 px white 60 % */
+.chip { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 4px; background: rgba(255, 255, 255, .08); font-size: 11px; color: rgba(255, 255, 255, .6); }
+/* controls.rs link_button: h 32, px 12, radius 8, white 7 %, 13 px, 14 px icon */
+.lnk { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 8px; background: rgba(255, 255, 255, .07); font-size: 13px; color: #fff; white-space: nowrap; }
+.lnk:hover { background: rgba(255, 255, 255, .12); }
+.lnk .ic { width: 14px; height: 14px; color: rgba(255, 255, 255, .8); }
+.empty-line { padding: 14px 0; font-size: 12.5px; color: rgba(255, 255, 255, .5); }
+/* settings/nav.rs search: h 34, px 10, radius 8, white 6 %, 14 px icon white 50 %, 13 px */
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 16px; }
+.search { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: rgba(255, 255, 255, .06); color: rgba(255, 255, 255, .5); }
+.search .ic { width: 14px; height: 14px; }
+.search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; font: 13px var(--font); color: #fff; }
+.search input::placeholder { color: rgba(255, 255, 255, .4); }
+/* controls.rs segmented: p 3, gap 2, radius 9, white 5 %; items h 28, px 12, radius 7, 13 px */
+.seg { display: flex; padding: 3px; gap: 2px; border-radius: 9px; background: rgba(255, 255, 255, .05); }
+.seg button { height: 28px; padding: 0 12px; border-radius: 7px; font-size: 13px; color: rgba(255, 255, 255, .6); white-space: nowrap; }
+.seg button:hover { background: rgba(255, 255, 255, .04); color: #fff; }
+.seg button.on { background: rgba(255, 255, 255, .12); color: #fff; font-weight: 500; }
+.guide { margin-top: 10px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, .06); }
+/* plugins.rs detail: back link, header (preview 64, name 20 semibold), description, actions */
+.back { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; margin-left: -8px; border-radius: 7px; font-size: 13px; color: rgba(255, 255, 255, .7); cursor: pointer; }
+.back:hover { background: rgba(255, 255, 255, .05); }
+.back .ic { width: 14px; height: 14px; }
+.dhead { display: flex; align-items: center; gap: 16px; padding-top: 14px; }
+.dhead .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dhead h2 { margin: 0; font-size: 20px; font-weight: 600; color: #fff; }
+.dhead .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
+.chips { display: flex; gap: 6px; }
+.desc { margin: 0; padding-top: 14px; font-size: 13.5px; line-height: 20px; color: rgba(255, 255, 255, .72); }
+.acts-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 16px; }
+.note { padding-top: 12px; font-size: 12.5px; color: rgba(255, 255, 255, .5); }
+/* plugins.rs risk_note / warning: info icon 14, text 12.5 / 18 white 50 % */
+.risk { display: flex; align-items: flex-start; gap: 8px; padding-top: 12px; font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .5); }
+.risk .ic { flex: none; width: 14px; height: 14px; margin-top: 2px; color: rgba(255, 255, 255, .45); }
+.risk.warn { margin-top: 16px; padding: 14px 16px; border-radius: 10px; background: rgba(255, 255, 255, .035); color: rgba(255, 255, 255, .72); font-size: 13px; line-height: 19px; }
+.risk.warn .ic { color: hsl(40 90% 62%); }
+.note a { color: rgba(255, 255, 255, .8); text-decoration: underline; text-underline-offset: 2px; }
+.sw { display: inline-flex; align-items: center; gap: 6px; }
+.sw i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .12); }
+.sw span { font: 12px var(--mono); color: rgba(255, 255, 255, .75); }
+.sws { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; }
+/* widgets/skeleton.rs skeleton_rows, plain (no ASCII shimmer on the web) */
+.sk { height: 56px; display: flex; align-items: center; gap: 14px; }
+.sk i { flex: none; width: 28px; height: 28px; border-radius: 50%; background: rgba(255, 255, 255, .06); }
+.sk b { height: 10px; width: 40%; border-radius: 5px; background: rgba(255, 255, 255, .06); animation: pulse 1.2s ease-in-out infinite alternate; }
+@keyframes pulse { from { opacity: .5; } to { opacity: 1; } }
+.state-mini { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 0; text-align: center; }
+.state-mini .ic { width: 28px; height: 28px; color: rgba(255, 255, 255, .35); }
+.state-mini b { font-size: 14px; font-weight: 500; color: #fff; }
+.state-mini span { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
+@media (max-width: 640px) {
+  .card { padding: 18px 16px; }
+  .srow { flex-wrap: wrap; gap: 10px; }
+  .prow { flex-wrap: wrap; }
+  .prow .ctl { margin-left: 42px; }
+  .guide .srow .ctl { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body class="page">
+<canvas class="bgfx" id="glow" aria-hidden="true"></canvas><canvas class="bgfx" id="ascii" aria-hidden="true"></canvas>
+<header class="titlebar"><a class="logo" href="/">glyph</a><a class="backpill" href="/download">{{icon_download}}{{download}}</a></header>
+<main class="pg"><section class="card">
+  <div class="hd"><h1 id="hd-title">{{title}}</h1><p id="hd-sub">{{sub}}</p></div>
+  <div id="view"></div>
+</section></main>
+<div class="tip" id="tip" role="tooltip"></div>
+<script>/*GLOW*/
+const S = /*STRINGS*/;
+const ICONS = /*ICONS*/;
+(() => {
+  // Same sources and rules as the app (glyph-core/src/plugins.rs): the checked
+  // index of glyphmusic/plugins and every repo with the topic glyph-plugin,
+  // loaded by this browser straight from GitHub.
+  const INDEX = "https://raw.githubusercontent.com/glyphmusic/plugins/main/index.json";
+  const SEARCH = "https://api.github.com/search/repositories?q=topic:glyph-plugin+fork:true&sort=updated&order=desc&per_page=100";
+  const GUIDE = "https://github.com/glyphmusic/plugins#readme";
+  const CACHE = "glyph-plugins-v2", CACHE_MS = 10 * 60 * 1000, COMMUNITY_MAX = 60;
+  const glow = glyphGlow(document.getElementById("glow"), document.getElementById("ascii"), 44);
+  const $ = (id) => document.getElementById(id);
+  const view = $("view");
+
+  // ---- validation (Manifest::validate) ----
+  const validId = (id) => typeof id === "string" && id.length >= 2 && id.length <= 40 && /^[a-z0-9-]+$/.test(id) && !id.startsWith("-") && !id.endsWith("-") && !id.includes("--");
+  const validRepo = (r) => typeof r === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) && !r.split("/").some((s) => s === "." || s === "..");
+  const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+  const hex = (s) => typeof s === "string" && /^#?[0-9a-fA-F]{6}$/.test(s.trim()) ? parseInt(s.trim().replace("#", ""), 16) : null;
+  const len = (s) => [...(s || "")].length;
+  function colors(t) {
+    if (!t || typeof t !== "object") return null;
+    const accent = hex(t.accent);
+    if (accent === null) return null;
+    let glowC = null;
+    if (t.glow !== undefined) {
+      if (!Array.isArray(t.glow) || t.glow.length !== 3) return null;
+      glowC = t.glow.map(hex);
+      if (glowC.includes(null)) return null;
+    }
+    const base = t.base === undefined ? 0x030303 : hex(t.base);
+    if (base === null || [base >> 16, (base >> 8) & 255, base & 255].some((c) => c > 0x24)) return null;
+    return { accent, glow: glowC, base };
+  }
+  const PERMS = ["playback", "library", "search", "settings", "network", "audio", "lyrics_provider"];
+  const validHost = (h) => typeof h === "string" && /^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/.test(h);
+  const hasCode = (m) => typeof m.main === "string";
+  function valid(m) {
+    if (!m || typeof m !== "object") return false;
+    const schema = m.schema ?? 1;
+    if ((schema !== 1 && schema !== 2) || !validId(m.id) || m.id === "change-me") return false;
+    if (typeof m.name !== "string" || !m.name.trim() || len(m.name) > 40) return false;
+    if (len(m.author) > 40 || len(m.license) > 40 || len(m.description) > 200) return false;
+    if (typeof m.version !== "string" || !semver.test(m.version)) return false;
+    if (m.min_app !== undefined && (typeof m.min_app !== "string" || !semver.test(m.min_app))) return false;
+    if (m.theme !== undefined && colors(m.theme) === null) return false;
+    // Unknown kinds need a newer Glyph; the page lists only what it can show.
+    if (m.kind === "theme") return m.theme !== undefined && !hasCode(m);
+    if (m.kind !== "extension" || schema !== 2) return false;
+    const perms = m.permissions ?? [], net = m.network ?? [];
+    if (!Array.isArray(perms) || perms.some((p) => !PERMS.includes(p)) || !Array.isArray(net) || net.length > 20 || net.some((h) => !validHost(h))) return false;
+    if (perms.includes("network") !== net.length > 0) return false;
+    if (hasCode(m)) return /^[A-Za-z0-9_.\/-]+\.wasm$/.test(m.main) && !m.main.split("/").some((s) => !s || s === "." || s === "..");
+    if ((m.settings ?? []).length || (m.menus ?? []).length || perms.length) return false;
+    return m.theme !== undefined || Object.keys(m.strings ?? {}).length > 0 || (m.hide ?? []).length > 0;
+  }
+  /** Everything the plugin may do, as the app's warning lists it. */
+  function does(m) {
+    const out = [];
+    if (hasCode(m)) out.push(S.perm_code);
+    for (const p of m.permissions ?? []) if (p !== "network") out.push(S["perm_" + p]);
+    for (const h of m.network ?? []) out.push(fmt(S.perm_network, "host", h));
+    if ((m.settings ?? []).length) out.push(S.does_settings);
+    if ((m.menus ?? []).length) out.push(S.does_menus);
+    if (Object.keys(m.strings ?? {}).length) out.push(S.does_strings);
+    if ((m.hide ?? []).length) out.push(S.does_hide);
+    return out;
+  }
+
+  // ---- catalog (plugins::catalog) ----
+  async function getJson(url, headers) {
+    const r = await fetch(url, { headers });
+    if (!r.ok) throw new Error(r.status === 403 || r.status === 429 ? "GitHub rate limit" : "HTTP " + r.status);
+    return r.json();
+  }
+  async function pool(items, n, f) {
+    const out = []; let i = 0;
+    await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; out[k] = await f(items[k]).catch(() => null); } }));
+    return out;
+  }
+  async function load(force) {
+    if (!force) {
+      try { const c = JSON.parse(sessionStorage.getItem(CACHE)); if (c && Date.now() - c.at < CACHE_MS) return c; } catch (_) {}
+    }
+    const [index, search] = await Promise.allSettled([
+      getJson(INDEX),
+      getJson(SEARCH, { accept: "application/vnd.github+json" }),
+    ]);
+    const checked = [];
+    if (index.status === "fulfilled") {
+      for (const e of index.value.plugins || []) {
+        if (!validRepo(e.repo) || typeof e.rev !== "string" || !valid(e.manifest) || checked.some((c) => c.manifest.id === e.manifest.id)) continue;
+        const own = !e.path;
+        checked.push({ repo: e.repo, path: e.path || "", rev: e.rev, checked: true, stars: own && Number.isInteger(e.stars) ? e.stars : null, updated: e.updated || null, manifest: e.manifest });
+      }
+      checked.sort((a, b) => a.manifest.name.toLowerCase().localeCompare(b.manifest.name.toLowerCase()));
+    }
+    let community = [];
+    if (search.status === "fulfilled") {
+      // The topic search is fresher than the index's daily stars.
+      for (const l of checked.filter((x) => !x.path)) {
+        const r = (search.value.items || []).find((x) => x.full_name && x.full_name.toLowerCase() === l.repo.toLowerCase());
+        if (r) { l.stars = r.stargazers_count || 0; l.updated = r.pushed_at || l.updated; }
+      }
+      const repos = (search.value.items || [])
+        .filter((r) => !r.archived && validRepo(r.full_name) && !checked.some((c) => c.repo.toLowerCase() === r.full_name.toLowerCase()))
+        .slice(0, COMMUNITY_MAX);
+      const found = await pool(repos, 6, async (r) => {
+        const m = await getJson(`https://raw.githubusercontent.com/${r.full_name}/HEAD/glyph-plugin.json`);
+        return valid(m) ? { repo: r.full_name, path: "", rev: "HEAD", checked: false, stars: r.stargazers_count || 0, updated: r.pushed_at || null, manifest: m } : null;
+      });
+      found.filter(Boolean).sort((a, b) => (b.stars || 0) - (a.stars || 0) || a.repo.localeCompare(b.repo)).forEach((l) => {
+        if (![...checked, ...community].some((c) => c.manifest.id === l.manifest.id)) community.push(l);
+      });
+    }
+    const failed = [index, search].filter((r) => r.status === "rejected");
+    if (failed.length === 2) throw failed[0].reason;
+    const c = { at: Date.now(), checked, community, partial: failed.length > 0 };
+    try { sessionStorage.setItem(CACHE, JSON.stringify(c)); } catch (_) {}
+    return c;
+  }
+
+  // ---- search and order (plugins::fuzzy_score / filter_sort) ----
+  function fuzzy(query, text) {
+    const q = [...query.toLowerCase()].filter((c) => !/\s/.test(c));
+    if (!q.length) return 0;
+    const lower = (text || "").toLowerCase(), t = [...lower];
+    let score = 0, qi = 0, prev = -1;
+    for (let i = 0; i < t.length && qi < q.length; i++) {
+      if (t[i] !== q[qi]) continue;
+      score += 1;
+      if (i === 0 || !/[\p{L}\p{N}]/u.test(t[i - 1])) score += 8;
+      if (prev >= 0) score += prev + 1 === i ? 5 : -Math.min(3, i - prev - 1);
+      prev = i; qi++;
+    }
+    if (qi < q.length) return null;
+    const whole = query.trim().toLowerCase();
+    if (lower.startsWith(whole)) score += 30; else if (lower.includes(whole)) score += 20;
+    return score;
+  }
+  function searchScore(l, query) {
+    const m = l.manifest;
+    const s = [[m.name, 15], [m.id, 10], [m.author, 0], [m.description, -5]]
+      .map(([text, bonus]) => { const v = fuzzy(query, text); return v === null ? null : v + bonus; })
+      .filter((v) => v !== null);
+    return s.length ? Math.max(...s) : null;
+  }
+  function filterSort(items, query, sort) {
+    const searching = query.trim() !== "";
+    const hits = items.map((l) => [searching ? searchScore(l, query) : 0, l]).filter(([s]) => s !== null);
+    const name = (l) => l.manifest.name.toLowerCase();
+    hits.sort(([sa, a], [sb, b]) => (sb - sa)
+      || (sort === "stars" ? (b.stars || 0) - (a.stars || 0) : sort === "updated" ? (b.updated || "").localeCompare(a.updated || "") : 0)
+      || name(a).localeCompare(name(b)));
+    return hits.map(([, l]) => l);
+  }
+  const compact = (n) => n < 1000 ? String(n) : n < 1e6 ? (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k" : (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  let query = "", sort = "stars";
+  try { sort = localStorage.getItem("glyph-plugins-sort") || "stars"; } catch (_) {}
+
+  // ---- markup helpers (untrusted text only through textContent) ----
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  const icon = (name) => { const t = document.createElement("template"); t.innerHTML = ICONS[name]; return t.content.firstChild; };
+  const css = (n) => "#" + n.toString(16).padStart(6, "0");
+  const fmt = (s, k, v) => s.replace("{" + k + "}", v);
+  const repoUrl = (l) => l.path ? `https://github.com/${l.repo}/tree/${l.rev}/${l.path}` : `https://github.com/${l.repo}`;
+  const appLink = (l) => "glyph://plugin/" + l.manifest.id;
+  function preview(m, big) {
+    const c = colors(m.theme);
+    const p = el("div", "pv" + (big ? " big" : ""));
+    if (!c) { p.classList.add("code"); p.append(icon("puzzle")); return p; }
+    p.style.background = css(c.glow ? c.glow[1] : 0x1d5cff);
+    const i = el("i"); i.style.background = css(c.accent); p.append(i);
+    return p;
+  }
+  function meta(m, l) {
+    const parts = ["v" + m.version];
+    if (m.author && m.author.trim()) parts.push(m.author);
+    if (Number.isInteger(l.stars)) parts.push("★ " + compact(l.stars));
+    if (!l.checked) parts.push(S.unchecked);
+    if (m.description && m.description.trim()) parts.push(m.description);
+    return parts.join(" · ");
+  }
+  function btn(label, iconName, href, primary, tip) {
+    const a = el("a", "btn" + (primary ? " pri" : ""), label);
+    if (iconName) a.prepend(icon(iconName));
+    a.href = href;
+    if (href.startsWith("http")) { a.target = "_blank"; a.rel = "noopener"; }
+    if (tip) a.dataset.tip = tip;
+    return a;
+  }
+  function srow(label, status, control, info) {
+    const r = el("div", "srow"), lb = el("div", "lbl"), lt = el("div", "lt", label);
+    if (info) { const i = el("span", "ii"); i.dataset.tip = info; i.append(icon("info")); lt.append(i); }
+    lb.append(lt);
+    if (status) lb.append(el("div", "st", status));
+    const c = el("div", "ctl"); if (control) c.append(control);
+    r.append(lb, c);
+    return r;
+  }
+  function section(title, info) {
+    const s = el("div", "sec"); s.append(el("div", "sl", title));
+    const i = el("span", "ii"); i.dataset.tip = info; i.append(icon("info")); s.append(i);
+    return s;
+  }
+  function guide() {
+    const g = el("div", "guide");
+    const links = el("div"); links.style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
+    const a = el("a", "lnk", S.guide); a.prepend(icon("book-open")); a.href = GUIDE; a.target = "_blank"; a.rel = "noopener";
+    links.append(a);
+    g.append(srow(S.publish, null, links, S.publish_desc));
+    return g;
+  }
+  function risk(text, warn) {
+    const r = el("div", "risk" + (warn ? " warn" : "")); r.append(icon("info"), el("span", "", text));
+    return r;
+  }
+  function header(name) {
+    const h = $("hd-title"); h.textContent = "";
+    if (!name) { h.textContent = S.title; $("hd-sub").textContent = S.sub; return; }
+    const c = el("span", "crumb", S.title); c.onclick = () => go("/plugins");
+    h.append(c, icon("chevron-right"), el("span", "trunc", name));
+    $("hd-sub").textContent = S.sub;
+  }
+
+  // ---- list ----
+  let catalog = null, loading = false, error = null;
+  function prow(l) {
+    const r = el("div", "prow"), open = el("a", "open"), tx = el("div", "tx");
+    open.href = "/plugins/" + l.manifest.id;
+    open.onclick = (e) => { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); go(open.getAttribute("href")); };
+    tx.append(el("div", "nm trunc", l.manifest.name), el("div", "st trunc", meta(l.manifest, l)));
+    open.append(preview(l.manifest), tx);
+    const ctl = el("div", "ctl");
+    const gh = el("a", "ib s15"); gh.href = repoUrl(l); gh.target = "_blank"; gh.rel = "noopener"; gh.dataset.tip = S.repo; gh.setAttribute("aria-label", S.repo); gh.append(icon("github"));
+    ctl.append(gh, btn(S.install_short, null, appLink(l), false, S.opens));
+    r.append(open, ctl);
+    return r;
+  }
+  function list() {
+    header(null);
+    glow.palette(0x6a2a5e, 0xd291c4, 0xf3d6ec);
+    const status = loading ? S.loading : error ? fmt(S.error, "e", error) : catalog && catalog.partial ? S.partial : S.source;
+    const refresh = el("button", "btn", S.refresh); refresh.onclick = () => refreshCatalog(true);
+    const top = el("div"); top.append(srow(S.catalog, status, refresh), risk(S.risk_note));
+    view.replaceChildren(top);
+    if (!catalog) {
+      for (let i = 0; i < 4; i++) { const s = el("div", "sk"); s.append(el("i"), el("b")); view.append(s); }
+      return;
+    }
+    const tools = el("div", "tools"), box = el("label", "search"), input = el("input");
+    input.type = "search"; input.placeholder = S.search; input.value = query; input.setAttribute("aria-label", S.search);
+    box.append(icon("search"), input);
+    const seg = el("div", "seg");
+    [["stars", S.sort_stars], ["updated", S.sort_updated], ["name", S.sort_name]].forEach(([key, label]) => {
+      const b = el("button", key === sort ? "on" : "", label);
+      b.onclick = () => { sort = key; try { localStorage.setItem("glyph-plugins-sort", key); } catch (_) {} drawResults(); seg.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); };
+      seg.append(b);
+    });
+    tools.append(box, seg);
+    const results = el("div");
+    view.append(tools, results);
+    input.oninput = () => { query = input.value; drawResults(); };
+    function drawResults() {
+      const checkedHits = filterSort(catalog.checked, query, sort), communityHits = filterSort(catalog.community, query, sort);
+      results.replaceChildren();
+      if (query.trim() && !checkedHits.length && !communityHits.length) {
+        results.append(el("div", "empty-line", fmt(S.no_match, "q", query.trim())), guide());
+        return;
+      }
+      const block = (title, info, items, none) => {
+        results.append(section(title, info));
+        if (!items.length) { results.append(el("div", "empty-line", query.trim() ? S.none_match : none)); return; }
+        const rows = el("div", "rows"); items.forEach((l) => rows.append(prow(l))); results.append(rows);
+      };
+      block(S.checked, S.checked_desc, checkedHits, S.none);
+      block(S.community, S.community_desc, communityHits, S.none_community);
+      results.append(guide());
+    }
+    drawResults();
+  }
+
+  // ---- detail ----
+  function detail(id) {
+    const l = catalog && [...catalog.checked, ...catalog.community].find((x) => x.manifest.id === id);
+    const back = el("a", "back", S.back); back.prepend(icon("chevron-left")); back.href = "/plugins";
+    back.onclick = (e) => { e.preventDefault(); go("/plugins"); };
+    const top = el("div"); top.append(back);
+    view.replaceChildren(top);
+    if (!l) {
+      header(null);
+      if (!catalog || loading) { for (let i = 0; i < 3; i++) { const s = el("div", "sk"); s.append(el("i"), el("b")); view.append(s); } return; }
+      const st = el("div", "state-mini"); st.append(icon("puzzle"), el("b", "", S.not_found), el("span", "", fmt(S.not_found_desc, "id", id)));
+      view.append(st);
+      return;
+    }
+    const m = l.manifest, c = colors(m.theme);
+    header(m.name);
+    document.title = m.name + " · " + S.page_title;
+    if (c && c.glow) glow.palette(c.glow[0], c.glow[1], c.glow[2]);
+
+    const head = el("div", "dhead"), tx = el("div", "tx"), chips = el("div", "chips");
+    chips.append(el("span", "chip", l.checked ? S.checked : S.community));
+    chips.append(el("span", "chip", m.kind === "theme" ? S.kind_theme : S.kind_extension));
+    if (hasCode(m)) chips.append(el("span", "chip", S.kind_code));
+    const sub = ["v" + m.version]; if (m.author && m.author.trim()) sub.push(m.author); if (Number.isInteger(l.stars)) sub.push("★ " + compact(l.stars));
+    tx.append(el("h2", "trunc", m.name), el("div", "st trunc", sub.join(" · ")), chips);
+    head.append(preview(m, true), tx);
+    view.append(head);
+    if (m.description && m.description.trim()) view.append(el("p", "desc", m.description));
+    const author = m.author && m.author.trim() ? m.author : S.someone;
+    view.append(risk(fmt(l.checked ? S.risk_listed : S.risk_community, "author", author), true));
+    // Code installs from the list only (Listing::installable).
+    const installable = l.checked || !hasCode(m);
+    const acts = el("div", "acts-row");
+    if (installable) acts.append(btn(S.install, "download", appLink(l), true));
+    acts.append(btn(S.repo, "external-link", repoUrl(l), false));
+    view.append(acts);
+    const note = el("div", "note", installable ? S.opens + " " + S.no_app + " " : S.needs_listing);
+    if (installable) { const dl = el("a", "", S.download); dl.href = "/download"; note.append(dl); }
+    view.append(note);
+    const list = does(m);
+    if (list.length) {
+      const rows = el("div", "rows");
+      for (const d of list) rows.append(srow(d, null, null));
+      view.append(section(S.does, S.does_desc), rows);
+    }
+
+    const value = (s, mono) => el("div", "val" + (mono ? " mono" : ""), s);
+    const source = (l.path ? l.repo + "/" + l.path : l.repo) + (l.rev.length === 40 ? " @ " + l.rev.slice(0, 7) : "");
+    const info = el("div", "rows");
+    info.append(
+      srow(S.version, null, value(m.version)),
+      srow(S.author, null, value(m.author && m.author.trim() ? m.author : "–")),
+      srow(S.license, null, value(m.license && m.license.trim() ? m.license : "–")),
+      srow(S.min_app, null, value(m.min_app || "–")),
+      srow(S.source_row, null, value(source, true)),
+    );
+    if (Number.isInteger(l.stars)) info.append(srow(S.stars, null, value(String(l.stars)), S.stars_desc));
+    if (l.updated) info.append(srow(S.updated, null, value(l.updated.slice(0, 10))));
+    view.append(section(S.details, S.details_desc), info);
+    if (c) {
+      const sw = (n) => { const s = el("span", "sw"), i = el("i"); i.style.background = css(n); s.append(i, el("span", "", css(n))); return s; };
+      const rows = el("div", "rows");
+      rows.append(srow(S.accent, null, sw(c.accent)));
+      if (c.glow) { const g = el("div", "sws"); c.glow.forEach((n) => g.append(sw(n))); rows.append(srow(S.glow, null, g, S.glow_desc)); }
+      rows.append(srow(S.base, null, sw(c.base)));
+      view.append(section(S.colours, S.colours_desc), rows);
+    }
+  }
+
+  // ---- routing: /plugins and /plugins/<id> ----
+  function render() {
+    const id = location.pathname.replace(/\/+$/, "").split("/plugins/")[1];
+    if (id) detail(decodeURIComponent(id).toLowerCase()); else { document.title = S.page_title; list(); }
+    view.style.animation = "none"; void view.offsetWidth; view.style.animation = "";
+  }
+  function go(path) {
+    if (path !== location.pathname) history.pushState(null, "", path);
+    scrollTo(0, 0);
+    render();
+  }
+  addEventListener("popstate", render);
+  async function refreshCatalog(force) {
+    if (loading) return;
+    loading = true; error = null; render();
+    try { catalog = await load(force); } catch (e) { error = e.message || String(e); }
+    loading = false; render();
+  }
+  refreshCatalog(false);
+
+  // ---- tooltips (widgets.rs Tip) for everything with data-tip ----
+  const tip = $("tip"); let tipTimer;
+  document.addEventListener("pointerover", (e) => {
+    const t = e.target.closest("[data-tip]");
+    clearTimeout(tipTimer); tip.classList.remove("show");
+    if (!t) return;
+    tipTimer = setTimeout(() => {
+      tip.textContent = t.dataset.tip;
+      tip.style.whiteSpace = t.dataset.tip.length > 60 ? "normal" : "nowrap";
+      tip.style.maxWidth = "320px";
+      const r = t.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+      const y = r.bottom + 6 + h > innerHeight ? r.top - h - 6 : r.bottom + 6;
+      tip.style.left = Math.max(4, Math.min(innerWidth - w - 4, r.left + r.width / 2 - w / 2)) + "px";
+      tip.style.top = y + "px";
+      tip.classList.add("show");
+    }, t.classList.contains("ii") ? 0 : 400);
+  });
+  document.addEventListener("pointerdown", () => { clearTimeout(tipTimer); tip.classList.remove("show"); });
+})();
+</script>
+</body>
+</html>

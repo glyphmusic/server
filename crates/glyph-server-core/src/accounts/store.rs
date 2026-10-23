@@ -66,6 +66,22 @@ pub struct Device {
     pub access_exp: u64,
     pub refresh_hash: String,
     pub refresh_exp: u64,
+    /// [`crate::bans::ip_hash`] of the address last used, so banning the
+    /// account can ban it too. Never the address itself.
+    pub ip_hash: Option<String>,
+    /// [`crate::bans::hardware_hash`] of the app's hardware id.
+    pub hw_hash: Option<String>,
+}
+
+/// Counts for `glyph remote stats`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AccountStats {
+    pub accounts: u64,
+    pub devices: u64,
+    /// Accounts with a device seen in the last day / 7 / 30 days.
+    pub active_1d: u64,
+    pub active_7d: u64,
+    pub active_30d: u64,
 }
 
 /// A sign-in in progress (10 minutes).
@@ -179,6 +195,12 @@ pub trait AccountStore: MaybeSendSync {
     async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()>;
     /// `false` when no such device belongs to the user.
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool>;
+    /// Remember the hashes bans match on (only called when they changed).
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()>;
+    /// Totals for the operator; `None` when the store cannot count.
+    async fn account_stats(&self, _now: u64) -> StoreResult<Option<AccountStats>> {
+        Ok(None)
+    }
 
     /// Apply items with [`wins`] against the stored copies, give every accepted
     /// item the next revision of the user (in order, atomically with respect to
@@ -405,6 +427,21 @@ impl AccountStore for MemStore {
             return Ok(true);
         }
         Ok(false)
+    }
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
+        if let Some(d) = self.m.lock().unwrap().devices.get_mut(id) {
+            if ip_hash.is_some() { d.ip_hash = ip_hash.map(str::to_string); }
+            if hw_hash.is_some() { d.hw_hash = hw_hash.map(str::to_string); }
+        }
+        Ok(())
+    }
+    async fn account_stats(&self, now: u64) -> StoreResult<Option<AccountStats>> {
+        let m = self.m.lock().unwrap();
+        let active = |days: u64| {
+            let since = now.saturating_sub(days * 86_400_000);
+            m.users.keys().filter(|u| m.devices.values().any(|d| &d.user_id == *u && d.last_seen >= since)).count() as u64
+        };
+        Ok(Some(AccountStats { accounts: m.users.len() as u64, devices: m.devices.len() as u64, active_1d: active(1), active_7d: active(7), active_30d: active(30) }))
     }
     async fn push_items(&self, user_id: &str, items: &[Item]) -> StoreResult<(Vec<bool>, u64)> {
         let mut m = self.m.lock().unwrap();

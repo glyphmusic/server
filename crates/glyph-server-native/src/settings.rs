@@ -44,6 +44,9 @@ pub struct FileConfig {
     pub import_max_pages: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playlist_max_tracks: Option<usize>,
+    /// YouTube songs per account or address and day; 0 = no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub youtube_per_day: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_repo: Option<String>,
     pub admin: FileAdmin,
@@ -164,6 +167,7 @@ pub struct Settings {
     pub proxy_audio: bool,
     pub import_max_pages: u32,
     pub playlist_max_tracks: usize,
+    pub youtube_per_day: u32,
     pub update_repo: String,
     pub admin_password_hash: Option<String>,
     pub tls: Option<TlsSettings>,
@@ -276,6 +280,33 @@ pub fn save(path: &Path, cfg: &FileConfig) -> Result<Vec<String>, String> {
     write_private(path, &render(cfg)?)
 }
 
+/// `bans.json` next to `server.toml` (written by `glyph remote ban ...`).
+pub fn bans_path(config_path: &Path) -> PathBuf {
+    config_path.parent().map(Path::to_path_buf).unwrap_or_default().join("bans.json")
+}
+
+/// The saved ban list. A missing file or salt gets a fresh random salt
+/// (saved at once), so hashed device addresses stay comparable.
+pub fn load_bans(path: &Path) -> glyph_server_core::bans::BanList {
+    let mut list: glyph_server_core::bans::BanList =
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if list.salt.is_empty() {
+        let mut bytes = [0u8; 32];
+        if getrandom::fill(&mut bytes).is_ok() {
+            list.salt = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            if let Err(e) = save_bans(path, &list) {
+                tracing::warn!("could not save {}: {e}", path.display());
+            }
+        }
+    }
+    list
+}
+
+pub fn save_bans(path: &Path, list: &glyph_server_core::bans::BanList) -> Result<Vec<String>, String> {
+    let text = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    write_private(path, &text)
+}
+
 impl Settings {
     pub fn resolve(file: FileConfig, cli_bind: Option<String>, config_path: PathBuf) -> Self {
         let k = file.keys;
@@ -313,6 +344,7 @@ impl Settings {
             proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
             playlist_max_tracks: file.playlist_max_tracks.unwrap_or(5_000).clamp(1, 50_000),
+            youtube_per_day: file.youtube_per_day.unwrap_or(0).min(100_000),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,

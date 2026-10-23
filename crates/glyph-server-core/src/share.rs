@@ -158,7 +158,7 @@ pub enum Lang {
 }
 
 impl Lang {
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
             Lang::De => "de",
@@ -452,12 +452,12 @@ fn player_bar(l: Lang) -> String {
 }
 
 /// Styles of the playlist page and the embed, built from the app's tokens.
-const SHARE_CSS: &str = include_str!("site/share.css");
+pub(crate) const SHARE_CSS: &str = include_str!("site/share.css");
 /// `glyphPlayer(base, count)`: plays `<base>/listen/<n>`, skips songs that
 /// cannot be played on the web.
 pub const PLAYER_JS: &str = include_str!("site/player.js");
 /// `glyphGlow(glow, ascii, titlebarH)`: the app's background.
-const GLOW_JS: &str = include_str!("site/glow.js");
+pub(crate) const GLOW_JS: &str = include_str!("site/glow.js");
 
 /// Pages that play audio: covers and audio come from provider hosts.
 const PLAYER_CSP: &str = "default-src 'none'; img-src 'self' data: https:; media-src 'self' https:; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'";
@@ -490,7 +490,7 @@ fn head(l: Lang, title: &str, meta: &str, body_class: &str) -> String {
 }
 
 /// Every page response varies with the visitor's language.
-fn localized(mut r: Response, l: Lang) -> Response {
+pub(crate) fn localized(mut r: Response, l: Lang) -> Response {
     r.headers.push(("vary".into(), "Accept-Language".into()));
     r.headers.push(("content-language".into(), l.code().into()));
     r

@@ -38,7 +38,9 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     config.proxy_audio = s.proxy_audio;
     config.server_bearer_hash = s.server_bearer_hash.clone();
     config.import_max_pages = s.import_max_pages;
-        config.playlist_max_tracks = s.playlist_max_tracks;
+    config.playlist_max_tracks = s.playlist_max_tracks;
+    config.youtube_per_day = s.youtube_per_day;
+    config.bans = Arc::new(crate::settings::load_bans(&crate::settings::bans_path(&s.config_path)));
     config.companion_enabled = !companion_off_flag(s).exists();
     config.admin_password_hash = s
         .admin_password_hash
@@ -65,7 +67,32 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
         logs,
         started: Instant::now(),
         update_repo: s.update_repo.clone(),
+        bans_path: crate::settings::bans_path(&s.config_path),
     }))
+}
+
+/// `glyph access` edits `server.toml`; the running server picks the new
+/// bearer up within a few seconds instead of needing a restart. An
+/// environment variable (GLYPH_SERVER_BEARER) keeps priority.
+fn watch_access(server: Server, config_path: std::path::PathBuf) {
+    if std::env::var("GLYPH_SERVER_BEARER").is_ok_and(|v| !v.trim().is_empty()) {
+        return;
+    }
+    tokio::spawn(async move {
+        let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let mut seen = modified(&config_path);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let now = modified(&config_path);
+            if now == seen { continue; }
+            seen = now;
+            let Ok(file) = crate::settings::load_file(&config_path, false) else { continue };
+            if file.server_bearer_hash != server.services().config.server_bearer_hash {
+                tracing::info!("server access {}", if file.server_bearer_hash.is_some() { "token changed" } else { "is public again" });
+                server.update_config(|c| c.server_bearer_hash = file.server_bearer_hash);
+            }
+        }
+    });
 }
 
 /// Serve until `shutdown` completes.
@@ -134,6 +161,7 @@ pub async fn run(s: Settings, logs: Arc<LogBuffer>, shutdown: impl Future<Output
         tracing::warn!("admin.password_hash is not a valid Argon2id hash: the admin API stays OFF (run `glyph-server setup`)");
     }
     let server = build_server(&s, logs);
+    watch_access(server.clone(), s.config_path.clone());
     if let Some(rdlp) = crate::ytdlp_pool::init_rdlp(s.rdlp_path.as_deref()) { tracing::info!("r-dlp: {rdlp}"); }
     if let Some(program) = server.services().config.ytdlp_path.clone() { crate::ytdlp_pool::warm(program); }
     let enabled = server.services().config.enabled_providers();

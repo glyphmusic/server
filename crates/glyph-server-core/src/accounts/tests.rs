@@ -129,7 +129,7 @@ fn optional_account_gate_covers_api_and_media_and_tracks_session_lifecycle() {
         assert!(t.s.admit(&request,false).await.unwrap());
         let accounts = t.s.accounts.as_ref().unwrap();
         let (user,device) = accounts.abuse_identity(&t.s.services(),&request).await.unwrap();
-        accounts.store.delete_device(&user,&device).await.unwrap();
+        accounts.store.delete_device(&user,&device.id).await.unwrap();
         assert_eq!(t.s.admit(&request,false).await.unwrap_err().status,401);
         t.s.update_config(|c| c.require_account = false);
         assert_eq!(t.s.handle(req("/v1/access",None)).await.status,200);
@@ -181,8 +181,50 @@ fn revoked_device_immediately_loses_abuse_privileges() {
     block_on(async {
         let accounts = t.s.accounts.as_ref().unwrap();
         let (user, device) = accounts.abuse_identity(&t.s.services(), &req).await.unwrap();
-        accounts.store.delete_device(&user, &device).await.unwrap();
+        accounts.store.delete_device(&user, &device.id).await.unwrap();
         assert!(accounts.abuse_identity(&t.s.services(), &req).await.is_none());
+    });
+}
+
+#[test]
+fn bans_block_accounts_their_addresses_and_hardware() {
+    use crate::bans::{hardware_hash, ip_hash, Ban, BanKind, BanList};
+    let t = setup();
+    let (session, _, _) = sign_up(&t, "ban_test");
+    let req = |ip: &str, hw: Option<&str>| {
+        let mut h = vec![("authorization".to_string(), format!("Bearer {}", session.access_token))];
+        if let Some(hw) = hw {
+            h.push((glyph_protocol::HARDWARE_ID_HEADER.to_string(), hw.to_string()));
+        }
+        Request::new(Method::Get, "/v1/lyrics", h, vec![], Some(ip.into()))
+    };
+    let guest = |ip: &str| Request::new(Method::Get, "/v1/lyrics", vec![], vec![], Some(ip.into()));
+    let ban = |kind, value: String| Ban { id: "b".into(), kind, value, label: None, reason: None, created_at: 0, expires_at: None, origin: None };
+    let set = |bans: Vec<Ban>| t.s.update_config(|c| c.bans = Arc::new(BanList { salt: "s".into(), bans }));
+    block_on(async {
+        set(vec![]);
+        // The device remembers hashes of what it used, never the address.
+        assert!(t.s.admit(&req("198.51.100.1", Some("hw-0123456789")), false).await.is_ok());
+        let accounts = t.s.accounts.as_ref().unwrap();
+        let (user, device) = accounts.abuse_identity(&t.s.services(), &req("198.51.100.1", None)).await.unwrap();
+        assert_eq!(device.ip_hash, ip_hash("s", "198.51.100.1"));
+        assert_eq!(device.hw_hash, hardware_hash("hw-0123456789"));
+
+        set(vec![ban(BanKind::Account, user.clone())]);
+        let e = t.s.admit(&req("203.0.113.9", None), false).await.unwrap_err();
+        assert_eq!((e.status, e.body.code.as_str()), (403, "banned"));
+        assert!(t.s.admit(&guest("203.0.113.9"), false).await.is_ok(), "only the account is banned");
+
+        // Its address and hardware, without the account.
+        set(vec![ban(BanKind::IpHash, device.ip_hash.clone().unwrap()), ban(BanKind::Hardware, device.hw_hash.clone().unwrap())]);
+        assert_eq!(t.s.admit(&guest("198.51.100.1"), false).await.unwrap_err().status, 403);
+        assert!(t.s.admit(&guest("198.51.100.2"), false).await.is_ok());
+        let reinstalled = Request::new(Method::Get, "/v1/lyrics", vec![(glyph_protocol::HARDWARE_ID_HEADER.into(), "hw-0123456789".into())], vec![], Some("192.0.2.5".into()));
+        assert_eq!(t.s.admit(&reinstalled, false).await.unwrap_err().status, 403);
+
+        set(vec![ban(BanKind::Ip, "192.0.2.0/24".into())]);
+        assert_eq!(t.s.admit(&guest("192.0.2.77"), false).await.unwrap_err().status, 403);
+        assert!(t.s.handle(guest("192.0.2.77")).await.status == 403, "site pages too");
     });
 }
 

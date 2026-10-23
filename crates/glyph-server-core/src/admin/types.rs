@@ -137,6 +137,9 @@ pub struct Limits {
     /// Independent D1 database ceiling in decimal MB (Worker only).
     #[serde(default = "d1_mb")]
     pub d1_max_mb: u32,
+    /// YouTube songs per account or address and day; 0 = no limit.
+    #[serde(default)]
+    pub youtube_per_day: u32,
 }
 
 impl Default for Limits {
@@ -153,6 +156,7 @@ impl Default for Limits {
             audio_cache_days: config.audio_cache_days,
             audio_cache_max_gb: config.audio_cache_max_gb,
             d1_max_mb: config.d1_max_mb,
+            youtube_per_day: config.youtube_per_day,
         }
     }
 }
@@ -187,9 +191,17 @@ pub struct AccountLimitRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminDevice {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub platform: String,
     pub last_seen: u64,
+    /// Hardware hash the device last sent (ban it with `ban hardware`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<String>,
+    /// A hashed address is on file (banning the account bans it too).
+    #[serde(default)]
+    pub ip_known: bool,
 }
 
 /// `GET /admin/v1/accounts/{handle}`.
@@ -254,3 +266,83 @@ pub struct MaintenanceResponse {
 }
 
 fn playlist_tracks() -> usize { 5_000 }
+
+/// What `POST /admin/v1/bans` bans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BanTarget {
+    /// `value` = handle. Also bans the hashed IPs and hardware of its devices
+    /// unless `ip` / `hardware` are false.
+    Account,
+    /// `value` = handle, `device` = device id: that device's hardware and IP.
+    Device,
+    /// `value` = IP address or CIDR range.
+    Ip,
+    /// `value` = hardware hash from `accounts show`.
+    Hardware,
+    /// `value` = install id.
+    Install,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanRequest {
+    pub target: BanTarget,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `None` = until removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    #[serde(default = "yes")]
+    pub ip: bool,
+    #[serde(default = "yes")]
+    pub hardware: bool,
+    /// Report what would be banned without saving.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /admin/v1/bans/remove`: a ban id, a handle (its account and every
+/// ban derived from it), an IP/CIDR or a hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnbanRequest {
+    pub target: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BansResponse {
+    pub bans: Vec<crate::bans::Ban>,
+    /// Bans this request added or removed.
+    #[serde(default)]
+    pub changed: Vec<crate::bans::Ban>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /admin/v1/accounts/{handle}/revoke`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RevokeRequest {
+    /// `None` = every device of the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
+/// `GET /admin/v1/stats`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatsResponse {
+    pub uptime_s: Option<u64>,
+    /// `None` without an account backend.
+    pub accounts: Option<crate::accounts::store::AccountStats>,
+    pub bans: usize,
+    pub cache: Option<CacheStats>,
+    pub companion_enabled: bool,
+    pub youtube_per_day: u32,
+}

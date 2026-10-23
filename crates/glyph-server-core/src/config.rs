@@ -139,6 +139,11 @@ pub struct Config {
     /// AI assistants may reach signed-in apps through this server (MCP relay,
     /// `/mcp` + OAuth). Changed with `remote mcp on|off`.
     pub mcp_relay: bool,
+    /// YouTube songs per account (signed in) or per address (guests) and
+    /// day through this server; 0 = no limit. `remote limits --youtube-per-day`.
+    pub youtube_per_day: u32,
+    /// Operator bans, checked before every request (`remote ban ...`).
+    pub bans: std::sync::Arc<crate::bans::BanList>,
     /// Days / GB of companion audio kept in R2 (Worker).
     pub audio_cache_days: u32,
     pub audio_cache_max_gb: u32,
@@ -167,6 +172,8 @@ impl Config {
             playlist_max_tracks: 5_000,
             companion_enabled: true,
             mcp_relay: true,
+            youtube_per_day: 0,
+            bans: Default::default(),
             audio_cache_days: 15,
             audio_cache_max_gb: 10,
             d1_max_mb: 500,

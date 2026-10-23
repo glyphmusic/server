@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0 - 2026-10-23
+
+A plugin page on glyph.my, bans for server operators and a CLI that scripts and AI agents can drive.
+
+### Added
+
+- **Plugin page**: glyph.my/plugins lists every Glyph plugin, listed ones from glyphmusic/plugins and community ones with the GitHub topic glyph-plugin. Your browser loads the list straight from GitHub. Search it (forgiving, so typos still match), order it by most stars, recently updated or name, and see each plugin's GitHub stars. Each plugin has its own page (/plugins/<id>) with its colours and details, the background glows in the theme's colours, and **Install in Glyph** opens the app on that plugin, ready to install. The page says clearly that plugins are made by other people and installed at your own risk. Extensions show what they may do (their code, permissions and the web hosts they contact, settings and menus they add); plugins with code offer **Install in Glyph** only once they are listed.
+- **Bans**: `glyph remote ban account|device|ip|hardware|install`, `glyph remote ban list` and `glyph remote unban`. Banning an account also bans the last address and the hardware of its devices; `--days` lifts a ban on its own, `--reason` keeps a note. Banned clients get 403 on every request. Devices keep only a salted hash of their last address (migration `0016_device_ban_marks.sql`), never the address.
+- `glyph remote accounts revoke <handle> [device]` signs out one device or all of them; `accounts show` lists device ids and hardware hashes.
+- `glyph remote limits --youtube-per-day <n>`: YouTube songs per account (guests: per address) and day.
+- `glyph remote stats` (accounts, active users over 1/7/30 days, bans, cache) and `glyph status` (CLI, selected server and its state at a glance).
+- `glyph remote list` and `glyph remote use <url>` switch between servers you are logged in to.
+- `--json` on `glyph status`, `glyph remote ...`, `glyph config ... --server` and `glyph companion` for scripts and AI agents (errors too, with any command), `--dry-run` to see a change first, `--yes` to skip the question changes ask on a terminal.
+- `glyph completions bash|zsh|fish|powershell|elvish` and `glyph man`.
+
+### Changed
+
+- `glyph help` and every `glyph <command> --help` end with a link to the CLI reference (https://docs.glyph.my/self-hosting/cli) and its Markdown version for AI agents. The reference now lists every command and flag and has a table of common tasks.
+- **CLI, easier to follow**: `glyph companion off --server <url>` switches whether a server uses its companion; plain `glyph companion off` still switches the companion machine itself (`glyph remote companion` keeps working). `glyph config ... --server <url>` changes a running server's live settings and `--worker-config wrangler.json` a Cloudflare project, next to `server.toml`. The help groups the commands by where they act, lists the npm-only Cloudflare commands as `[npm package]` and hides `self-update`, `check-update` and `hash-password` (they still work).
+- `glyph access` applies within a few seconds on a running server; no restart.
+- Errors name the next step (`help: ...`) and exit with a code per kind of problem: 3 not logged in, 4 unreachable, 5 denied, 6 not found, 7 cancelled.
+
+### Fixed
+
+- **Far fewer D1 reads**: every sync push cleaned up old deleted items by reading all of an account's synced items, which used up the D1 free tier's daily reads. An index (migration `0015_sync_tombstone_index.sql`) makes the cleanup read only the items it removes.
+
 ## 0.6.1 - 2026-10-22
 
 ### Changed

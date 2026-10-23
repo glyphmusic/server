@@ -1,11 +1,13 @@
 //! The public site on the share origin (`https://glyph.my`): the landing page
-//! at `/`, `/download`, `/changelog` (every release of every repository), the
+//! at `/`, `/download`, `/changelog` (every release of every repository),
+//! `/plugins` (the plugin catalog, loaded from GitHub in the browser), the
 //! docs (`docs.rs`, on `docs.*` hosts and `/docs`), and
 //! what crawlers and chat apps look for (robots.txt, sitemap.xml, llms.txt, icons, the link-card image). The `/p/` playlist page
 //! (`share.rs`) uses the same stylesheet and ASCII note.
 
 pub mod changelog;
 pub mod docs;
+pub mod plugins;
 
 use crate::error::ApiErr;
 use crate::server::{Body, Request, Response};
@@ -34,7 +36,7 @@ pub const PAGE_CSP: &str = "default-src 'none'; img-src 'self' data:; manifest-s
 
 /// Paths owned by this module (`path` without its trailing `/`).
 pub fn owns(path: &str) -> bool {
-    path.is_empty() || path == "/download" || path == "/changelog" || shot(path).is_some() || file(path).is_some()
+    path.is_empty() || path == "/download" || path == "/changelog" || plugins::owns(path) || shot(path).is_some() || file(path).is_some()
 }
 
 /// Files at fixed paths: (path, content type, cache seconds, bytes). Text
@@ -118,6 +120,9 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
             .replace("<!--VERSIONS-->", &changelog::render_index(&releases))
             .replace("<!--RELEASES-->", &changelog::render(&releases));
         return Ok(html_response(200, html, "public, max-age=300"));
+    }
+    if plugins::owns(req.path.trim_end_matches('/')) {
+        return Ok(plugins::handle(req));
     }
     if req.path.trim_end_matches('/') == "/download" {
         let html = include_str!("site/download.html").replace("/*BASE*/", BASE_CSS).replace("/*BRAND*/", &brand_icon_css("nav .brand"));

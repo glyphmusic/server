@@ -19,6 +19,8 @@ pub struct NativeHost {
     pub logs: Arc<LogBuffer>,
     pub started: Instant,
     pub update_repo: String,
+    /// `bans.json` (see [`crate::settings::bans_path`]).
+    pub bans_path: PathBuf,
 }
 
 #[async_trait]
@@ -62,6 +64,7 @@ impl AdminHost for NativeHost {
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
         cfg.import_max_pages = Some(l.import_max_pages);
         cfg.playlist_max_tracks = Some(l.playlist_max_tracks);
+        cfg.youtube_per_day = (l.youtube_per_day > 0).then_some(l.youtube_per_day);
         save(&self.config_path, &cfg).map_err(HostError::Failed)?;
         let switched = if l.companion_enabled {
             std::fs::remove_file(&self.companion_flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
@@ -70,6 +73,10 @@ impl AdminHost for NativeHost {
 ")
         };
         switched.map_err(|e| HostError::Failed(format!("could not switch the companion: {e}")))
+    }
+
+    async fn persist_bans(&self, bans: &glyph_server_core::bans::BanList) -> Result<(), HostError> {
+        crate::settings::save_bans(&self.bans_path, bans).map(|_| ()).map_err(HostError::Failed)
     }
 
     async fn logs(&self, max_lines: usize, after: Option<u64>) -> Result<LogsResponse, HostError> {
@@ -106,15 +113,16 @@ mod tests {
             logs: LogBuffer::new(),
             started: Instant::now(),
             update_repo: "x/y".into(),
+            bans_path: dir.path().join("bans.json"),
         };
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 5000, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 5000, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, youtube_per_day: 0 })
             .await
             .unwrap();
         assert!(host.companion_flag.exists());
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 8000, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500 })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 8000, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, youtube_per_day: 0 })
             .await
             .unwrap();
         assert!(!host.companion_flag.exists());
@@ -123,6 +131,11 @@ mod tests {
         assert_eq!(cfg.rate_limit_per_min, Some(7));
         assert_eq!(cfg.playlist_max_tracks, Some(8000));
         assert_eq!(cfg.require_account,Some(false));
+        let mut bans = crate::settings::load_bans(&host.bans_path);
+        assert_eq!(bans.salt.len(), 64, "a fresh list gets a salt and is saved");
+        bans.bans.push(glyph_server_core::bans::Ban { id: "b1".into(), kind: glyph_server_core::bans::BanKind::Ip, value: "203.0.113.7".into(), label: None, reason: None, created_at: 1, expires_at: None, origin: None });
+        host.persist_bans(&bans).await.unwrap();
+        assert_eq!(crate::settings::load_bans(&host.bans_path), bans);
         // removing
         m.insert("youtube_api_key".to_string(), None);
         host.persist_keys(&m).await.unwrap();

@@ -2,6 +2,8 @@
 // field (field.rs) on a low-res canvas the browser stretches into soft light,
 // and the ASCII layer plus titlebar dot grid (glow.rs) on a full-res canvas.
 // Same ramp, cell size, 5x7 font, thresholds and alphas as the app.
+// Returns `{ palette(dark, mid, bright) }` to tint the field with other
+// colours (a theme plugin's glow, `0xrrggbb` each).
 function glyphGlow(glowEl, asciiEl, titlebarH) {
   const RAMP_LEN = 12; // " .-=+xX0S8#@"
   const FONT = [
@@ -24,9 +26,12 @@ function glyphGlow(glowEl, asciiEl, titlebarH) {
   const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
   const lighten = (a, k) => [a[0] + (1 - a[0]) * k, a[1] + (1 - a[1]) * k, a[2] + (1 - a[2]) * k];
   // A pink palette in the app's palette ramp shape (field.rs `ramps`).
-  const pa = hex(0x6a2a5e), pb = hex(0xd291c4), pd = hex(0xf3d6ec);
-  const cool = [scale(pa, 0.35), pa, pb, lighten(pb, 0.85)];
-  const warm = [scale(pa, 0.35), pb, pd, lighten(pd, 0.85)];
+  let cool, warm;
+  const ramps = (pa, pb, pd) => {
+    cool = [scale(pa, 0.35), pa, pb, lighten(pb, 0.85)];
+    warm = [scale(pa, 0.35), pb, pd, lighten(pd, 0.85)];
+  };
+  ramps(hex(0x6a2a5e), hex(0xd291c4), hex(0xf3d6ec));
   const at = (r, v) => { v = Math.min(1, Math.max(0, v)) * 3; const i = Math.min(2, v | 0); return lerp(r[i], r[i + 1], v - i); };
   const gauss = (x) => Math.exp(-x * x);
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -124,7 +129,9 @@ function glyphGlow(glowEl, asciiEl, titlebarH) {
   resize();
   draw();
   addEventListener("resize", () => { resize(); draw(); });
-  if (reduce) return;
+  const api = { palette(a, b, d) { ramps(hex(a), hex(b), hex(d)); draw(); } };
+  if (reduce) return api;
   // The field runs at 15 fps here (the app: 30, ASCII 15); paused while hidden.
   setInterval(() => { if (!document.hidden) draw(); }, 1000 / 15);
+  return api;
 }

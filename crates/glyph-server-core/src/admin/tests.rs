@@ -32,6 +32,9 @@ impl AdminHost for TestHost {
     async fn persist_limits(&self, _: &Limits) -> Result<(), HostError> {
         Ok(())
     }
+    async fn persist_bans(&self, _: &crate::bans::BanList) -> Result<(), HostError> {
+        Ok(())
+    }
     async fn companion_status(&self) -> Result<CompanionStatus,HostError> {
         let tool=ToolStatus{available:true,version:Some("0.1.1".into()),configured:true};
         Ok(CompanionStatus{version:"0.3.0".into(),target:"test".into(),enabled:true,ready:true,r_dlp:tool.clone(),yt_dlp:tool.clone(),ffmpeg:tool})
@@ -60,6 +63,34 @@ fn companion_management_routes_require_admin_auth_and_fixed_methods() {
         assert_eq!(status,200);assert_eq!(value["applied"],apply);
         assert_eq!(value["message"],if rdlp{"r-dlp"}else{"companion"});
     }
+}
+
+#[test]
+fn bans_need_admin_auth_preview_block_and_lift() {
+    let t = setup(true, TestHost::default());
+    t.server.update_config(|c| c.bans = Arc::new(crate::bans::BanList { salt: "s".into(), bans: vec![] }));
+    let pair = login(&t);
+    let token = Some(pair.access_token.as_str());
+    let body = r#"{"target":"ip","value":"203.0.113.7/24","days":2,"reason":"spam"}"#;
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans", body, None)).0, 401);
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/bans", r#"{"target":"ip","value":"203.0.113.7/24","dry_run":true}"#, token));
+    assert_eq!((s, v["changed"][0]["value"].as_str()), (200, Some("203.0.113.0/24")));
+    assert!(t.server.services().config.bans.bans.is_empty(), "a dry run saves nothing");
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/bans", body, token));
+    assert_eq!((s, v["bans"].as_array().map(Vec::len)), (200, Some(1)));
+    assert_eq!(v["bans"][0]["reason"], "spam");
+    let client = |ip: &str| Request::new(Method::Get, "/v1/lyrics", vec![], vec![], Some(ip.into())).with_transport(true, false);
+    let (s, v, _) = call(&t, client("203.0.113.50"));
+    assert_eq!((s, v["code"].as_str()), (403, Some("banned")));
+    assert!(v["retry_after_s"].as_u64().is_some_and(|s| s > 86_000), "a ban with --days says when it ends");
+    assert_ne!(call(&t, client("198.51.100.1")).0, 403);
+    // The admin API itself is never banned, so an operator cannot lock themselves out.
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/stats", "", token)).1["bans"], 1);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans", r#"{"target":"ip","value":"nope"}"#, token)).0, 400);
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/bans/remove", r#"{"target":"203.0.113.9/24"}"#, token));
+    assert_eq!((s, v["changed"].as_array().map(Vec::len)), (200, Some(1)));
+    assert!(t.server.services().config.bans.bans.is_empty());
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans/remove", r#"{"target":"203.0.113.0/24"}"#, token)).0, 404);
 }
 
 struct T {

@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use glyph_server_core::accounts::store::{
-    AccountStore, BlobStore, Device, Item, Login, Passkey, Profile, Share, StoreError, StoreResult, User,
+    AccountStats, AccountStore, BlobStore, Device, Item, Login, Passkey, Profile, Share, StoreError, StoreResult, User,
 };
 use glyph_server_core::accounts::Entropy;
 use serde::de::DeserializeOwned;
@@ -134,6 +134,10 @@ struct DeviceRow {
     access_exp: u64,
     refresh_hash: String,
     refresh_exp: u64,
+    #[serde(default)]
+    ip_hash: Option<String>,
+    #[serde(default)]
+    hw_hash: Option<String>,
 }
 impl From<DeviceRow> for Device {
     fn from(r: DeviceRow) -> Self {
@@ -148,6 +152,8 @@ impl From<DeviceRow> for Device {
             access_hash: r.access_hash,
             access_exp: r.access_exp,
             refresh_hash: r.refresh_hash,
+            ip_hash: r.ip_hash,
+            hw_hash: r.hw_hash,
             refresh_exp: r.refresh_exp,
         }
     }
@@ -195,7 +201,7 @@ struct RevRow {
 const USER_COLS: &str = "id, handle, created_at,
     COALESCE(NULLIF(device_limit, 0), (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_device_limit'), 5) AS device_limit,
     device_limit AS device_limit_set, rev, purged_rev, recovery_hash, handle_changed_at, pw_salt, pw_hash";
-const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp, approximate_location";
+const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp, approximate_location, ip_hash, hw_hash";
 const ITEM_COLS: &str = "kind, key, value, updated_at, device_id, deleted, rev";
 
 #[async_trait(?Send)]
@@ -409,7 +415,7 @@ impl AccountStore for D1Store {
 
     async fn put_device(&self, d: &Device) -> StoreResult<()> {
         self.run(
-            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
             &[
                 s(&d.id),
                 s(&d.user_id),
@@ -422,6 +428,8 @@ impl AccountStore for D1Store {
                 s(&d.refresh_hash),
                 n(d.refresh_exp),
                 opt(&d.approximate_location),
+                opt(&d.ip_hash),
+                opt(&d.hw_hash),
             ],
         )
         .await
@@ -432,8 +440,8 @@ impl AccountStore for D1Store {
         // One statement: the count and the insert cannot interleave with another sign-in.
         self.run(
             &format!(
-                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
-                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?12"
+                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?14"
             ),
             &[
                 s(&d.id),
@@ -447,6 +455,8 @@ impl AccountStore for D1Store {
                 s(&d.refresh_hash),
                 n(d.refresh_exp),
                 opt(&d.approximate_location),
+                opt(&d.ip_hash),
+                opt(&d.hw_hash),
                 n(limit as u64),
             ],
         )
@@ -461,6 +471,28 @@ impl AccountStore for D1Store {
 
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool> {
         Ok(self.run("DELETE FROM devices WHERE id = ?1 AND user_id = ?2", &[s(id), s(user_id)]).await? > 0)
+    }
+
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
+        let o = |v: Option<&str>| opt(&v.map(str::to_string));
+        self.run("UPDATE devices SET ip_hash = COALESCE(?2, ip_hash), hw_hash = COALESCE(?3, hw_hash) WHERE id = ?1", &[s(id), o(ip_hash), o(hw_hash)])
+            .await
+            .map(|_| ())
+    }
+
+    async fn account_stats(&self, now: u64) -> StoreResult<Option<AccountStats>> {
+        let day = 86_400_000u64;
+        let active = "SELECT COUNT(DISTINCT user_id) FROM devices WHERE last_seen >= ";
+        let row: Option<AccountStats> = self
+            .first(
+                &format!(
+                    "SELECT (SELECT COUNT(*) FROM users) AS accounts, (SELECT COUNT(*) FROM devices) AS devices,
+                     ({active}?1) AS active_1d, ({active}?2) AS active_7d, ({active}?3) AS active_30d"
+                ),
+                &[n(now.saturating_sub(day)), n(now.saturating_sub(7 * day)), n(now.saturating_sub(30 * day))],
+            )
+            .await?;
+        Ok(row)
     }
 
     async fn push_items(&self, user_id: &str, items: &[Item]) -> StoreResult<(Vec<bool>, u64)> {

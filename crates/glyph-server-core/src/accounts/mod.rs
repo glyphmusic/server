@@ -362,7 +362,7 @@ impl Accounts {
     }
 
     /// Only a live server-side session grants higher quotas or priority.
-    pub(crate) async fn abuse_identity(&self, svc: &Services, req: &Request) -> Option<(String, String)> {
+    pub(crate) async fn abuse_identity(&self, svc: &Services, req: &Request) -> Option<(String, Device)> {
         let mut headers = req.headers.iter().filter(|(key,_)| key.eq_ignore_ascii_case("authorization"));
         let token = headers.next()?.1.strip_prefix("Bearer ")?.trim();
         if headers.next().is_some() { return None; }
@@ -370,7 +370,18 @@ impl Accounts {
         let device = self.store.device_by_access(&hash(token)).await.ok()??;
         if device.access_exp <= svc.rt.now_ms() { return None; }
         let user = self.store.user(&device.user_id).await.ok()??;
-        Some((user.id, device.id))
+        Some((user.id, device))
+    }
+
+    /// Keeps the device's ban hashes current; writes only when one changed.
+    pub(crate) async fn mark(&self, svc: &Services, device: &Device, req: &Request) {
+        let ip = req.client_ip.as_deref().and_then(|ip| crate::bans::ip_hash(&svc.config.bans.salt, ip));
+        let hw = req.header(glyph_protocol::HARDWARE_ID_HEADER).and_then(crate::bans::hardware_hash);
+        let ip = ip.filter(|h| device.ip_hash.as_deref() != Some(h.as_str()));
+        let hw = hw.filter(|h| device.hw_hash.as_deref() != Some(h.as_str()));
+        if ip.is_some() || hw.is_some() {
+            let _ = self.store.mark_device(&device.id, ip.as_deref(), hw.as_deref()).await;
+        }
     }
 
     /// A pending, unexpired login.
@@ -440,6 +451,8 @@ impl Accounts {
             access_exp: now + ACCESS_TTL,
             refresh_hash: hash(&refresh),
             refresh_exp: now + REFRESH_TTL,
+            ip_hash: None,
+            hw_hash: None,
         };
         if !self.store.add_device(&device, user.device_limit).await.map_err(store_err)? {
             return Err(ApiErr::new(409, "device_limit", "remove a device first"));
@@ -520,8 +533,34 @@ impl Accounts {
             created_at: u.created_at,
             device_limit: u.device_limit,
             device_limit_set: (u.device_limit_set > 0).then_some(u.device_limit_set),
-            devices: devices.into_iter().map(|d| AdminDevice { name: d.name, platform: d.platform, last_seen: d.last_seen }).collect(),
+            devices: devices.into_iter().map(|d| AdminDevice { id: d.id, name: d.name, platform: d.platform, last_seen: d.last_seen, hardware: d.hw_hash, ip_known: d.ip_hash.is_some() }).collect(),
         })
+    }
+
+    /// The account and its devices, for bans derived from them.
+    pub async fn admin_devices(&self, handle: &str) -> Result<(User, Vec<Device>), ApiErr> {
+        let handle = normalize_handle(handle).map_err(|_| ApiErr::not_found("no such account"))?;
+        let u = self.store.user_by_handle(&handle).await.map_err(store_err)?.ok_or_else(|| ApiErr::not_found("no such account"))?;
+        let devices = self.store.devices(&u.id).await.map_err(store_err)?;
+        Ok((u, devices))
+    }
+
+    /// Signs out one device (or all with `None`); they can sign in again
+    /// unless banned.
+    pub async fn admin_revoke(&self, handle: &str, device: Option<&str>) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+        let (u, devices) = self.admin_devices(handle).await?;
+        let mut removed = 0;
+        for d in devices.iter().filter(|d| device.is_none_or(|id| id == d.id)) {
+            if self.store.delete_device(&u.id, &d.id).await.map_err(store_err)? { removed += 1; }
+        }
+        if removed == 0 && device.is_some() {
+            return Err(ApiErr::not_found("no such device on this account (see glyph remote accounts show)"));
+        }
+        self.admin_account(handle).await
+    }
+
+    pub async fn admin_stats(&self, now: u64) -> Option<store::AccountStats> {
+        self.store.account_stats(now).await.ok().flatten()
     }
 
     /// Existing devices beyond a lowered limit stay signed in; no new ones until below it.

@@ -6,6 +6,7 @@
 mod config_cmd;
 mod doctor;
 mod diagnostics;
+mod exit;
 mod management;
 mod host;
 mod logbuf;
@@ -18,39 +19,72 @@ mod settings;
 mod setup;
 mod update;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const EXAMPLES: &str = "\
+/// Full CLI reference; every `--help` ends with it so people and AI agents
+/// find the details (flags, examples, common tasks).
+macro_rules! docs_url { () => { "https://docs.glyph.my/self-hosting/cli" } }
+const DOCS: &str = concat!("Docs: ", docs_url!(), "\nMarkdown (for AI agents): ", docs_url!(), ".md");
+
+const EXAMPLES: &str = concat!("\
 Getting started:
-  glyph help                      list commands
-  glyph version all               show CLI/server/companion versions
+  glyph status                    CLI, selected server, users and limits at a glance
+  glyph doctor                    find problems on this machine (config, keys, ports)
+  glyph version all               CLI/server/companion versions
   glyph check companion           probe companion, r-dlp, yt-dlp and FFmpeg
   glyph update                    update the CLI
-  glyph setup cloudflare          own Cloudflare deployment (npm installation)
-  glyph setup              answer a few questions, writes server.toml
-  glyph                    run the server
-  glyph doctor             check config, keys, ports and reachability
-  glyph config list        every option, its value and where it comes from
+
+Own server (server.toml on this machine):
+  glyph setup                     answer a few questions, writes server.toml
+  glyph                           run the server
+  glyph config list               every option, its value and where it comes from
   glyph config set rate_limit_per_min 120
-  glyph config set lastfm_api_key   (asks without echo)
-  glyph service install    start it automatically at boot
+  glyph service install           start it automatically at boot
 
-yt-dlp companion of the Cloudflare Worker (takes effect at once):
-  glyph companion status
-  glyph companion off      every companion request gets 403
-  glyph companion on
+Cloudflare (npm package):
+  glyph setup cloudflare          own Cloudflare deployment
+  glyph deploy                    deploy again
+  glyph cloudflare list|set|unset|secret|domain
 
-Manage a running server (here or anywhere):
+A running server, here or anywhere (log in once with the admin password):
   glyph remote login https://glyph.example.com
-  glyph remote status
-  glyph remote limits --rate 120
-  glyph remote companion off
-  glyph remote keys set youtube_api_key
+  glyph config set rate_limit_per_min 120 --server https://glyph.example.com
+  glyph companion off --server https://glyph.example.com   server stops using YouTube
+  glyph remote stats
+  glyph remote ban account somehandle      account, its addresses and hardware
+  glyph remote ban ip 203.0.113.0/24
+  glyph remote unban somehandle
+  glyph remote accounts revoke somehandle  sign out its devices
   glyph remote logs --follow
-  glyph remote accounts default-limit 5
-  glyph remote accounts limit somehandle 10";
+
+The companion machine itself:
+  glyph companion off             answer every Worker request with 403
+
+For scripts and AI agents: --json (machine-readable), --dry-run (change
+nothing), --yes (no questions); exit codes are listed in the docs.
+
+Docs: ", docs_url!(), "
+Markdown (for AI agents): ", docs_url!(), ".md
+All docs for AI agents: https://docs.glyph.my/llms.txt");
+
+/// Puts [`DOCS`] under the help of every subcommand that has no text of its own.
+fn with_docs(mut cmd: clap::Command) -> clap::Command {
+    if cmd.get_after_help().is_none() {
+        cmd = cmd.after_help(DOCS);
+    }
+    let names: Vec<String> = cmd.get_subcommands().map(|c| c.get_name().to_string()).collect();
+    for name in names {
+        cmd = cmd.mut_subcommand(name, with_docs);
+    }
+    cmd
+}
+
+fn parse_cli() -> Cli {
+    let matches = with_docs(Cli::command()).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
 
 #[derive(Parser)]
 #[command(name = "glyph", bin_name = "glyph", version, about = "Metadata server of the Glyph music app", after_help = EXAMPLES)]
@@ -64,12 +98,26 @@ struct Cli {
     /// Same as `check-update` (kept for scripts)
     #[arg(long, hide = true)]
     check_update: bool,
+    /// Print machine-readable JSON (errors too, with their exit code)
+    #[arg(long, global = true)]
+    json: bool,
+    /// Do not ask before changes that affect every user of a server
+    #[arg(long, short = 'y', global = true)]
+    yes: bool,
+    /// Show what a change would do, change nothing
+    #[arg(long, global = true)]
+    dry_run: bool,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// The CLI, the selected server, its users and limits at a glance
+    Status {
+        /// Server to show (default: the one from `glyph remote use` / the last login)
+        #[arg(long)] server: Option<String>,
+    },
     /// Show installed or running component versions (default: CLI)
     Version {
         #[arg(value_enum,default_value="cli")] target:management::Component,
@@ -95,10 +143,13 @@ enum Cmd {
     Setup(setup::SetupArgs),
     /// Check config, API keys, ports and whether the server is reachable
     Doctor,
-    /// Show or change server.toml options: list, get, set, unset, path
+    /// Show or change options: server.toml here, or a running server's live settings with --server
     Config {
         #[command(subcommand)]
         cmd: config_cmd::ConfigCmd,
+        /// A running server (logged in with `glyph remote login`): its limits and keys, applied at once
+        #[arg(long, global = true)]
+        server: Option<String>,
     },
     /// Run the server in the background at boot (systemd, launchd, Windows service)
     Service {
@@ -108,17 +159,37 @@ enum Cmd {
     /// Manage a running server with its admin password
     Remote(remote::RemoteArgs),
     /// Print an Argon2id hash of an admin password (for Docker / Cloudflare secrets)
+    #[command(hide = true)]
     HashPassword,
-    /// Require a shared server bearer (prompted without echo); --disable makes it public.
+    /// Require a shared server bearer (prompted without echo); --disable makes it public. Applies within seconds.
     Access { #[arg(long)] disable: bool },
-    /// Turn the Worker's yt-dlp companion on or off (off = 403), or show its state
+    /// YouTube companion: on this machine (default) or, with --server, whether a server uses it
     Companion {
         #[command(subcommand)]
         cmd: CompanionCmd,
+        /// A running server (logged in): switch its use of the companion for every user
+        #[arg(long, global = true)]
+        server: Option<String>,
     },
-    /// Check GitHub for a newer release
+    /// Shell completions: glyph completions bash|zsh|fish|powershell|elvish
+    Completions { shell: clap_complete::Shell },
+    /// Manual page (roff) on standard output: glyph man > glyph.1
+    Man,
+    /// [npm package] Deploy the Cloudflare Worker again
+    Deploy {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        args: Vec<String>,
+    },
+    /// [npm package] Cloudflare options: list, set, unset, secret, domain
+    Cloudflare {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        args: Vec<String>,
+    },
+    /// Check GitHub for a newer release (same as `glyph update server --check`)
+    #[command(hide = true)]
     CheckUpdate,
     /// Download, verify (SHA-256) and install the latest release
+    #[command(hide = true)]
     SelfUpdate,
     /// Entry point used by the Windows service manager
     #[command(hide = true)]
@@ -127,18 +198,32 @@ enum Cmd {
 
 #[derive(Subcommand, Clone, Copy)]
 enum CompanionCmd {
-    /// Answer the Worker again
+    /// Answer the Worker again (with --server: the server uses its companion again)
     On,
-    /// Answer every companion request with 403 Forbidden (YouTube pauses)
+    /// Answer every companion request with 403 (with --server: the server stops using it; YouTube pauses for everyone)
     Off,
     /// Show whether the companion is on and set up
     Status,
 }
 
+impl From<CompanionCmd> for remote::SwitchCmd {
+    fn from(c: CompanionCmd) -> Self {
+        match c {
+            CompanionCmd::On => Self::On,
+            CompanionCmd::Off => Self::Off,
+            CompanionCmd::Status => Self::Status,
+        }
+    }
+}
+
 /// `glyph companion ...`: a marker file the running server checks on
 /// every request, so no restart is needed.
-fn companion_cmd(cmd: CompanionCmd, s: &settings::Settings) {
+fn companion_cmd(cmd: CompanionCmd, s: &settings::Settings, o: remote::Opts) {
     let flag = serve::companion_off_flag(s);
+    if o.dry_run && !matches!(cmd, CompanionCmd::Status) {
+        println!("dry run: would switch the companion on this machine {}. Nothing changed.", if matches!(cmd, CompanionCmd::On) { "on" } else { "off" });
+        return;
+    }
     match cmd {
         CompanionCmd::Off => {
             if let Some(dir) = flag.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -156,12 +241,17 @@ fn companion_cmd(cmd: CompanionCmd, s: &settings::Settings) {
             }
             println!("companion: on");
         }
+        CompanionCmd::Status if o.json => {
+            let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32);
+            println!("{}", serde_json::json!({ "enabled": !flag.exists(), "token": token, "ytdlp_path": s.ytdlp_path, "switch": flag }));
+        }
         CompanionCmd::Status => {
             let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32);
             println!("companion: {}", if flag.exists() { "off (403)" } else { "on" });
             println!("token:     {}", if token { "set" } else { "missing (YTDLP_SERVICE_TOKEN, companion routes answer 404)" });
             println!("yt-dlp:    {}", s.ytdlp_path.as_deref().unwrap_or("from PATH"));
             println!("switch:    {}", flag.display());
+            println!("\nThis is the companion machine. Whether a server uses it: glyph companion status --server <url>");
         }
     }
 }
@@ -192,7 +282,9 @@ fn load_settings(cli: &Cli) -> settings::Settings {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
+    let opts = remote::Opts { json: cli.json, yes: cli.yes, dry_run: cli.dry_run };
+    let done = |r: Result<(), exit::CliError>| if let Err(e) = r { exit::fail(e, opts.json) };
     let logs = logbuf::LogBuffer::new();
     let serving = matches!(cli.command, None | Some(Cmd::Serve) | Some(Cmd::ServiceRun)) && !cli.check_update;
     init_logs(&logs, !serving);
@@ -222,7 +314,7 @@ fn main() {
                 Some(glyph_server_core::access::token_hash(&token))
             };
             for warning in settings::save(&config_path, &file).unwrap_or_else(|e| fail(e)) { eprintln!("{warning}"); }
-            println!("Server access updated. Restart the server to apply (environment overrides still win).");
+            println!("Server access updated. A running server applies it within a few seconds (GLYPH_SERVER_BEARER in its environment still wins).");
         }
         None | Some(Cmd::Serve) => {
             let s = load_settings(&cli);
@@ -272,11 +364,27 @@ fn main() {
                 fail(e);
             }
         }
-        Some(Cmd::Config { cmd }) => {
+        Some(Cmd::Config { cmd, server: Some(server) }) => done(runtime().block_on(remote::config(Some(server), cmd, opts))),
+        Some(Cmd::Config { cmd, server: None }) => {
             if let Err(e) = config_cmd::run(cmd, &config_path) {
                 fail(e);
             }
         }
+        Some(Cmd::Status { server }) => done(runtime().block_on(remote::overview(server, opts))),
+        Some(Cmd::Completions { shell }) => {
+            let mut cmd = with_docs(Cli::command());
+            clap_complete::generate(shell, &mut cmd, "glyph", &mut std::io::stdout());
+        }
+        Some(Cmd::Man) => {
+            if let Err(e) = clap_mangen::Man::new(with_docs(Cli::command())).render(&mut std::io::stdout()) {
+                fail(e);
+            }
+        }
+        Some(Cmd::Deploy { .. }) | Some(Cmd::Cloudflare { .. }) => exit::fail(
+            exit::CliError::new(exit::USAGE, "this command comes with the npm package of the CLI")
+                .hint("npm install --global glyph-server, then run it again"),
+            opts.json,
+        ),
         Some(Cmd::Doctor) => {
             let s = load_settings(&cli);
             let ok = runtime().block_on(doctor::run(&s));
@@ -287,16 +395,13 @@ fn main() {
                 fail(e);
             }
         }
-        Some(Cmd::Remote(args)) => {
-            if let Err(e) = runtime().block_on(remote::run(args)) {
-                fail(e);
-            }
-        }
+        Some(Cmd::Remote(args)) => done(runtime().block_on(remote::run(args, opts))),
         Some(Cmd::HashPassword) => match setup::hash_password_cli(std::env::var("GLYPH_ADMIN_PASSWORD").ok()) {
             Ok(h) => println!("{h}"),
             Err(e) => fail(e),
         },
-        Some(Cmd::Companion { ref cmd }) => companion_cmd(*cmd, &load_settings(&cli)),
+        Some(Cmd::Companion { cmd, server: Some(ref server) }) => done(runtime().block_on(remote::companion(Some(server.clone()), Some(cmd.into()), opts))),
+        Some(Cmd::Companion { cmd, server: None }) => companion_cmd(cmd, &load_settings(&cli), opts),
         Some(Cmd::CheckUpdate) => {
             let s = load_settings(&cli);
             if let Err(e) = runtime().block_on(update::check(&s.update_repo)) {
@@ -322,9 +427,32 @@ mod cli_tests {
         assert!(matches!(Cli::try_parse_from(["glyph","check","r-dlp","--local"]).unwrap().command,Some(Cmd::Check{target:management::Component::Rdlp,local:true,..})));
         assert!(matches!(Cli::try_parse_from(["glyph","update","companion","--check","--server","https://own.example"]).unwrap().command,Some(Cmd::Update{check:true,..})));
         assert!(matches!(Cli::try_parse_from(["glyph-server","self-update"]).unwrap().command,Some(Cmd::SelfUpdate)));
-        assert!(matches!(Cli::try_parse_from(["glyph","--config","x.toml","config","set","bind","0.0.0.0:1"]).unwrap().command,Some(Cmd::Config{cmd:config_cmd::ConfigCmd::Set{..}})));
+        assert!(matches!(Cli::try_parse_from(["glyph","--config","x.toml","config","set","bind","0.0.0.0:1"]).unwrap().command,Some(Cmd::Config{cmd:config_cmd::ConfigCmd::Set{..},..})));
         let help=Cli::try_parse_from(["glyph","help"]).err().unwrap();
         assert_eq!(help.kind(),clap::error::ErrorKind::DisplayHelp);
         assert!(help.to_string().contains("Usage: glyph"));
+    }
+
+    #[test]
+    fn global_flags_and_new_commands_parse() {
+        let cli = Cli::try_parse_from(["glyph", "remote", "stats", "--json", "--yes"]).unwrap();
+        assert!(cli.json && cli.yes && !cli.dry_run);
+        assert!(matches!(Cli::try_parse_from(["glyph", "--dry-run", "companion", "off", "--server", "https://x.example"]).unwrap().command, Some(Cmd::Companion { server: Some(_), .. })));
+        assert!(matches!(Cli::try_parse_from(["glyph", "config", "set", "rate_limit_per_min", "30", "--server", "x.example"]).unwrap().command, Some(Cmd::Config { server: Some(_), .. })));
+        assert!(matches!(Cli::try_parse_from(["glyph", "completions", "powershell"]).unwrap().command, Some(Cmd::Completions { .. })));
+        assert!(matches!(Cli::try_parse_from(["glyph", "cloudflare", "set", "X", "1"]).unwrap().command, Some(Cmd::Cloudflare { .. })));
+        assert!(matches!(Cli::try_parse_from(["glyph", "status"]).unwrap().command, Some(Cmd::Status { server: None })));
+        let help = with_docs(Cli::command()).render_help().to_string();
+        assert!(!help.contains("self-update") && !help.contains("hash-password"), "legacy commands stay hidden");
+        assert!(help.contains("[npm package]"));
+    }
+
+    #[test]
+    fn every_help_links_the_cli_docs() {
+        let help = |args: &[&str]| with_docs(Cli::command()).try_get_matches_from(args).err().unwrap().to_string();
+        for args in [&["glyph", "help"][..], &["glyph", "--help"], &["glyph", "remote", "--help"], &["glyph", "remote", "limits", "--help"], &["glyph", "help", "companion"], &["glyph", "config", "set", "-h"]] {
+            let text = help(args);
+            assert!(text.contains("https://docs.glyph.my/self-hosting/cli.md"), "{args:?}: {text}");
+        }
     }
 }

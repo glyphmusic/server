@@ -284,13 +284,29 @@ impl Server {
         let namespace = if media { "media" } else { "api" };
         let base = svc.config.rate_limit_per_min.max(1).saturating_mul(if media { 20 } else { 1 });
         let has_bearer = req.header("authorization").is_some_and(|h| h.starts_with("Bearer "));
+        let now = svc.rt.now_ms();
+        let who = crate::bans::Subject {
+            ip: req.client_ip.as_deref(),
+            install: req.header(INSTALL_ID_HEADER),
+            hardware: req.header(glyph_protocol::HARDWARE_ID_HEADER),
+            account: None,
+        };
+        if let Some(ban) = svc.config.bans.find(&who, now) {
+            return Err(banned(ban, now));
+        }
         if self.accounts.is_some() && has_bearer {
             // Fixed IP ceiling: adding or rotating an install ID never raises it.
             check_rules(&svc, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))]).await?;
             if let Some(a) = &self.accounts {
                 if let Some((user, device)) = a.abuse_identity(&svc, req).await {
+                    let who = crate::bans::Subject { account: Some(user.as_str()), ..who };
+                    if let Some(ban) = svc.config.bans.find(&who, now) {
+                        return Err(banned(ban, now));
+                    }
+                    a.mark(&svc, &device, req).await;
+                    if media { youtube_quota(&svc, req, &format!("user:{user}")).await?; }
                     let u_key = format!("user:{user}");
-                    let d_key = format!("device:{device}");
+                    let d_key = format!("device:{}", device.id);
                     let lim = base.saturating_mul(4);
                     check_rules(&svc, &[
                         (format!("{namespace}:{u_key}"), u_key, lim),
@@ -305,6 +321,7 @@ impl Server {
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
             check_rules(&svc, &rules).await?;
+            if media { youtube_quota(&svc, req, &format!("ip:{ip}")).await?; }
             self.check_account_access(req, false)
         } else {
             let mut rules = vec![
@@ -316,6 +333,7 @@ impl Server {
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
             check_rules(&svc, &rules).await?;
+            if media { youtube_quota(&svc, req, &format!("ip:{ip}")).await?; }
             self.check_account_access(req, false)
         }
     }
@@ -337,6 +355,33 @@ impl Server {
         Ok(member)
     }
 
+}
+
+/// 403 for a banned client. The operator's reason stays private.
+fn banned(ban: &crate::bans::Ban, now: u64) -> ApiErr {
+    let mut e = ApiErr::new(403, "banned", "this server has blocked access for this device or account");
+    e.body.retry_after_s = ban.expires_at.map(|t| t.saturating_sub(now).div_ceil(1000));
+    e
+}
+
+/// `youtube_per_day`: YouTube songs per account or address and day.
+async fn youtube_quota(svc: &Services, req: &Request, who: &str) -> Result<(), ApiErr> {
+    let n = svc.config.youtube_per_day;
+    let path = req.path.as_str();
+    if n == 0 || !(path.starts_with("/v1/audio/youtube/") || path.starts_with("/v1/download/youtube/")) {
+        return Ok(());
+    }
+    // Range requests of one song reuse its key, so a song counts once.
+    let song = path.rsplit('/').next().unwrap_or("");
+    if svc.limiter.check_often(&format!("yt-song:{who}:{song}"), 1, 86_400).await == RateDecision::Allowed {
+        if let RateDecision::Limited { retry_after_s } = svc.limiter.check_often(&format!("yt-day:{who}"), n, 86_400).await {
+            let mut e = ApiErr::rate_limited(retry_after_s);
+            e.body.code = "youtube_daily_limit".into();
+            e.body.message = format!("this server allows {n} YouTube songs per day; try again later");
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<(), ApiErr> {
@@ -704,6 +749,20 @@ mod tests {
         // Window passes -> allowed again.
         h.rt.advance(61_000);
         assert_eq!(block_on(s.handle(with_id("abc"))).status, 400);
+    }
+
+    #[test]
+    fn plugin_identity_headers_do_not_grant_extra_quota() {
+        let h = harness(Default::default());
+        let s = server(&h);
+        s.update_config(|c| c.rate_limit_per_min = 1);
+        let request = |plugin: &str| Request::new(Method::Get, "/v1/lyrics", vec![
+            ("x-glyph-plugin".into(), plugin.into()),
+            ("x-glyph-plugin-permissions".into(), "admin,unlimited".into()),
+            (INSTALL_ID_HEADER.into(), plugin.into()),
+        ], vec![], Some("9.8.7.6".into()));
+        assert_eq!(block_on(s.handle(request("first"))).status, 400);
+        assert_eq!(block_on(s.handle(request("second"))).status, 429);
     }
 
     #[test]

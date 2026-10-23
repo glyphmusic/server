@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use glyph_server_core::admin::host::{AdminHost, HostError};
 use glyph_server_core::admin::types::{Capabilities, Limits};
+use glyph_server_core::bans::BanList;
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
 use glyph_server_core::{
     Body, Cache, Config, HttpClient, HttpError, HttpRequest, HttpResponse, Method, NoCommands, Runtime,
@@ -185,7 +186,7 @@ fn secret(env: &Env, name: &str) -> Option<String> {
         .ok()
 }
 
-fn build_server(env: &Env, saved: Option<Limits>) -> Server {
+fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server {
     let rt: Arc<dyn Runtime> = Arc::new(WorkerRuntime);
     let api: Arc<dyn Cache> = Arc::new(CacheApi { rt: rt.clone() });
     let cache: Arc<dyn Cache> = match env.kv("GLYPH_KV") {
@@ -229,7 +230,9 @@ fn build_server(env: &Env, saved: Option<Limits>) -> Server {
         config.audio_cache_days = l.audio_cache_days;
         config.audio_cache_max_gb = l.audio_cache_max_gb;
         config.d1_max_mb = l.d1_max_mb;
+        config.youtube_per_day = l.youtube_per_day;
     }
+    config.bans = bans;
     let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), secret(env, "YTDLP_SERVICE_TOKEN")) {
         // `remote companion off`: YouTube search is off, audio answers 403.
         _ if !config.companion_enabled => Arc::new(NoCommands),
@@ -445,6 +448,56 @@ async fn saved_limits(env: &Env) -> Option<Limits> {
     limits
 }
 
+const BANS_CACHE_KEY: &str = "admin:bans:v1";
+
+std::thread_local! {
+    static LOCAL_BANS: std::cell::RefCell<Option<(u64, Arc<BanList>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The ban list (D1 `server_settings`, key 'bans'), re-read like the limits.
+/// The first read creates the list with a random salt, so device address
+/// hashes can be compared from then on.
+async fn saved_bans(env: &Env) -> Arc<BanList> {
+    let now = worker::js_sys::Date::now() as u64;
+    if let Some((_, cached)) = LOCAL_BANS.with(|c| c.borrow().clone()).filter(|(exp, _)| *exp > now) {
+        return cached;
+    }
+    let rt: Arc<dyn Runtime> = Arc::new(WorkerRuntime);
+    let cache = CacheApi { rt };
+    if let Some(hit) = glyph_server_core::cache::get_json::<BanList>(&cache, BANS_CACHE_KEY).await {
+        let hit = Arc::new(hit);
+        LOCAL_BANS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, hit.clone())));
+        return hit;
+    }
+    let Ok(db) = env.d1("GLYPH_DB") else { return Arc::default() };
+    #[derive(serde::Deserialize)]
+    struct Row { value: String }
+    let read = || async {
+        db.prepare("SELECT value FROM server_settings WHERE key = 'bans'").first::<Row>(None).await
+            .map(|r| r.and_then(|r| serde_json::from_str::<BanList>(&r.value).ok()))
+    };
+    let list = match read().await {
+        Ok(Some(list)) if !list.salt.is_empty() => list,
+        Ok(_) => {
+            let mut salt = [0u8; 32];
+            if getrandom::getrandom(&mut salt).is_err() { return Arc::default(); }
+            let fresh = BanList { salt: salt.iter().map(|b| format!("{b:02x}")).collect(), bans: Vec::new() };
+            let value = serde_json::to_string(&fresh).unwrap_or_default();
+            // Another location may create it at the same moment: keep the first.
+            if let Ok(stmt) = db.prepare("INSERT OR IGNORE INTO server_settings (key, value) VALUES ('bans', ?1)").bind(&[value.into()]) {
+                let _ = stmt.run().await;
+            }
+            match read().await { Ok(Some(list)) => list, _ => fresh }
+        }
+        // Keep the last known list rather than dropping every ban.
+        Err(_) => return LOCAL_BANS.with(|c| c.borrow().as_ref().map(|(_, l)| l.clone())).unwrap_or_default(),
+    };
+    let list = Arc::new(list);
+    LOCAL_BANS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, list.clone())));
+    glyph_server_core::cache::put_json(&cache, BANS_CACHE_KEY, &*list, SETTINGS_CACHE_S).await;
+    list
+}
+
 #[async_trait(?Send)]
 impl AdminHost for WorkerHost {
     fn platform(&self) -> &'static str {
@@ -464,6 +517,22 @@ impl AdminHost for WorkerHost {
             (true,false)=>"/internal/r-dlp/check",(true,true)=>"/internal/r-dlp/apply",
         },true).await
     }
+    async fn persist_bans(&self, bans: &BanList) -> std::result::Result<(), HostError> {
+        let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
+        let value = serde_json::to_string(bans).map_err(|_| HostError::Failed("could not encode bans".into()))?;
+        db.prepare("INSERT INTO server_settings (key, value) VALUES ('bans', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(&[value.into()])
+            .map_err(|_| HostError::Failed("could not save bans".into()))?
+            .run()
+            .await
+            .map_err(|_| HostError::Failed("could not save bans".into()))?;
+        // This location sees the change at once, the others within SETTINGS_CACHE_S.
+        let now = worker::js_sys::Date::now() as u64;
+        LOCAL_BANS.with(|c| *c.borrow_mut() = Some((now + SETTINGS_CACHE_S * 1000, Arc::new(bans.clone()))));
+        glyph_server_core::cache::put_json(self.cache.as_ref(), BANS_CACHE_KEY, bans, SETTINGS_CACHE_S).await;
+        Ok(())
+    }
+
     async fn persist_limits(&self, l: &Limits) -> std::result::Result<(), HostError> {
         let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
         let value = serde_json::to_string(l).map_err(|_| HostError::Failed("could not encode limits".into()))?;
@@ -588,7 +657,7 @@ async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
         }
     }
 
-    let server = build_server(&env, saved_limits(&env).await);
+    let server = build_server(&env, saved_limits(&env).await, saved_bans(&env).await);
     // Deployed Workers are HTTPS-only; `wrangler dev` serves http://localhost.
     let secure = url.scheme() == "https";
     let local = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]"));

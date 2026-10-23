@@ -52,6 +52,11 @@ enum R {
     AccountDefaultsPut,
     AccountGet,
     AccountPut,
+    AccountRevoke,
+    BansGet,
+    BansAdd,
+    BansRemove,
+    Stats,
 }
 
 fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
@@ -78,6 +83,11 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "companion/r-dlp/apply" => (R::RdlpApply, Post),
         "account-defaults" if m == Put => (R::AccountDefaultsPut, Put),
         "account-defaults" => (R::AccountDefaultsGet, Get),
+        "bans" if m == Post => (R::BansAdd, Post),
+        "bans" => (R::BansGet, Get),
+        "bans/remove" => (R::BansRemove, Post),
+        "stats" => (R::Stats, Get),
+        s if s.starts_with("accounts/") && s.ends_with("/revoke") => (R::AccountRevoke, Post),
         s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
         s if s.starts_with("accounts/") => (R::AccountGet, Get),
         _ => return Err(ApiErr::not_found("unknown admin endpoint")),
@@ -114,6 +124,7 @@ fn limits_of(svc: &Services) -> Limits {
         audio_cache_days: svc.config.audio_cache_days,
         audio_cache_max_gb: svc.config.audio_cache_max_gb,
         d1_max_mb: svc.config.d1_max_mb,
+        youtube_per_day: svc.config.youtube_per_day,
     }
 }
 
@@ -280,6 +291,9 @@ impl Server {
                 if !(1..=1000).contains(&l.audio_cache_max_gb) {
                     return Err(ApiErr::bad_request("audio_cache_max_gb must be between 1 and 1000"));
                 }
+                if l.youtube_per_day > 100_000 {
+                    return Err(ApiErr::bad_request("youtube_per_day must be between 0 (no limit) and 100000"));
+                }
                 if !(64..=4_000).contains(&l.d1_max_mb) {
                     return Err(ApiErr::bad_request("d1_max_mb must be between 64 and 4000; provider plan limits still apply"));
                 }
@@ -295,6 +309,7 @@ impl Server {
                     c.audio_cache_days = l.audio_cache_days;
                     c.audio_cache_max_gb = l.audio_cache_max_gb;
                     c.d1_max_mb = l.d1_max_mb;
+                    c.youtube_per_day = l.youtube_per_day;
                 });
                 Ok(Response::json(200, &l))
             }
@@ -308,15 +323,37 @@ impl Server {
                 &self.host.companion_update(matches!(route,R::RdlpCheck|R::RdlpApply), matches!(route,R::CompanionApply|R::RdlpApply)).await.map_err(host_err)?)),
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
-            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountGet | R::AccountPut => {
+            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountGet | R::AccountPut | R::AccountRevoke => {
                 let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
                 let handle = sub.strip_prefix("accounts/").unwrap_or("");
                 match route {
                     R::AccountDefaultsGet => Ok(Response::json(200, &acc.admin_defaults().await?)),
                     R::AccountDefaultsPut => Ok(Response::json(200, &acc.admin_set_defaults(&parse_body::<AccountDefaults>(&req)?).await?)),
                     R::AccountGet => Ok(Response::json(200, &acc.admin_account(handle).await?)),
+                    R::AccountRevoke => {
+                        let handle = handle.strip_suffix("/revoke").unwrap_or(handle);
+                        Ok(Response::json(200, &acc.admin_revoke(handle, parse_body::<RevokeRequest>(&req)?.device.as_deref()).await?))
+                    }
                     _ => Ok(Response::json(200, &acc.admin_set_limit(handle, parse_body::<AccountLimitRequest>(&req)?.device_limit).await?)),
                 }
+            }
+            R::BansGet => {
+                let now = svc.rt.now_ms();
+                let bans = svc.config.bans.bans.iter().filter(|b| b.live(now)).cloned().collect();
+                Ok(Response::json(200, &BansResponse { bans, changed: Vec::new(), dry_run: false }))
+            }
+            R::BansAdd => self.ban(svc, parse_body(&req)?).await,
+            R::BansRemove => self.unban(svc, parse_body(&req)?).await,
+            R::Stats => {
+                let now = svc.rt.now_ms();
+                Ok(Response::json(200, &StatsResponse {
+                    uptime_s: self.host.uptime_s(),
+                    accounts: match &self.accounts { Some(a) => a.admin_stats(now).await, None => None },
+                    bans: svc.config.bans.bans.iter().filter(|b| b.live(now)).count(),
+                    cache: svc.cache.stats().await,
+                    companion_enabled: svc.config.companion_enabled,
+                    youtube_per_day: svc.config.youtube_per_day,
+                }))
             }
             R::Login | R::Refresh => unreachable!(),
         }
@@ -362,6 +399,109 @@ impl Server {
         cache::put_json(&*svc.cache, &fail_key, &0u64, 60).await;
         let sid = auth::session_id(key, now, &who);
         Ok(Response::json(200, &pair(key, &sid, now)))
+    }
+
+    async fn ban(&self, svc: &Arc<Services>, b: BanRequest) -> Result<Response, ApiErr> {
+        use crate::bans::{Ban, BanKind};
+        let now = svc.rt.now_ms();
+        let mut list = (*svc.config.bans).clone();
+        list.prune(now);
+        if list.salt.is_empty() {
+            return Err(ApiErr::unavailable("ban storage is not ready yet; retry in a minute"));
+        }
+        let reason = b.reason.map(|r| r.chars().filter(|c| !c.is_control()).take(200).collect::<String>()).filter(|r| !r.trim().is_empty());
+        let expires_at = match b.days {
+            Some(0) => return Err(ApiErr::bad_request("days must be at least 1 (leave it out for a permanent ban)")),
+            Some(d) => Some(now.saturating_add(u64::from(d.min(3650)) * 86_400_000)),
+            None => None,
+        };
+        let mut wanted: Vec<(BanKind, String, Option<String>, Option<String>)> = Vec::new();
+        let value = b.value.trim();
+        match b.target {
+            BanTarget::Ip => {
+                let net = crate::bans::parse_net(value).ok_or_else(|| ApiErr::bad_request(format!("`{value}` is not an IP address or CIDR range")))?;
+                wanted.push((BanKind::Ip, net, None, None));
+            }
+            BanTarget::Hardware => {
+                if value.len() != 64 || !value.bytes().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(ApiErr::bad_request("use the 64-character hardware hash from `glyph remote accounts show`"));
+                }
+                wanted.push((BanKind::Hardware, value.to_ascii_lowercase(), None, None));
+            }
+            BanTarget::Install => {
+                let h = crate::bans::install_hash(value).ok_or_else(|| ApiErr::bad_request("not an install id"))?;
+                wanted.push((BanKind::Install, h, Some(format!("install {}", &value[..value.len().min(8)])), None));
+            }
+            BanTarget::Account | BanTarget::Device => {
+                let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
+                let (user, devices) = acc.admin_devices(value).await?;
+                let label = format!("@{}", user.handle);
+                if b.target == BanTarget::Account {
+                    wanted.push((BanKind::Account, user.id.clone(), Some(label.clone()), None));
+                }
+                let chosen: Vec<_> = devices.iter().filter(|d| b.target == BanTarget::Account || b.device.as_deref() == Some(d.id.as_str())).collect();
+                if b.target == BanTarget::Device && chosen.is_empty() {
+                    return Err(ApiErr::not_found("no such device on this account (see glyph remote accounts show)"));
+                }
+                for d in chosen {
+                    let l = Some(format!("{label} / {}", d.name));
+                    if b.ip || b.target == BanTarget::Device {
+                        if let Some(h) = &d.ip_hash { wanted.push((BanKind::IpHash, h.clone(), l.clone(), Some(user.id.clone()))); }
+                    }
+                    if b.hardware || b.target == BanTarget::Device {
+                        if let Some(h) = &d.hw_hash { wanted.push((BanKind::Hardware, h.clone(), l.clone(), Some(user.id.clone()))); }
+                    }
+                }
+                if wanted.is_empty() {
+                    return Err(ApiErr::bad_request("this device has not been seen since bans were enabled; ban the account instead"));
+                }
+            }
+        }
+        let mut changed = Vec::new();
+        for (kind, value, label, origin) in wanted {
+            if list.bans.iter().chain(&changed).any(|x: &Ban| x.kind == kind && x.value == value) {
+                continue;
+            }
+            let id = crate::access::token_hash(&format!("{kind:?}|{value}|{now}"))[..10].to_string();
+            changed.push(Ban { id, kind, value, label, reason: reason.clone(), created_at: now, expires_at, origin });
+        }
+        if list.bans.len() + changed.len() > crate::bans::MAX_BANS {
+            return Err(ApiErr::bad_request(format!("at most {} bans; remove old ones first", crate::bans::MAX_BANS)));
+        }
+        if !b.dry_run && !changed.is_empty() {
+            list.bans.extend(changed.iter().cloned());
+            self.host.persist_bans(&list).await.map_err(host_err)?;
+            self.update_config(|c| c.bans = Arc::new(list.clone()));
+        }
+        Ok(Response::json(200, &BansResponse { bans: list.bans, changed, dry_run: b.dry_run }))
+    }
+
+    async fn unban(&self, svc: &Arc<Services>, b: UnbanRequest) -> Result<Response, ApiErr> {
+        let now = svc.rt.now_ms();
+        let mut list = (*svc.config.bans).clone();
+        list.prune(now);
+        let t = b.target.trim();
+        let net = crate::bans::parse_net(t);
+        let account = match (&self.accounts, net.is_none() && t.len() < 40) {
+            (Some(a), true) => a.admin_devices(t).await.ok().map(|(u, _)| u.id),
+            _ => None,
+        };
+        let hit = |x: &crate::bans::Ban| {
+            x.id == t
+                || x.value == t.to_ascii_lowercase()
+                || net.as_deref() == Some(x.value.as_str())
+                || account.as_deref().is_some_and(|a| x.value == a || x.origin.as_deref() == Some(a))
+        };
+        let changed: Vec<_> = list.bans.iter().filter(|&x| hit(x)).cloned().collect();
+        if changed.is_empty() {
+            return Err(ApiErr::not_found("no ban matches; list them with glyph remote ban list"));
+        }
+        if !b.dry_run {
+            list.bans.retain(|x| !hit(x));
+            self.host.persist_bans(&list).await.map_err(host_err)?;
+            self.update_config(|c| c.bans = Arc::new(list.clone()));
+        }
+        Ok(Response::json(200, &BansResponse { bans: list.bans, changed, dry_run: b.dry_run }))
     }
 
     async fn status(&self, svc: &Arc<Services>) -> StatusResponse {

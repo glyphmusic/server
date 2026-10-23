@@ -12,6 +12,7 @@ pub mod access;
 mod admission;
 pub mod accounts;
 pub mod admin;
+pub mod bans;
 pub mod cache;
 pub mod chunks;
 pub mod config;

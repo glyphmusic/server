@@ -202,7 +202,7 @@ and the pairing flow let the user remove a device first.
 
 `glyph remote limits` shows and changes the general limits, e.g.
 `glyph remote limits --rate 120 --import-pages 3`.
-`glyph remote companion off|on` switches the yt-dlp companion
+`glyph companion off|on --server <url>` switches the yt-dlp companion
 (YouTube); while off, YouTube search is empty and YouTube audio answers 403.
 On the Worker, `--audio-days 15 --audio-max-gb 10` set how long and how much
 companion audio stays in R2 (oldest songs go first). The R2 lifecycle rule
@@ -270,7 +270,7 @@ account page. Accounts need the Worker with D1 for now.
 A self-hosted server stays public by default. To require a separate shared bearer
 for app access, run `glyph access --config /path/to/server.toml` and enter
 a random 32-256 character token twice. Only its SHA-256 hash is stored in the
-private config. Restart the server to apply. `glyph access --disable`
+private config. A running server applies it within a few seconds. `glyph access --disable`
 removes this requirement (environment overrides must also be removed).
 
 For Docker/scripts set `GLYPH_SERVER_BEARER` in the server environment. For a

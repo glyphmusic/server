@@ -10,6 +10,9 @@ Node.js 22+ is required. Installation downloads the exact matching native releas
 checks its SHA-256 and version, and supports Windows x64, macOS x64/arm64 and glibc
 Linux x64/arm64. Rust is not required. `glyph-server` remains a compatibility alias.
 
+Every command and flag: https://docs.glyph.my/self-hosting/cli (Markdown for AI
+agents: https://docs.glyph.my/self-hosting/cli.md).
+
 ## Your own server
 
 ```sh
