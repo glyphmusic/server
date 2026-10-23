@@ -15,6 +15,7 @@ pub mod admin;
 pub mod bans;
 pub mod cache;
 pub mod chunks;
+pub mod companion_auth;
 pub mod config;
 pub mod error;
 pub mod hints;
@@ -30,6 +31,7 @@ pub mod server;
 pub mod share;
 pub mod site;
 pub mod traits;
+pub mod trust;
 
 #[cfg(test)]
 pub(crate) mod testutil;

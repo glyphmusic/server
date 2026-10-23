@@ -140,6 +140,9 @@ pub struct Limits {
     /// YouTube songs per account or address and day; 0 = no limit.
     #[serde(default)]
     pub youtube_per_day: u32,
+    /// YouTube audio and downloads only for signed-in accounts.
+    #[serde(default)]
+    pub youtube_require_account: bool,
 }
 
 impl Default for Limits {
@@ -157,6 +160,7 @@ impl Default for Limits {
             audio_cache_max_gb: config.audio_cache_max_gb,
             d1_max_mb: config.d1_max_mb,
             youtube_per_day: config.youtube_per_day,
+            youtube_require_account: config.youtube_require_account,
         }
     }
 }

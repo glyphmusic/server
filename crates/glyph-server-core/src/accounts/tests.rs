@@ -137,6 +137,33 @@ fn optional_account_gate_covers_api_and_media_and_tracks_session_lifecycle() {
 }
 
 #[test]
+fn youtube_account_switch_keeps_youtube_media_for_accounts() {
+    let t = setup();
+    t.s.update_config(|c| { c.youtube_require_account = true; c.rate_limit_per_min = 1000; c.proxy_audio = true; });
+    let (_, health) = call(&t,Method::Get,"/v1/health",serde_json::Value::Null,None);
+    let caps: Vec<&str> = health["capabilities"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(caps.contains(&"accounts") && caps.contains(&"jam") && caps.contains(&"youtube_hints"), "{caps:?}");
+    let (session,_,_) = sign_up(&t,"yt_member");
+    let req = |path: &str, token: Option<&str>| Request::new(Method::Get,path,
+        token.map(|v| vec![("authorization".into(),format!("Bearer {v}"))]).unwrap_or_default(),vec![],Some("yt-gate".into()));
+    block_on(async {
+        for path in ["/v1/audio/youtube/abcdefghijk","/v1/download/youtube/abcdefghijk"] {
+            for token in [None,Some("forged")] {
+                let error = t.s.admit(&req(path,token),true).await.unwrap_err();
+                assert_eq!((error.status,error.body.code.as_str()),(401,"account_required"),"{path}");
+            }
+            assert!(t.s.admit(&req(path,Some(&session.access_token)),true).await.unwrap());
+        }
+        // Other sources and the metadata API stay open to guests.
+        for path in ["/v1/audio/audius/abc123","/v1/search?q=x","/v1/resolve"] {
+            assert!(!t.s.admit(&req(path,None),path.contains("audio")).await.unwrap(),"{path}");
+        }
+    });
+    t.s.update_config(|c| c.youtube_require_account = false);
+    assert!(!block_on(t.s.admit(&req("/v1/audio/youtube/abcdefghijk",None),true)).unwrap());
+}
+
+#[test]
 fn account_gate_fails_closed_without_account_backend() {
     let h = harness(Default::default());
     let server = Server::from_arc(h.svc.clone());

@@ -284,7 +284,7 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
 
     if matches!(path_only.as_str(),"/internal/import"|"/internal/ytdlp"|"/internal/resolve"|"/internal/lyrics"|"/internal/status"
         |"/internal/update/check"|"/internal/update/apply"|"/internal/r-dlp/check"|"/internal/r-dlp/apply") || path_only.starts_with("/internal/audio/") {
-        return companion(&st.server, &path_only, &headers, method, &body).await;
+        return companion(&st.server, &path_only, &target, &headers, method, &body).await;
     }
     let probe = Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local);
     if let Err(resp) = st.server.check_access(&probe) {
@@ -507,17 +507,51 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "audio transfer failed"))
 }
 
-/// Optional, private companion for the Worker. No arbitrary URLs or tool arguments.
-async fn companion(server: &Server, path: &str, headers: &[(String, String)], method: Method, body: &[u8]) -> Response {
-    use glyph_server_core::media::{valid_command, CommandRequest, CommandResponse};
-    let token = std::env::var("YTDLP_SERVICE_TOKEN").ok().filter(|t| t.len() >= 32);
-    let Some(token) = token else { return plain(StatusCode::NOT_FOUND, "not found") };
+/// Who may call a companion path: a request signed with the role's secret
+/// (`companion_auth`), or, for service paths while `GLYPH_COMPANION_SIGNED_ONLY`
+/// is unset, the older plain bearer token.
+fn companion_authorized(path: &str, target: &str, headers: &[(String, String)], method: &str, body: &[u8]) -> Result<(), StatusCode> {
+    use glyph_server_core::companion_auth::{self, Role};
+    let role = companion_auth::role_of(path);
+    let var = match role { Role::Service => "YTDLP_SERVICE_TOKEN", Role::Admin => "COMPANION_ADMIN_TOKEN" };
+    let token = std::env::var(var).ok().filter(|t| t.len() >= companion_auth::MIN_TOKEN_LEN).ok_or(StatusCode::NOT_FOUND)?;
+    let one = |name: &str| {
+        let mut values = headers.iter().filter(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        let first = values.next();
+        if values.next().is_some() { None } else { first }
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    if let Some(sig) = one(companion_auth::SIGNATURE_HEADER) {
+        companion_auth::verify(&token, method, target, body, one, now).map_err(|_| StatusCode::UNAUTHORIZED)?;
+        static SEEN: std::sync::OnceLock<std::sync::Mutex<companion_auth::ReplayGuard>> = std::sync::OnceLock::new();
+        let fresh = SEEN.get_or_init(Default::default).lock().map(|mut g| g.first_use(sig, now)).unwrap_or(false);
+        return if fresh { Ok(()) } else { Err(StatusCode::UNAUTHORIZED) };
+    }
+    let signed_only = std::env::var("GLYPH_COMPANION_SIGNED_ONLY").is_ok_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
+    if role == Role::Admin || signed_only {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let expected = format!("Bearer {token}");
-    let mut auth = headers.iter().filter(|(k,_)| k == "authorization");
-    let supplied = auth.next().map(|(_,v)| v.as_bytes()).unwrap_or_default();
-    let mut diff = (expected.len() ^ supplied.len()) | usize::from(auth.next().is_some());
+    let supplied = one("authorization").map(str::as_bytes).unwrap_or_default();
+    let mut diff = expected.len() ^ supplied.len();
     for (i,b) in expected.bytes().enumerate() { diff |= usize::from(b ^ supplied.get(i).copied().unwrap_or(0)); }
-    if diff != 0 { return plain(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    if diff != 0 { return Err(StatusCode::UNAUTHORIZED); }
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!("companion: the Worker sent the plain bearer token; deploy the current Worker, then set GLYPH_COMPANION_SIGNED_ONLY=1");
+    }
+    Ok(())
+}
+
+/// Optional, private companion for the Worker. No arbitrary URLs or tool arguments.
+async fn companion(server: &Server, path: &str, target: &str, headers: &[(String, String)], method: Method, body: &[u8]) -> Response {
+    use glyph_server_core::media::{valid_command, CommandRequest, CommandResponse};
+    let method_name = if method == Method::Get { "GET" } else if method == Method::Post { "POST" } else { "OTHER" };
+    match companion_authorized(path, target, headers, method_name, body) {
+        Ok(()) => {}
+        Err(StatusCode::NOT_FOUND) => return plain(StatusCode::NOT_FOUND, "not found"),
+        Err(_) => return plain(StatusCode::UNAUTHORIZED, "unauthorized"),
+    }
     // Management remains reachable while extraction is paused. Credentials
     // above are always checked before probing tools or installing anything.
     if path == "/internal/status" {
@@ -708,8 +742,20 @@ mod tests {
         struct Restore(Option<String>);
         impl Drop for Restore { fn drop(&mut self) { match &self.0 { Some(v) => std::env::set_var("YTDLP_SERVICE_TOKEN",v), None => std::env::remove_var("YTDLP_SERVICE_TOKEN") } } }
         let _restore = Restore(std::env::var("YTDLP_SERVICE_TOKEN").ok());
+        struct RestoreAdmin(Option<String>);
+        impl Drop for RestoreAdmin { fn drop(&mut self) { match &self.0 { Some(v) => std::env::set_var("COMPANION_ADMIN_TOKEN",v), None => std::env::remove_var("COMPANION_ADMIN_TOKEN") } } }
+        let _restore_admin = RestoreAdmin(std::env::var("COMPANION_ADMIN_TOKEN").ok());
+        std::env::remove_var("COMPANION_ADMIN_TOKEN");
+        std::env::remove_var("GLYPH_COMPANION_SIGNED_ONLY");
         let token = "test-companion-secret-with-at-least-32-characters";
+        let admin = "test-admin-secret-with-at-least-32-characters";
         std::env::set_var("YTDLP_SERVICE_TOKEN",token);
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let signed = |secret: &str, method: &str, path: &str, body: &'static str| {
+            let mut b = axum::http::Request::builder().uri(path).method(method);
+            for (k, v) in glyph_server_core::companion_auth::sign(secret, method, path, body.as_bytes(), now()) { b = b.header(k, v); }
+            b.body(Body::from(body)).unwrap()
+        };
         let settings = Settings::resolve(Default::default(), None, "test-nonexistent.toml".into());
         let state = AppState { server: build_server(&settings,LogBuffer::new()),trust_proxy:false,tls:false };
         // Companion mode must retain URL metadata between range requests.
@@ -726,10 +772,22 @@ mod tests {
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::OK);
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED);
+        // Management needs its own secret; without one it does not exist.
         for path in ["/internal/status","/internal/update/apply","/internal/r-dlp/apply"] {
-            let request=axum::http::Request::builder().uri(path).method("POST").body(Body::empty()).unwrap();
-            assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED,"{path}");
+            let request=axum::http::Request::builder().uri(path).method("POST").header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap();
+            assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::NOT_FOUND,"{path}");
         }
+        // Signed service requests pass; replayed or wrongly keyed ones do not.
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),signed(token,"POST","/internal/ytdlp","{}")).await.status(),StatusCode::BAD_REQUEST);
+        let (once, _) = signed(token,"POST","/internal/lyrics","{}").into_parts();
+        let replay = || { let mut b = axum::http::Request::builder().uri("/internal/lyrics").method("POST"); for (k,v) in once.headers.iter() { b = b.header(k, v); } b.body(Body::from("{}")).unwrap() };
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),replay()).await.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),replay()).await.status(),StatusCode::UNAUTHORIZED,"replay");
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),signed("wrong-secret-with-at-least-32-characters!","POST","/internal/ytdlp","{}")).await.status(),StatusCode::UNAUTHORIZED);
+        std::env::set_var("COMPANION_ADMIN_TOKEN",admin);
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),signed(token,"GET","/internal/status","")).await.status(),StatusCode::UNAUTHORIZED,"the service secret cannot manage");
+        let request=axum::http::Request::builder().uri("/internal/status").header("authorization",format!("Bearer {admin}")).body(Body::empty()).unwrap();
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::UNAUTHORIZED,"management needs a signed request");
         let request = axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),request).await.status(),StatusCode::BAD_REQUEST);
 
@@ -755,13 +813,17 @@ mod tests {
         std::fs::write(&flag, b"off\n").unwrap();
         let authed = || axum::http::Request::builder().uri("/internal/ytdlp").method("POST").header("authorization",format!("Bearer {token}")).body(Body::from("{}" )).unwrap();
         assert_eq!(handle(State(state.clone()),ConnectInfo(peer),authed()).await.status(),StatusCode::FORBIDDEN);
-        let request=axum::http::Request::builder().uri("/internal/status").header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap();
-        let response=handle(State(state.clone()),ConnectInfo(peer),request).await;
+        let response=handle(State(state.clone()),ConnectInfo(peer),signed(admin,"GET","/internal/status","")).await;
         assert_eq!(response.status(),StatusCode::OK);
         let status: glyph_server_core::admin::types::CompanionStatus=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
         assert!(!status.enabled && !status.ready,"status remains reachable while extraction is paused");
         std::fs::remove_file(&flag).unwrap();
-        assert_eq!(handle(State(state),ConnectInfo(peer),authed()).await.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),authed()).await.status(),StatusCode::BAD_REQUEST);
+        // Once every Worker signs, the plain token is refused.
+        std::env::set_var("GLYPH_COMPANION_SIGNED_ONLY","1");
+        assert_eq!(handle(State(state.clone()),ConnectInfo(peer),authed()).await.status(),StatusCode::UNAUTHORIZED);
+        assert_eq!(handle(State(state),ConnectInfo(peer),signed(token,"POST","/internal/ytdlp","{}")).await.status(),StatusCode::BAD_REQUEST);
+        std::env::remove_var("GLYPH_COMPANION_SIGNED_ONLY");
     }
 
     #[test]

@@ -38,7 +38,7 @@ native server instead, use `glyph setup` and `glyph serve`. See
 
 | Endpoint | Description |
 |---|---|
-| `GET /v1/health` | `{server_version, protocol_version, providers}` (not rate limited) |
+| `GET /v1/health` | `{server_version, protocol_version, providers, capabilities}` (not rate limited) |
 | `GET /v1/search?q=` | NDJSON stream of `SearchEvent` (`results`, `provider_error`, `done`) |
 | `POST /v1/resolve` | `ResolveRequest` -> `ResolveResponse` (ISRC first, then title+artist, duration +-3 s) |
 | `GET /v1/lyrics?title=&artist=&album=&duration=` | LRCLIB; `duration` in seconds |
@@ -143,6 +143,20 @@ the free Cache API, which is per data center. Rate limits are therefore approxim
 4. Set the Worker's secrets with `wrangler secret put YTDLP_SERVICE_URL` and
    `wrangler secret put YTDLP_SERVICE_TOKEN`. Use the HTTPS base URL of the
    companion and the same secret. Deploy the Worker after configuring both.
+5. For `glyph remote companion status|update`, generate a second, different
+   secret and set it as `COMPANION_ADMIN_TOKEN` on the companion host and the
+   Worker. Without it, management is off and the service secret cannot
+   install anything.
+
+The Worker never sends either secret: it signs each request (HMAC-SHA256 over
+method, path, timestamp and body hash, `companion_auth.rs`). The companion
+refuses changed requests, timestamps more than a minute off and signatures it
+has already seen. Older Workers' plain bearer requests are accepted for search
+and audio until `GLYPH_COMPANION_SIGNED_ONLY=1` is set on the companion; update
+the companion first, then the Worker. Optional Worker secrets
+`COMPANION_ACCESS_CLIENT_ID` and `COMPANION_ACCESS_CLIENT_SECRET` add a
+Cloudflare Access service token, so only the Worker reaches the companion's
+hostname.
 
 The app keeps the Worker's URL in `server_url`. It never receives the companion
 secret. The helper accepts only Glyph's fixed YouTube metadata/URL operations,
@@ -213,8 +227,12 @@ and HTTPS headers; for `X-Forwarded-For` it must supply the actual client IP fir
 
 Updates: `glyph-server --check-update` and `glyph update` use the GitHub releases
 of `GLYPH_SERVER_REPO` (default `glyphmusic/server`), expect the asset
-`glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus `SHA256SUMS.txt` (or a legacy `.sha256`), verify the
-checksum, and replace the running binary. No telemetry.
+`glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz` plus `SHA256SUMS.txt`
+and `SHA256SUMS.txt.minisig`, check the signature by the Glyph release key
+(`release-key.pub`, trusted comment `glyph-release repo=<repo> tag=<tag>`), then the
+checksum, and replace the running binary. Unsigned releases are refused. Release
+workflows sign with the repository secret `GLYPH_RELEASE_KEY`
+(`scripts/sign-release.sh`). No telemetry.
 
 Docker: `docker build -t glyph-server .` then
 `docker run -p 8787:8787 -e YOUTUBE_API_KEY=... glyph-server`.
@@ -246,6 +264,12 @@ Account login/registration/refresh, GET health and OPTIONS remain reachable;
 public website/share pages retain their existing behavior. Admin and companion
 endpoints keep their own authentication. The independent shared server access
 token still applies when configured. Health advertises `account_required: true`.
+
+To keep only YouTube for accounts (guests keep every other source), use
+`glyph remote limits --youtube-require-account true` or the Worker variable
+`YOUTUBE_REQUIRE_ACCOUNT="true"`. Guests then get HTTP 401 `account_required`
+on `/v1/audio/youtube/*` and `/v1/download/youtube/*`; health lists the
+capability `youtube_account_required`.
 
 ### Tests
 

@@ -7,6 +7,30 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const pkg = require('../package.json');
 const MAX = 128 * 1024 * 1024;
+// Glyph release key (minisign); the same list as glyph_protocol::release.
+const RELEASE_KEYS = ['RWQ2xWZMYa2l251YUhrekvWRC+kaD698lXz0itKGjvNYAauLRTWCzg9o'];
+const ED25519_SPKI = Buffer.from('302a300506032b6570032100','hex');
+
+// Checks a minisign signature of `data` against `keys` and the expected
+// trusted comment. Throws with a reason; returns nothing when it passes.
+function verifySignature(data, minisig, keys, comment) {
+  const lines = minisig.toString().split(/\r?\n/);
+  if (lines.length < 4 || !lines[0].startsWith('untrusted comment:') || !lines[2].startsWith('trusted comment: ')) throw new Error('Release signature cannot be read');
+  const sig = Buffer.from(lines[1],'base64');
+  const trusted = lines[2].slice('trusted comment: '.length);
+  const global = Buffer.from(lines[3],'base64');
+  if (trusted !== comment) throw new Error(`Release signature is for "${trusted}", not "${comment}"`);
+  const alg = sig.subarray(0,2).toString('latin1');
+  if (sig.length !== 74 || global.length !== 64 || (alg !== 'ED' && alg !== 'Ed')) throw new Error('Release signature cannot be read');
+  const message = alg === 'ED' ? crypto.createHash('blake2b512').update(data).digest() : data;
+  for (const k of keys) {
+    const pk = Buffer.from(k,'base64');
+    if (pk.length !== 42 || !pk.subarray(2,10).equals(sig.subarray(2,10))) continue;
+    const key = crypto.createPublicKey({key:Buffer.concat([ED25519_SPKI,pk.subarray(10)]),format:'der',type:'spki'});
+    if (crypto.verify(null,message,key,sig.subarray(10)) && crypto.verify(null,Buffer.concat([sig.subarray(10),Buffer.from(trusted)]),key,global)) return;
+  }
+  throw new Error('Checksum list is not signed by the Glyph release key; installation aborted');
+}
 
 function target(platform = process.platform, arch = process.arch) {
   const targets = { 'win32-x64': 'x86_64-pc-windows-msvc', 'linux-x64': 'x86_64-unknown-linux-gnu',
@@ -84,12 +108,13 @@ function verify(file, expected = pkg.version) {
   const result = spawnSync(file,['--version'],{encoding:'utf8',timeout:10000,windowsHide:true});
   return result.status === 0 && result.stdout.trim() === `glyph ${expected}`;
 }
-async function install() {
+async function install({keys = RELEASE_KEYS} = {}) {
   const file = executable();
   if (fs.existsSync(file) && verify(file)) return file;
   const name = `glyph-server-${pkg.version}-${target()}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`;
   const base = `https://github.com/glyphmusic/server/releases/download/v${pkg.version}`;
-  const [archive, manifest] = await Promise.all([download(`${base}/${name}`),download(`${base}/SHA256SUMS.txt`,65536)]);
+  const [archive, manifest, signature] = await Promise.all([download(`${base}/${name}`),download(`${base}/SHA256SUMS.txt`,65536),download(`${base}/SHA256SUMS.txt.minisig`,4096)]);
+  verifySignature(manifest,signature,keys,`glyph-release repo=glyphmusic/server tag=v${pkg.version}`);
   const hash = crypto.createHash('sha256').update(archive).digest('hex');
   if (hash !== checksum(manifest.toString(),name)) throw new Error('SHA-256 mismatch; installation aborted');
   const binary = unpack(archive,process.platform === 'win32',['glyph','glyph.exe','glyph-server','glyph-server.exe']);
@@ -102,4 +127,4 @@ async function install() {
   } finally { fs.rmSync(staged,{force:true}); }
   return file;
 }
-module.exports = {target,checksum,unpack,download,executable,verify,install};
+module.exports = {target,checksum,unpack,download,executable,verify,verifySignature,install,RELEASE_KEYS};

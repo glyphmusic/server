@@ -5,12 +5,18 @@
 //! scored by title, artist, duration (+-3 s) and hints such as "Official Audio"
 //! or YouTube "Topic" channels. Without a full source a Deezer 30 s preview is
 //! returned. Mappings are cached (30 days; misses for 1 hour).
+//!
+//! Every request is a claim (see [`crate::trust`]). The shared cache keeps
+//! only matches the server's own provider search made, without the fields
+//! the requesting client filled in. A match on an id the client named itself
+//! is answered to that client and never cached for others.
 
 use crate::cache::{self, DAY, HOUR};
 use crate::merge::{self, artists_match, durations_match, merge_into, normalize_title, plain_words, word_similarity};
 use crate::providers::{self, deezer, Candidate};
 use crate::search::{is_skipped, search_provider};
 use crate::traits::{with_timeout, Services};
+use crate::trust::{self, Claimed, Verified};
 use glyph_protocol::{PlaybackSource, ProviderId, ResolveRequest, ResolveResponse, Track};
 
 pub const DEFAULT_PRIORITY: [ProviderId; 4] =
@@ -96,15 +102,17 @@ fn cache_key(want: &Track, prio: &[ProviderId]) -> String {
         ),
     };
     let p: Vec<&str> = prio.iter().map(|p| p.badge()).collect();
-    format!("resolve:v3:{ident}:{}", p.join(""))
+    // v4: v3 entries could hold matches on client-named ids.
+    format!("resolve:v4:{ident}:{}", p.join(""))
 }
 
 async fn try_provider(svc: &Services, p: ProviderId, want: &Track, extended: bool) -> Option<(Track, PlaybackSource, f32)> {
     if !svc.config.provider_enabled(p) || is_skipped(svc, p).await {
         return None;
     }
-    // Already known at this provider (the track came from it, or carries its id).
-    let known = if want.source == p { Some(want.id.clone()) } else { want.external_ids.get(&p).cloned() };
+    // Already known at this provider (the track came from it, or carries its
+    // id). Unchecked: `shared_view` keeps such a match out of the cache.
+    let known = want.claimed_id(p).map(str::to_string);
     if let Some(id) = known {
         if let Ok(pb) = providers::playback_for(svc, p, &id).await {
             let mut m = want.clone();
@@ -154,12 +162,7 @@ async fn try_preview(svc: &Services, want: &Track) -> Option<(Track, PlaybackSou
     if !svc.config.provider_enabled(ProviderId::Deezer) || is_skipped(svc, ProviderId::Deezer).await {
         return None;
     }
-    let known = if want.source == ProviderId::Deezer {
-        Some(&want.id)
-    } else {
-        want.external_ids.get(&ProviderId::Deezer)
-    };
-    if let Some(id) = known {
+    if let Some(id) = want.claimed_id(ProviderId::Deezer) {
         if let Ok(c) = deezer::by_id(svc, id).await {
             if let Some(pb) = c.playback {
                 let mut m = c.track;
@@ -197,14 +200,46 @@ fn ttl(resp: &ResolveResponse) -> u64 {
     }
 }
 
-pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
+/// The requesting client's own fields on top of a shared answer.
+fn personalize(resp: &mut ResolveResponse, want: &Track) {
+    if let Some(m) = resp.matched.as_mut() {
+        merge_into(m, want);
+    }
+}
+
+/// What every client may get from `resp`: nothing when the match is an id
+/// the client named itself, otherwise the answer without the values the
+/// client's claim filled in.
+fn shared_view(resp: &ResolveResponse, want: &Track) -> Option<Verified<ResolveResponse>> {
+    let mut shared = resp.clone();
+    shared.youtube_hint = None;
+    if let Some(m) = shared.matched.as_mut() {
+        if want.names_id(m.source, &m.id) {
+            return None;
+        }
+        m.external_ids.retain(|p, id| !want.names_id(*p, id));
+        for (field, claimed) in [(&mut m.cover_url, &want.cover_url), (&mut m.permalink, &want.permalink), (&mut m.album, &want.album)] {
+            if field.is_some() && field == claimed {
+                *field = None;
+            }
+        }
+    }
+    // Checked: the match came from the server's own provider search, and
+    // the values only the client vouched for are gone.
+    Some(Verified::checked(shared))
+}
+
+pub async fn resolve(svc: &Services, req: impl Into<Claimed<ResolveRequest>>) -> ResolveResponse {
+    let claim = req.into();
+    let req = claim.get();
     let want = &req.track;
     let prio = if req.youtube_only { vec![ProviderId::YouTube] } else { effective_priority(&req.priority) };
     let key = if req.youtube_only { format!("{}:youtube-only", cache_key(want, &prio)) } else { cache_key(want, &prio) };
     // Only full sources are final mappings. A preview or an old miss must
     // retry the higher-priority providers, including on the companion.
-    if let Some(hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
+    if let Some(mut hit) = cache::get_json::<ResolveResponse>(&*svc.cache, &key).await {
         if hit.source.as_ref().is_some_and(|source| !matches!(source, PlaybackSource::Preview { .. })) {
+            personalize(&mut hit, want);
             return hit;
         }
     }
@@ -213,7 +248,7 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     // A companion timeout must not start another full resolver budget.
     let budget = if req.youtube_only { 50_000 } else { 23_000 };
     let work = async {
-        if let Some(mut remote) = svc.cmds.resolve(&req).await {
+        if let Some(mut remote) = svc.cmds.resolve(req).await {
             if req.youtube_only && !matches!(remote.source.as_ref(), Some(PlaybackSource::Stream { provider: ProviderId::YouTube, .. } | PlaybackSource::Embed { provider: ProviderId::YouTube, .. })) {
                 remote = ResolveResponse { matched: None, source: None, confidence: 0.0, youtube_hint: None };
             }
@@ -252,7 +287,9 @@ pub async fn resolve(svc: &Services, req: ResolveRequest) -> ResolveResponse {
     let resp = with_timeout(&*svc.rt, budget, work).await.unwrap_or(ResolveResponse {
         matched: None, source: None, confidence: 0.0, youtube_hint: None,
     });
-    cache::put_json(&*svc.cache, &key, &resp, ttl(&resp)).await;
+    if let Some(shared) = shared_view(&resp, want) {
+        trust::put_shared(&*svc.cache, &key, &shared, ttl(shared.get())).await;
+    }
     resp
 }
 
@@ -498,6 +535,56 @@ mod tests {
         let m = r.matched.unwrap();
         assert_eq!((m.source, m.id.as_str(), r.confidence), (Audius, "known", 1.0));
         assert!(h.http.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn client_named_ids_never_reach_other_clients() {
+        let h = setup();
+        h.http.on("audius.co/v1/tracks/search", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        let mut evil = want();
+        evil.external_ids.insert(Audius, "attacker".into());
+        evil.cover_url = Some("https://i.ytimg.com/vi/attacker/hqdefault.jpg".into());
+        evil.permalink = Some("https://audius.co/attacker/track".into());
+        let own = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: evil, priority: vec![] }));
+        assert_eq!(own.matched.unwrap().id, "attacker", "the claiming client still gets its own id");
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
+        let m = r.matched.unwrap();
+        assert_eq!((m.source, m.id.as_str()), (Audius, "au1"));
+        assert_eq!(m.cover_url, None);
+        assert_eq!(m.permalink, None);
+        assert!(!m.external_ids.values().any(|id| id == "attacker"));
+    }
+
+    #[test]
+    fn shared_answers_carry_no_client_fields() {
+        let h = setup();
+        h.http.on("audius.co/v1/tracks/search", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        let mut first = want();
+        first.album = Some("Fake Album".into());
+        first.cover_url = Some("https://i.ytimg.com/vi/first/hqdefault.jpg".into());
+        first.external_ids.insert(YouTube, "firstclient".into());
+        let r1 = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: first, priority: vec![] }));
+        let m1 = r1.matched.unwrap();
+        assert_eq!(m1.album.as_deref(), Some("Fake Album"), "the requester sees its own fields");
+        assert_eq!(m1.external_ids.get(&YouTube).map(String::as_str), Some("firstclient"));
+        let calls = h.http.call_count("audius.co");
+        let r2 = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: want(), priority: vec![] }));
+        assert_eq!(h.http.call_count("audius.co"), calls, "second resolve must hit the cache");
+        let m2 = r2.matched.unwrap();
+        assert_eq!(m2.id, "au1");
+        assert_eq!((m2.album, m2.cover_url), (None, None));
+        assert_eq!(m2.external_ids.get(&YouTube), None);
+        assert_eq!(m2.external_ids.get(&Spotify).map(String::as_str), Some("sp1"), "the second client's own id is merged in");
+    }
+
+    #[test]
+    fn malformed_claimed_ids_fall_back_to_search() {
+        let h = setup();
+        h.http.on("audius.co/v1/tracks/search", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        let mut w = want();
+        w.external_ids.insert(Audius, "../users/1".into());
+        let r = block_on(resolve(&h.svc, ResolveRequest { youtube_only: false, track: w, priority: vec![] }));
+        assert_eq!(r.matched.unwrap().id, "au1");
     }
 
     #[test]

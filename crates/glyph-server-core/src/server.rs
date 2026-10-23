@@ -352,6 +352,11 @@ impl Server {
             }
             return Err(ApiErr::new(401, "account_required", "sign in to a Glyph account to use this server"));
         }
+        // YouTube audio runs through the operator's companion and connection;
+        // the operator may keep it for accounts, which carry quotas and bans.
+        if self.services().config.youtube_require_account && youtube_media(path) && !member {
+            return Err(ApiErr::new(401, "account_required", "sign in to a Glyph account to play YouTube songs on this server"));
+        }
         Ok(member)
     }
 
@@ -364,11 +369,16 @@ fn banned(ban: &crate::bans::Ban, now: u64) -> ApiErr {
     e
 }
 
+/// YouTube audio or download streams (companion work).
+fn youtube_media(path: &str) -> bool {
+    path.starts_with("/v1/audio/youtube/") || path.starts_with("/v1/download/youtube/")
+}
+
 /// `youtube_per_day`: YouTube songs per account or address and day.
 async fn youtube_quota(svc: &Services, req: &Request, who: &str) -> Result<(), ApiErr> {
     let n = svc.config.youtube_per_day;
     let path = req.path.as_str();
-    if n == 0 || !(path.starts_with("/v1/audio/youtube/") || path.starts_with("/v1/download/youtube/")) {
+    if n == 0 || !youtube_media(path) {
         return Ok(());
     }
     // Range requests of one song reuse its key, so a song counts once.
@@ -396,9 +406,11 @@ async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<
     Ok(())
 }
 
-/// Cover art for `track`: its own, else Deezer by ISRC, else a Deezer search hit.
+/// Cover art for `track`: its own when it is on a known cover host, else
+/// Deezer by ISRC, else a Deezer search hit. Callers redirect to the answer,
+/// so a client-chosen URL elsewhere is never returned (no open redirect).
 pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option<String> {
-    if let Some(c) = track.cover_url.clone().filter(|u| !u.is_empty()) {
+    if let Some(c) = track.cover_url.clone().filter(|u| glyph_protocol::cover_cache_allowed(u)) {
         return Some(c);
     }
     if let Some(isrc) = track.isrc.as_deref() {
@@ -414,12 +426,33 @@ pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option
         .and_then(|c| c.track.cover_url)
 }
 
+/// What `/v1/health` advertises (see `glyph_protocol::capability`).
+fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
+    use glyph_protocol::capability::*;
+    let youtube = svc.config.proxy_audio && svc.config.enabled_providers().contains(&ProviderId::YouTube);
+    [
+        (accounts, ACCOUNTS),
+        (covers, COVERS),
+        (accounts, JAM),
+        (accounts, SHARE),
+        (accounts && svc.config.mcp_relay, MCP_RELAY),
+        (youtube, YOUTUBE_AUDIO),
+        (youtube && svc.config.youtube_require_account, YOUTUBE_ACCOUNT_REQUIRED),
+        (true, YOUTUBE_HINTS),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, name)| name.to_string())
+    .collect()
+}
+
 async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
     {
         match route {
             Route::Health => Ok(Response::json(
                 200,
                 &HealthResponse {
+                    capabilities: capabilities(svc, accounts, covers),
                     playlist_max_tracks: svc.config.playlist_max_tracks,
                     server_auth_required: svc.config.server_bearer_hash.is_some(),
                     account_required: svc.config.require_account,
@@ -442,11 +475,11 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 })
             }
             Route::Resolve => {
-                let r: ResolveRequest = parse_body(&req)?;
-                if r.track.title.trim().is_empty() || r.track.artist.trim().is_empty() {
+                let r: crate::trust::Claimed<ResolveRequest> = parse_body::<ResolveRequest>(&req)?.into();
+                if r.get().track.title.trim().is_empty() || r.get().track.artist.trim().is_empty() {
                     return Err(ApiErr::bad_request("track.title and track.artist are required"));
                 }
-                let wanted = r.track.clone();
+                let wanted = r.get().track.clone();
                 let mut resolved = resolver::resolve(svc, r).await;
                 if svc.config.proxy_audio { crate::media::proxy_playback(&mut resolved); }
                 // Not part of the cached answer: hints change independently.
@@ -454,6 +487,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 Ok(Response::json(200, &resolved))
             }
             Route::YouTubeHint => {
+                // A malformed video id fails here, before any lookup.
                 let r: glyph_protocol::YouTubeHintRequest = parse_body(&req)?;
                 let voter = req
                     .header(INSTALL_ID_HEADER)
@@ -464,8 +498,8 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 Ok(Response::json(200, &crate::hints::report(svc, &voter, r).await?))
             }
             Route::Cover => {
-                let track: glyph_protocol::Track = parse_body(&req)?;
-                let cover = find_cover(svc, &track).await;
+                let track: crate::trust::Claimed<glyph_protocol::Track> = parse_body::<glyph_protocol::Track>(&req)?.into();
+                let cover = find_cover(svc, track.get()).await;
                 Ok(Response::json(200, &serde_json::json!({ "url": cover })))
             }
             Route::Download => {
@@ -479,8 +513,9 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 if request.track.title.trim().is_empty() || request.track.artist.trim().is_empty() {
                     return Err(ApiErr::bad_request("track.title and track.artist are required"));
                 }
-                let youtube_only = request.youtube_only;
-                let track = request.track.clone();
+                let request: crate::trust::Claimed<ResolveRequest> = request.into();
+                let youtube_only = request.get().youtube_only;
+                let track = request.get().track.clone();
                 let resolved = resolver::resolve(svc, request).await;
                 if matches!(resolved.source.as_ref(), Some(glyph_protocol::PlaybackSource::Embed { provider: ProviderId::YouTube, .. } | glyph_protocol::PlaybackSource::Stream { provider: ProviderId::YouTube, .. })) {
                     if let Some(matched) = &resolved.matched {
@@ -639,6 +674,26 @@ mod tests {
 
     fn json_of(r: &Response) -> serde_json::Value {
         serde_json::from_slice(r.bytes().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn covers_never_come_from_unknown_hosts() {
+        let h = harness(Default::default());
+        h.http.on("api.deezer.com/search", 200, r#"{"data":[{"id":1,"title":"Song","duration":200,"artist":{"name":"Artist"},"album":{"title":"A","cover_big":"https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"}}]}"#);
+        let mut t = track("1", ProviderId::Audius, "Song", "Artist", 200);
+        t.cover_url = Some("https://evil.example/landing".into());
+        let cover = block_on(find_cover(&h.svc, &t));
+        assert_ne!(cover.as_deref(), Some("https://evil.example/landing"));
+        t.cover_url = Some("https://i.ytimg.com/vi/x/hqdefault.jpg".into());
+        assert_eq!(block_on(find_cover(&h.svc, &t)).as_deref(), Some("https://i.ytimg.com/vi/x/hqdefault.jpg"));
+    }
+
+    #[test]
+    fn health_advertises_capabilities() {
+        let h = harness(Default::default());
+        let hr: HealthResponse = serde_json::from_slice(block_on(server(&h).handle(get("/v1/health"))).bytes().unwrap()).unwrap();
+        assert!(hr.supports(glyph_protocol::capability::YOUTUBE_HINTS));
+        assert!(!hr.supports(glyph_protocol::capability::ACCOUNTS));
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! `--check-update` / `self-update` against GitHub releases of the server repo.
-//! Asset: `glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz`, plus a
-//! `.sha256` file. The archive must contain the `glyph-server[.exe]` binary.
+//! Asset: `glyph-server-{version}-{target}.zip` (Windows) or `.tar.gz`, plus
+//! `SHA256SUMS.txt` and its signature `SHA256SUMS.txt.minisig`. A checksum is
+//! used only after the signature by the Glyph release key for this repository
+//! and tag passed (`glyph_protocol::release`); r-dlp updates likewise. The
+//! archive must contain the `glyph-server[.exe]` binary.
 
 use glyph_server_core::admin::types::{UpdateApplyResponse, UpdateInfo};
 use semver::Version;
@@ -122,6 +125,20 @@ async fn download(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// The checksum list of `release`, after its signature by the Glyph release
+/// key for `repo` and the release's tag passed.
+async fn signed_sums(release: &Release, repo: &str) -> Result<String, String> {
+    use glyph_protocol::release::{CHECKSUM_ASSET, SIGNATURE_ASSET};
+    let find = |n: &str| release.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
+    let sums_url = find(CHECKSUM_ASSET).ok_or("release has no SHA256SUMS.txt; refusing to install unverified code")?;
+    let sig_url = find(SIGNATURE_ASSET).ok_or("release is not signed; refusing to install unverified code")?;
+    let sums = download(&sums_url).await?;
+    let sig = download(&sig_url).await?;
+    glyph_protocol::release::verify_checksums(&sums, &String::from_utf8_lossy(&sig), repo, &release.tag_name)
+        .map_err(|e| format!("{e}; update aborted"))?;
+    Ok(String::from_utf8_lossy(&sums).into_owned())
+}
+
 pub fn extract_binary(archive: &[u8], is_zip: bool) -> Result<Vec<u8>, String> {
     extract_named(archive,is_zip,&[BIN,"glyph","glyph.exe"])
 }
@@ -150,7 +167,7 @@ fn extract_named(archive: &[u8], is_zip: bool, names: &[&str]) -> Result<Vec<u8>
     Err(format!("`{BIN}` not found in the archive"))
 }
 
-/// Download, verify (SHA-256) and install the latest release over the running binary.
+/// Download, verify (signature, SHA-256) and install the latest release over the running binary.
 pub async fn apply(repo: &str) -> Result<UpdateApplyResponse, String> {
     if std::path::Path::new("/.dockerenv").exists() {
         return Err("Container-managed companion: on its Docker host run `glyph update companion --compose-dir /path/to/compose-project` to pull, recreate and verify the image".into());
@@ -170,11 +187,10 @@ pub async fn apply(repo: &str) -> Result<UpdateApplyResponse, String> {
     let name = archive_name(&remote, TARGET);
     let find = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
     let url = find(&name).ok_or_else(|| format!("release {remote} has no asset `{name}` for this platform"))?;
-    let sum_url = find("SHA256SUMS.txt").or_else(|| find(&format!("{name}.sha256")))
-        .ok_or_else(|| format!("release {remote} has no `{name}.sha256`; refusing to install unverified code"))?;
+    let sums = signed_sums(&rel, repo).await?;
 
     let archive = download(&url).await?;
-    let expected = checksum_for_asset(&String::from_utf8_lossy(&download(&sum_url).await?), &name)
+    let expected = checksum_for_asset(&sums, &name)
         .ok_or("checksum manifest has no valid, unique entry for this archive")?;
     if sha256_hex(&archive) != expected {
         return Err("SHA-256 mismatch; aborting update".into());
@@ -220,8 +236,8 @@ pub async fn install_rdlp(program: &str, expected: &str) -> Result<(),String> {
     let name=format!("r-dlp-{expected}-{TARGET}.{}",if cfg!(windows){"zip"}else{"tar.gz"});
     let asset=|name:&str| release.assets.iter().find(|a|a.name==name).map(|a|a.browser_download_url.clone());
     let bytes=download(&asset(&name).ok_or("r-dlp has no release binary for this platform")?).await?;
-    let sums=download(&asset("SHA256SUMS.txt").ok_or("r-dlp release has no checksum manifest")?).await?;
-    let hash=checksum_for_asset(&String::from_utf8_lossy(&sums),&name).ok_or("r-dlp checksum missing or ambiguous")?;
+    let sums=signed_sums(&release,"glyphmusic/r-dlp").await?;
+    let hash=checksum_for_asset(&sums,&name).ok_or("r-dlp checksum missing or ambiguous")?;
     if sha256_hex(&bytes)!=hash {return Err("r-dlp SHA-256 mismatch; update aborted".into());}
     let binary=extract_named(&bytes,cfg!(windows),&["r-dlp","r-dlp.exe"])?;
     let dir=tempfile::Builder::new().prefix(".glyph-rdlp-").tempdir_in(destination.parent().ok_or("r-dlp path has no parent")?).map_err(|e|e.to_string())?;
@@ -254,6 +270,12 @@ mod tests {
         assert_eq!(archive_name(&v, "x86_64-pc-windows-msvc"), "glyph-server-0.2.0-x86_64-pc-windows-msvc.zip");
         assert_eq!(archive_name(&v, "aarch64-apple-darwin"), "glyph-server-0.2.0-aarch64-apple-darwin.tar.gz");
         assert!(parse_version("v0.10.0") > parse_version("v0.9.9"));
+    }
+
+    #[test]
+    fn release_key_matches_the_published_file() {
+        let file = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../release-key.pub")).unwrap();
+        assert_eq!(glyph_protocol::release::PUBLIC_KEYS, [file.lines().nth(1).unwrap()]);
     }
 
     #[test]
