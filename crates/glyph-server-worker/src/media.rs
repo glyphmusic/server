@@ -274,12 +274,11 @@ pub async fn handle(
     let upstream = if let Some(hit) = cached_upstream.take() {
         hit
     } else if companion {
-        let Some(token) = super::secret(env, "YTDLP_SERVICE_TOKEN").filter(|t| t.len() >= 32)
+        let Some(creds) = super::CompanionCreds::from_env(env, glyph_server_core::companion_auth::Role::Service)
         else {
             return Response::error("yt-dlp companion not configured", 503);
         };
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {token}"))?;
+        let headers = creds.headers("GET", url.as_str(), b"")?;
         if let Some((_,quality))=&variant {
             // High is the original best source, as on the standalone server.
             // Do not wait for an entire download and remux before sending its

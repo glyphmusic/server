@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 glyph-server-core.workspace = true
-glyph-protocol.workspace = true
+glyph-protocol = { workspace = true, features = ["release-verify"] }
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

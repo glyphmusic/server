@@ -38,3 +38,15 @@ jobs:
       - name: Check worker for wasm32
         working-directory: glyph-server
         run: cargo check -p glyph-server-worker --target wasm32-unknown-unknown
+
+  protocol-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Snapshot matches the recorded apps commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-protocol.mjs

@@ -86,6 +86,9 @@ pub enum RemoteCmd {
         /// YouTube songs per account (or address, for guests) and day; 0 = no limit
         #[arg(long)]
         youtube_per_day: Option<u32>,
+        /// YouTube audio and downloads only for signed-in accounts (true/false; Worker)
+        #[arg(long)]
+        youtube_require_account: Option<bool>,
         /// Max pages per playlist import
         #[arg(long)]
         import_pages: Option<u32>,
@@ -643,7 +646,7 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb } => {
+        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, youtube_require_account, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb } => {
             let c = Client::connect(a.server).await?;
             let old: Limits = c.get("limits").await?;
             let mut l = old.clone();
@@ -651,6 +654,7 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             if let Some(v) = rate { l.rate_limit_per_min = v; }
             if let Some(v) = youtube_budget { l.youtube_daily_budget_units = v; }
             if let Some(v) = youtube_per_day { l.youtube_per_day = v; }
+            if let Some(v) = youtube_require_account { l.youtube_require_account = v; }
             if let Some(v) = import_pages { l.import_max_pages = v; }
             if let Some(v) = playlist_max_tracks { l.playlist_max_tracks = v; }
             if let Some(v) = audio_days { l.audio_cache_days = v; }
@@ -909,6 +913,7 @@ fn print_limits(l: &Limits) {
     println!("Requests per minute per client  {}", l.rate_limit_per_min);
     println!("YouTube units per day           {}", l.youtube_daily_budget_units);
     println!("YouTube songs per user and day  {}", if l.youtube_per_day == 0 { "no limit".to_string() } else { l.youtube_per_day.to_string() });
+    println!("YouTube only for accounts       {}", l.youtube_require_account);
     println!("Songs per playlist              {}", l.playlist_max_tracks);
     println!("Pages per playlist import       {}", l.import_max_pages);
     println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });

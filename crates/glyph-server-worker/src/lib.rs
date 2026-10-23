@@ -21,6 +21,7 @@ use glyph_server_core::admin::host::{AdminHost, HostError};
 use glyph_server_core::admin::types::{Capabilities, Limits};
 use glyph_server_core::bans::BanList;
 use glyph_server_core::cache::{MinTtlCache, TieredCache};
+use glyph_server_core::companion_auth::{self, Role};
 use glyph_server_core::{
     Body, Cache, Config, HttpClient, HttpError, HttpRequest, HttpResponse, Method, NoCommands, Runtime,
     Secrets, Server, Services,
@@ -218,6 +219,7 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
         config.youtube_daily_budget_units = n;
     }
     config.require_account = secret(env, "REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
+    config.youtube_require_account = secret(env, "YOUTUBE_REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
     // Limits saved with `glyph-server remote limits` win over wrangler.toml.
     if let Some(l) = &saved {
         config.require_account = l.require_account;
@@ -231,15 +233,16 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
         config.audio_cache_max_gb = l.audio_cache_max_gb;
         config.d1_max_mb = l.d1_max_mb;
         config.youtube_per_day = l.youtube_per_day;
+        config.youtube_require_account = l.youtube_require_account;
     }
     config.bans = bans;
-    let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), secret(env, "YTDLP_SERVICE_TOKEN")) {
+    let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), CompanionCreds::from_env(env, Role::Service)) {
         // `remote companion off`: YouTube search is off, audio answers 403.
         _ if !config.companion_enabled => Arc::new(NoCommands),
-        (Some(url), Some(token)) if url.starts_with("https://") && token.len() >= 32 => {
+        (Some(url), Some(creds)) if url.starts_with("https://") => {
             config.ytdlp_path = Some("remote".into());
             // Remote extraction includes the network round trip and metadata lookup.
-            Arc::new(RemoteCommands { url, token })
+            Arc::new(RemoteCommands { url, creds })
         }
         _ => Arc::new(NoCommands),
     };
@@ -252,7 +255,7 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
     // Bans and exact limits in D1 (requires 0009); per-request quotas in the Cache API.
     let api_cache = api.clone();
     let limiter = Arc::new(abuse::D1Limiter { db: env.d1("GLYPH_DB").ok(), rt: rt.clone(), admin: Arc::new(glyph_server_core::ratelimit::CacheRateLimiter::new(api.clone(), rt.clone())) });
-    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_token:secret(env,"YTDLP_SERVICE_TOKEN"), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_admin:CompanionCreds::from_env(env, Role::Admin), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
@@ -268,25 +271,54 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
     }
 }
 
-struct RemoteCommands { url: String, token: String }
+/// Secret for one companion role, plus the optional Cloudflare Access
+/// service token that lets requests through to the companion's hostname.
+#[derive(Clone)]
+pub(crate) struct CompanionCreds {
+    secret: String,
+    access: Option<(String, String)>,
+}
+
+impl CompanionCreds {
+    /// `YTDLP_SERVICE_TOKEN` (search, resolve, audio) or `COMPANION_ADMIN_TOKEN`
+    /// (status, updates); `COMPANION_ACCESS_CLIENT_ID`/`_SECRET` when set.
+    pub(crate) fn from_env(env: &Env, role: Role) -> Option<Self> {
+        let var = match role { Role::Service => "YTDLP_SERVICE_TOKEN", Role::Admin => "COMPANION_ADMIN_TOKEN" };
+        let value = secret(env, var).filter(|t| t.len() >= companion_auth::MIN_TOKEN_LEN)?;
+        let access = secret(env, "COMPANION_ACCESS_CLIENT_ID").zip(secret(env, "COMPANION_ACCESS_CLIENT_SECRET"));
+        Some(Self { secret: value, access })
+    }
+
+    /// Headers for one request: a signature instead of the secret itself.
+    pub(crate) fn headers(&self, method: &str, url: &str, body: &[u8]) -> Result<Headers> {
+        let parsed = worker::Url::parse(url)?;
+        let target = match parsed.query() { Some(q) => format!("{}?{q}", parsed.path()), None => parsed.path().to_string() };
+        let headers = Headers::new();
+        for (name, value) in companion_auth::sign(&self.secret, method, &target, body, worker::js_sys::Date::now() as u64) {
+            headers.set(name, &value)?;
+        }
+        if let Some((id, value)) = &self.access {
+            headers.set(companion_auth::ACCESS_ID_HEADER, id)?;
+            headers.set(companion_auth::ACCESS_SECRET_HEADER, value)?;
+        }
+        Ok(headers)
+    }
+}
+
+struct RemoteCommands { url: String, creds: CompanionCreds }
 #[async_trait(?Send)]
 impl glyph_server_core::CommandRunner for RemoteCommands {
     async fn run(&self, _program: &str, args: &[String], _timeout_ms: u64) -> std::result::Result<Vec<u8>, glyph_server_core::CommandError> {
         use glyph_server_core::{media::{CommandRequest, CommandResponse, valid_command}, CommandError};
         if !valid_command(args) { return Err(CommandError::Failed); }
         let body = serde_json::to_vec(&CommandRequest { args: args.to_vec() }).map_err(|_| CommandError::Failed)?;
-        let req = HttpRequest {
-            method: Method::Post,
-            url: format!("{}/internal/ytdlp", self.url.trim_end_matches('/')),
-            headers: vec![("authorization".into(), format!("Bearer {}", self.token)), ("content-type".into(), "application/json".into())],
-            body: Some(body),
-        };
-        let headers = Headers::new();
-        for (k,v) in &req.headers { headers.set(k,v).map_err(|_| CommandError::Failed)?; }
+        let url = format!("{}/internal/ytdlp", self.url.trim_end_matches('/'));
+        let headers = self.creds.headers("POST", &url, &body).map_err(|_| CommandError::Failed)?;
+        headers.set("content-type", "application/json").map_err(|_| CommandError::Failed)?;
         let mut init = RequestInit::new();
         init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
-            .with_body(Some(worker::js_sys::Uint8Array::from(req.body.as_deref().unwrap_or_default()).into()));
-        let request = worker::Request::new_with_init(&req.url, &init).map_err(|_| CommandError::Failed)?;
+            .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+        let request = worker::Request::new_with_init(&url, &init).map_err(|_| CommandError::Failed)?;
         let mut resp = Fetch::Request(request).send().await.map_err(|_| CommandError::Failed)?;
         if resp.status_code() != 200 { return Err(CommandError::Failed); }
         let bytes = resp.bytes().await.map_err(|_| CommandError::Failed)?;
@@ -298,13 +330,12 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
     /// JSON answer is parsed. Busy or offline: `None`, the Worker resolves itself.
     async fn resolve(&self, req: &glyph_protocol::ResolveRequest) -> Option<glyph_protocol::ResolveResponse> {
         let body = serde_json::to_vec(req).ok()?;
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
+        let url = format!("{}/internal/resolve", self.url.trim_end_matches('/'));
+        let headers = self.creds.headers("POST", &url, &body).ok()?;
         headers.set("content-type", "application/json").ok()?;
         let mut init = RequestInit::new();
         init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
             .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
-        let url = format!("{}/internal/resolve", self.url.trim_end_matches('/'));
         let request = worker::Request::new_with_init(&url, &init).ok()?;
         let work = async {
             let mut resp = Fetch::Request(request).send().await.ok()?;
@@ -316,14 +347,13 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
 
     async fn import_page(&self, req: &glyph_server_core::import::PageRequest) -> Option<Result<glyph_server_core::import::PageResponse, glyph_server_core::ApiErr>> {
         let work = async {
-            let headers = Headers::new();
-            headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
-            headers.set("content-type", "application/json").ok()?;
             let body = serde_json::to_vec(req).ok()?;
+            let url = format!("{}/internal/import", self.url.trim_end_matches('/'));
+            let headers = self.creds.headers("POST", &url, &body).ok()?;
+            headers.set("content-type", "application/json").ok()?;
             let mut init = RequestInit::new();
             init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
                 .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
-            let url = format!("{}/internal/import", self.url.trim_end_matches('/'));
             let request = worker::Request::new_with_init(&url, &init).ok()?;
             let mut resp = Fetch::Request(request).send().await.ok()?;
             let status = resp.status_code();
@@ -345,13 +375,12 @@ impl glyph_server_core::CommandRunner for RemoteCommands {
     async fn lyrics(&self, query: &glyph_server_core::LyricsQuery) -> Option<glyph_server_core::LyricsLookup> {
         use glyph_server_core::LyricsLookup;
         let body = serde_json::to_vec(query).ok()?;
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {}", self.token)).ok()?;
+        let url = format!("{}/internal/lyrics", self.url.trim_end_matches('/'));
+        let headers = self.creds.headers("POST", &url, &body).ok()?;
         headers.set("content-type", "application/json").ok()?;
         let mut init = RequestInit::new();
         init.with_method(worker::Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual)
             .with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
-        let url = format!("{}/internal/lyrics", self.url.trim_end_matches('/'));
         let request = worker::Request::new_with_init(&url, &init).ok()?;
         let work = async {
             let mut resp = Fetch::Request(request).send().await.ok()?;
@@ -374,23 +403,24 @@ struct WorkerHost {
     cache: Arc<dyn Cache>,
     bucket: Option<worker::Bucket>,
     companion_url: Option<String>,
-    companion_token: Option<String>,
+    /// `COMPANION_ADMIN_TOKEN`: status and updates only.
+    companion_admin: Option<CompanionCreds>,
 }
 
 impl WorkerHost {
     async fn companion_call<T: serde::de::DeserializeOwned>(&self, path: &str, post: bool) -> std::result::Result<T,HostError> {
         let base=self.companion_url.as_deref().filter(|s|s.starts_with("https://")).ok_or_else(||HostError::Unsupported("companion URL is not configured".into()))?;
-        let token=self.companion_token.as_deref().filter(|s|s.len()>=32).ok_or_else(||HostError::Unsupported("companion token is not configured".into()))?;
+        let creds=self.companion_admin.as_ref().ok_or_else(||HostError::Unsupported("companion management needs the COMPANION_ADMIN_TOKEN secret on the Worker and the companion".into()))?;
         let work=async {
-            let headers=worker::Headers::new();
-            headers.set("authorization",&format!("Bearer {token}"))?;
+            let url=format!("{}{path}",base.trim_end_matches('/'));
+            let headers=creds.headers(if post {"POST"} else {"GET"},&url,b"")?;
             let mut init=worker::RequestInit::new();
             init.with_method(if post {worker::Method::Post}else{worker::Method::Get}).with_headers(headers).with_redirect(worker::RequestRedirect::Manual);
-            let mut response=worker::Fetch::Request(worker::Request::new_with_init(&format!("{}{path}",base.trim_end_matches('/')),&init)?).send().await?;
+            let mut response=worker::Fetch::Request(worker::Request::new_with_init(&url,&init)?).send().await?;
             if response.status_code()!=200 {
                 let status=response.status_code();
-                if status==404 {return Err(worker::Error::RustError("companion management unavailable; update an older companion image first".into()));}
-                let detail=response.text().await.unwrap_or_default().replace(token,"[redacted]").chars().take(512).collect::<String>();
+                if status==404 {return Err(worker::Error::RustError("companion management is off: set COMPANION_ADMIN_TOKEN on the companion (and update an older image)".into()));}
+                let detail=response.text().await.unwrap_or_default().replace(&creds.secret,"[redacted]").chars().take(512).collect::<String>();
                 return Err(worker::Error::RustError(format!("companion management HTTP {status}: {detail}")));
             }
             response.json::<T>().await
@@ -433,6 +463,9 @@ async fn saved_limits(env: &Env) -> Option<Limits> {
                 let object = value.as_object_mut()?;
                 if !object.contains_key("require_account") {
                     object.insert("require_account".into(),secret(env, "REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")).into());
+                }
+                if !object.contains_key("youtube_require_account") {
+                    object.insert("youtube_require_account".into(),secret(env, "YOUTUBE_REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")).into());
                 }
                 serde_json::from_value::<Limits>(value).ok()
             })();

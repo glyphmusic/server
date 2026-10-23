@@ -114,6 +114,7 @@ const VARS={
   RATE_LIMIT_PER_MIN:{help:'anonymous requests per minute and IP (default 60)',check:v=>/^\d{1,6}$/.test(v)},
   YOUTUBE_DAILY_BUDGET_UNITS:{help:'YouTube Data API units per day (default 9000)',check:v=>/^\d{1,9}$/.test(v)},
   REQUIRE_ACCOUNT:{help:'true = only signed-in apps may use the API',check:v=>/^(true|false)$/.test(v)},
+  YOUTUBE_REQUIRE_ACCOUNT:{help:'true = YouTube audio and downloads only for signed-in accounts',check:v=>/^(true|false)$/.test(v)},
   PUBLIC_ORIGIN:{help:'HTTPS origin of this Worker; accounts and passkeys are bound to it',check:v=>httpsOrigin(v)},
   SHARE_ORIGIN:{help:'origin of short /p/ links (its domain must route /p/* here)',check:v=>httpsOrigin(v)},
   YTDLP_SERVICE_URL:{help:'HTTPS URL of your companion (YouTube); pair with secret YTDLP_SERVICE_TOKEN',check:v=>httpsOrigin(v)},
@@ -126,7 +127,10 @@ const SECRETS={
   SPOTIFY_CLIENT_ID:'Spotify client ID (playlist import)',
   SPOTIFY_CLIENT_SECRET:'Spotify client secret',
   LASTFM_API_KEY:'Last.fm API key (radio, similar artists)',
-  YTDLP_SERVICE_TOKEN:'companion token, 32+ characters',
+  YTDLP_SERVICE_TOKEN:'companion token for search and audio, 32+ characters (the Worker signs requests with it)',
+  COMPANION_ADMIN_TOKEN:'second companion token for status and updates, 32+ characters',
+  COMPANION_ACCESS_CLIENT_ID:'Cloudflare Access service token ID in front of the companion (optional)',
+  COMPANION_ACCESS_CLIENT_SECRET:'Cloudflare Access service token secret (optional)',
   GLYPH_SERVER_BEARER:'shared bearer every app must send (private server)',
 };
 function httpsOrigin(v) {

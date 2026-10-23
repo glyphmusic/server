@@ -125,6 +125,7 @@ fn limits_of(svc: &Services) -> Limits {
         audio_cache_max_gb: svc.config.audio_cache_max_gb,
         d1_max_mb: svc.config.d1_max_mb,
         youtube_per_day: svc.config.youtube_per_day,
+        youtube_require_account: svc.config.youtube_require_account,
     }
 }
 
@@ -270,8 +271,12 @@ impl Server {
                 let body: serde_json::Value = parse_body(&req)?;
                 if body.get("require_account").is_none() { l.require_account = svc.config.require_account; }
                 if body.get("playlist_max_tracks").is_none() { l.playlist_max_tracks = svc.config.playlist_max_tracks; }
+                if body.get("youtube_require_account").is_none() { l.youtube_require_account = svc.config.youtube_require_account; }
                 if l.require_account && self.accounts.is_none() {
                     return Err(ApiErr::bad_request("require_account needs an enabled account backend"));
+                }
+                if l.youtube_require_account && self.accounts.is_none() {
+                    return Err(ApiErr::bad_request("youtube_require_account needs an enabled account backend"));
                 }
                 if !(1..=10_000).contains(&l.rate_limit_per_min) {
                     return Err(ApiErr::bad_request("rate_limit_per_min must be between 1 and 10000"));
@@ -310,6 +315,7 @@ impl Server {
                     c.audio_cache_max_gb = l.audio_cache_max_gb;
                     c.d1_max_mb = l.d1_max_mb;
                     c.youtube_per_day = l.youtube_per_day;
+                    c.youtube_require_account = l.youtube_require_account;
                 });
                 Ok(Response::json(200, &l))
             }

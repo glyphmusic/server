@@ -23,6 +23,9 @@ const REFRESH_TTL_MCP: u64 = 365 * DAY;
 const CLIENT_TTL: u64 = 365 * DAY;
 /// Calls nobody picked up are dropped after this.
 const CALL_TTL: u64 = 2 * MIN;
+/// How long `tools/list` waits for the app's allowed tools before it lists
+/// all of them (the app still refuses the ones its user turned off).
+const LIST_TIMEOUT_MS: u64 = 3_000;
 const POLL_MS: u64 = 400;
 
 const CLIENTS: &str = "_mcp_client";
@@ -388,6 +391,14 @@ impl Accounts {
         let method = m["method"].as_str().unwrap_or("");
         let ok = |result: serde_json::Value| serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
         let err = |code: i64, message: String| serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } });
+        // The user's app decides which tools its assistants may use
+        // (Settings › AI assistants); list only those when it answers.
+        if method == "tools/list" {
+            let answer = self.relay(svc, user_id, glyph_protocol::mcp::LIST_TOOLS, serde_json::json!({}), LIST_TIMEOUT_MS).await?;
+            if let Some(tools) = answer.as_ref().and_then(glyph_protocol::mcp::listed_tools) {
+                return Ok(Some(ok(serde_json::json!({ "tools": tools }))));
+            }
+        }
         if let Some(r) = glyph_protocol::mcp::handle_meta(method, "glyph-server", &svc.config.server_version) {
             return Ok(Some(match r {
                 Ok(v) => ok(v),
@@ -401,27 +412,36 @@ impl Accounts {
         if !glyph_protocol::mcp::tools().iter().any(|t| t["name"] == name.as_str()) {
             return Ok(Some(err(-32602, format!("unknown tool: {name}"))));
         }
+        let arguments = m["params"].get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        Ok(Some(ok(match self.relay(svc, user_id, &name, arguments, glyph_protocol::mcp::CALL_TIMEOUT_MS).await? {
+            Some(v) => v,
+            None => glyph_protocol::mcp::text_result(
+                &"Glyph did not answer. Open the app on a device signed in to this account and turn on Settings › Integrations › AI assistants (MCP) › Through the server.".into(),
+                true,
+            ),
+        })))
+    }
+
+    /// Queues one call for the user's app and waits up to `timeout_ms` for
+    /// its answer. `None`: nobody answered; the call is taken back so it does
+    /// not run late.
+    async fn relay(&self, svc: &Services, user_id: &str, name: &str, arguments: serde_json::Value, timeout_ms: u64) -> Result<Option<serde_json::Value>, ApiErr> {
         let call_id = self.random_hex(12);
-        let call = glyph_protocol::mcp::Call { id: call_id.clone(), name, arguments: m["params"].get("arguments").cloned().unwrap_or(serde_json::json!({})) };
+        let call = glyph_protocol::mcp::Call { id: call_id.clone(), name: name.to_string(), arguments };
         let now = svc.rt.now_ms();
         self.store.mcp_put(user_id, &format!("call:{call_id}"), &serde_json::to_string(&call).unwrap_or_default(), now + CALL_TTL).await.map_err(store_err)?;
-        let deadline = now + glyph_protocol::mcp::CALL_TIMEOUT_MS;
+        let deadline = now + timeout_ms;
         let key = format!("result:{call_id}");
         loop {
             svc.rt.sleep(POLL_MS).await;
             let t = svc.rt.now_ms();
             if let Some(r) = self.store.mcp_get(user_id, &key, t).await.map_err(store_err)? {
                 let _ = self.store.mcp_delete(user_id, &key).await;
-                let v = serde_json::from_str(&r).unwrap_or_else(|_| glyph_protocol::mcp::text_result(&"bad answer from the app".into(), true));
-                return Ok(Some(ok(v)));
+                return Ok(Some(serde_json::from_str(&r).unwrap_or_else(|_| glyph_protocol::mcp::text_result(&"bad answer from the app".into(), true))));
             }
             if t >= deadline {
-                // Not picked up: take it back so it does not run late.
                 let _ = self.store.mcp_delete(user_id, &format!("call:{call_id}")).await;
-                return Ok(Some(ok(glyph_protocol::mcp::text_result(
-                    &"Glyph did not answer. Open the app on a device signed in to this account and turn on Settings › Integrations › AI assistants (MCP) › Through the server.".into(),
-                    true,
-                ))));
+                return Ok(None);
             }
         }
     }

@@ -1,6 +1,6 @@
 // Run after worker-build --dev --no-opt. No live providers or Cloudflare account.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
@@ -16,6 +16,18 @@ async function schema(mf) {
 }
 const calls = [];
 const token = 'test-only-companion-token-32-characters';
+const adminToken = 'test-only-companion-admin-32-characters';
+// The Worker signs companion requests (companion_auth.rs) and never sends the secret.
+async function assertSigned(request, secret) {
+  assert.equal(request.headers.get('authorization'), null);
+  const ts = request.headers.get('x-glyph-companion-ts');
+  const u = new URL(request.url);
+  const body = request.method === 'GET' ? '' : await request.clone().text();
+  const bodyHash = createHash('sha256').update(body).digest('hex');
+  const expected = createHmac('sha256', secret).update(`glyph-companion-v1\n${request.method}\n${u.pathname}${u.search}\n${ts}\n${bodyHash}`).digest('hex');
+  assert.equal(request.headers.get('x-glyph-companion-sig'), expected);
+  assert.ok(Math.abs(Date.now() - Number(ts)) < 60_000);
+}
 const sample = '0123456789abcdefghijklmnopqrstuvwxyz';
 let delayedComplete = false;
 const options = {
@@ -47,7 +59,7 @@ const options = {
       return new Response(sample, { headers: { 'content-type': 'audio/mpeg', 'content-length': String(sample.length), etag: '"test-audio-v1"', 'last-modified': 'Sun, 18 Oct 2026 12:00:00 GMT' } });
     }
     if (u.hostname === 'companion.example') {
-      assert.equal(request.headers.get('authorization'), `Bearer ${token}`);
+      await assertSigned(request, token);
       if (u.pathname.startsWith('/internal/audio/')) return new Response(sample, { headers: { 'content-type': 'audio/mp4', 'content-length': String(sample.length) } });
       if (u.pathname === '/internal/resolve') {
         const input = await request.json();
@@ -327,12 +339,12 @@ console.log('Account policy: explicit saved disable and corrupt-policy fail-clos
 
 // Public test password/hash only; never production credentials.
 const maintenanceCalls=[];
-const adminMf=new Miniflare({...options,bindings:{...options.bindings,
+const adminMf=new Miniflare({...options,bindings:{...options.bindings,COMPANION_ADMIN_TOKEN:adminToken,
   ADMIN_PASSWORD_HASH:'$argon2id$v=19$m=19456,t=2,p=1$BVPUtwgX342xHD/TpX5nDA$k20JP0Icgx0aK5FiAO/DNKRj/4HDIN2KzI2VL+pZ2Zo'
 },outboundService:async request=>{
   const url=new URL(request.url);
   if(url.hostname==='companion.example') {
-    assert.equal(request.headers.get('authorization'),`Bearer ${token}`);
+    await assertSigned(request,adminToken);
     maintenanceCalls.push(url.pathname);
     if(url.pathname==='/internal/status') {
       assert.equal(request.method,'GET');
@@ -340,7 +352,7 @@ const adminMf=new Miniflare({...options,bindings:{...options.bindings,
       return Response.json({version:'0.3.0',target:'test',enabled:true,ready:true,r_dlp:tool,yt_dlp:tool,ffmpeg:tool});
     }
     assert.equal(request.method,'POST');
-    if(url.pathname==='/internal/update/apply') return new Response(`Use the container update path; private token ${token}`,{status:502});
+    if(url.pathname==='/internal/update/apply') return new Response(`Use the container update path; private token ${adminToken}`,{status:502});
     return Response.json({info:{current:'0.1.0',latest:'0.1.1',update_available:true,message:'test'},
       applied:url.pathname.endsWith('/apply'),restart_required:false,message:'test'});
   }
@@ -363,11 +375,11 @@ try {
   for(const endpoint of ['companion/update/check','companion/r-dlp/check','companion/r-dlp/apply']) {
     const response=await adminMf.dispatchFetch(base+endpoint,{method:'POST',headers:auth,body:'{}'});
     assert.equal(response.status,200);const value=await response.json();
-    assert.equal(value.applied,endpoint.endsWith('/apply'));assert.ok(!JSON.stringify(value).includes(token));
+    assert.equal(value.applied,endpoint.endsWith('/apply'));assert.ok(!JSON.stringify(value).includes(adminToken));
   }
   const failed=await adminMf.dispatchFetch(base+'companion/update/apply',{method:'POST',headers:auth,body:'{}'});
   assert.equal(failed.status,500);
-  const detail=await failed.text();assert.ok(!detail.includes(token));assert.ok(detail.includes('[redacted]'));
+  const detail=await failed.text();assert.ok(!detail.includes(adminToken));assert.ok(detail.includes('[redacted]'));
   assert.deepEqual(maintenanceCalls,['/internal/status','/internal/update/check','/internal/r-dlp/check','/internal/r-dlp/apply','/internal/update/apply']);
   console.log('Companion management: admin gate, fixed private endpoints, versions, update checks/apply and secret isolation passed.');
 } finally {await adminMf.dispose();}

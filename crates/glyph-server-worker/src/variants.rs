@@ -113,7 +113,7 @@ pub async fn store(db:&D1Database,bucket:&Bucket,id:&str,quality:AudioVariant,by
 /// invocation so background work stays within the Worker's 10 ms CPU budget.
 pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()> {
     let Some(base)=super::secret(&env,"YTDLP_SERVICE_URL").filter(|v|v.starts_with("https://")) else{return Ok(())};
-    let Some(token)=super::secret(&env,"YTDLP_SERVICE_TOKEN").filter(|v|v.len()>=32) else{return Ok(())};
+    let Some(creds)=super::CompanionCreds::from_env(&env,glyph_server_core::companion_auth::Role::Service) else{return Ok(())};
     let db=env.d1("GLYPH_DB")?;
     let now=worker::Date::now().as_millis();
     let cutoff=now.saturating_sub(u64::from(days)*86_400_000);
@@ -135,13 +135,12 @@ pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()>
     let usage=db.prepare("SELECT COALESCE(SUM(size),0) AS size FROM audio_cache").first::<Usage>(None).await?;
     let cur_usage = usage.map(|u| u.size);
     if cur_usage.is_some_and(|u| u >= super::audio_cache::target(cap)) { return Ok(()); }
-    let headers=Headers::new();
-    headers.set("authorization",&format!("Bearer {token}"))?;
+    let url=format!("{}/internal/audio/{id}",base.trim_end_matches('/'));
+    let headers=creds.headers("GET",&url,b"")?;
     headers.set("x-glyph-audio-quality",quality.name())?;
     headers.set("x-glyph-audio-background","1")?;
     let mut init=worker::RequestInit::new();
     init.with_headers(headers).with_redirect(worker::RequestRedirect::Manual);
-    let url=format!("{}/internal/audio/{id}",base.trim_end_matches('/'));
     let mut response=worker::Fetch::Request(worker::Request::new_with_init(&url,&init)?).send().await?;
     if response.status_code()!=200 { return Ok(()); }
     let length=response.headers().get("content-length")?.and_then(|v|v.parse::<u64>().ok());

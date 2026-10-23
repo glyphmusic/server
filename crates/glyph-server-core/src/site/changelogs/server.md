@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **YouTube only for accounts**: `glyph remote limits --youtube-require-account true` (or the Worker variable `YOUTUBE_REQUIRE_ACCOUNT`) keeps YouTube audio and downloads for signed-in accounts, which carry quotas and bans; guests keep every other source.
+- `/v1/health` lists `capabilities` by name (`jam`, `mcp_relay`, `youtube_audio`, `youtube_account_required`, ...), so apps test for a feature instead of a version.
+- AI assistants connected through the server see only the tools the user allows in the app (Settings › AI assistants); the app refuses the rest.
+
+### Changed
+
+- **Signed companion requests**: the Worker signs each companion request (HMAC with a timestamp) instead of sending `YTDLP_SERVICE_TOKEN`; the companion refuses changed, old and repeated requests. Status and updates need a second secret, `COMPANION_ADMIN_TOKEN`, on the Worker and the companion. Optional `COMPANION_ACCESS_CLIENT_ID`/`_SECRET` let the Worker pass Cloudflare Access in front of the companion. Update the companion before the Worker.
+- **Signed releases**: `glyph update`, r-dlp updates and the npm installer install a release only when `SHA256SUMS.txt.minisig` is a valid signature by the Glyph release key for that repository and version.
+- **YouTube hints**: the server looks the song up in its own catalog (Deezer) and checks the reported video against it, not against the client's title or length. The artist must own the channel and both lengths must be known; an artist's "- Topic" upload replaces an earlier confirmed one. Hints confirmed under the old rules are ignored.
+
+### Fixed
+
+- **Shared resolver cache**: a client could name any provider id for a song (directly, through a shared playlist or a jam), and the server cached that match for every other user for 30 days, together with the client's cover, link and ids. Matches on client-named ids now reach only that client, cached answers keep only what the server's own search found, and older cache entries are no longer read.
+- `/v1/cover` and the cover of `/p/<id>` links answer only covers from known image hosts.
+- Requests with malformed provider ids, ISRCs, links or overlong texts are cleaned before any lookup.
+
 ## 0.7.0 - 2026-10-23
 
 A plugin page on glyph.my, bans for server operators and a CLI that scripts and AI agents can drive.

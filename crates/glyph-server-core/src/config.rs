@@ -142,6 +142,9 @@ pub struct Config {
     /// YouTube songs per account (signed in) or per address (guests) and
     /// day through this server; 0 = no limit. `remote limits --youtube-per-day`.
     pub youtube_per_day: u32,
+    /// YouTube audio and downloads only for signed-in accounts; guests keep
+    /// every other source. `remote limits --youtube-require-account`.
+    pub youtube_require_account: bool,
     /// Operator bans, checked before every request (`remote ban ...`).
     pub bans: std::sync::Arc<crate::bans::BanList>,
     /// Days / GB of companion audio kept in R2 (Worker).
@@ -173,6 +176,7 @@ impl Config {
             companion_enabled: true,
             mcp_relay: true,
             youtube_per_day: 0,
+            youtube_require_account: false,
             bans: Default::default(),
             audio_cache_days: 15,
             audio_cache_max_gb: 10,

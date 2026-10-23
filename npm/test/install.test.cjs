@@ -5,7 +5,19 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const crypto=require('node:crypto');
-const {target,checksum,unpack,install,executable}=require('../lib/install.cjs');
+const {target,checksum,unpack,install,executable,verifySignature,RELEASE_KEYS}=require('../lib/install.cjs');
+// A throwaway minisign key made for each run (prehashed "ED" signatures, as minisign 0.11 writes).
+const testKey=(()=>{
+  const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+  const id=crypto.randomBytes(8);
+  const raw=publicKey.export({format:'der',type:'spki'}).subarray(12);
+  return {id,privateKey,pub:Buffer.concat([Buffer.from('Ed'),id,raw]).toString('base64')};
+})();
+function minisig(data,comment,key=testKey) {
+  const sig=crypto.sign(null,crypto.createHash('blake2b512').update(data).digest(),key.privateKey);
+  const global=crypto.sign(null,Buffer.concat([sig,Buffer.from(comment)]),key.privateKey);
+  return `untrusted comment: test\n${Buffer.concat([Buffer.from('ED'),key.id,sig]).toString('base64')}\ntrusted comment: ${comment}\n${global.toString('base64')}\n`;
+}
 function tar(name,data,type=48) {
   const header=Buffer.alloc(512);header.write(name);header.write(data.length.toString(8),124);header[156]=type;
   return zlib.gzipSync(Buffer.concat([header,data,Buffer.alloc((512-data.length%512)%512),Buffer.alloc(1024)]));
@@ -36,11 +48,13 @@ test('verified native download is installed atomically and reused',{skip:!proces
   const version=require('../package.json').version;
   const name=`glyph-server-${version}-${target()}.${isWindows?'zip':'tar.gz'}`;
   let calls=0;
+  const sums=`${hash}  ${name}\n`;
   global.fetch=async url=>{calls++;assert.ok(String(url).startsWith(`https://github.com/glyphmusic/server/releases/download/v${version}/`));
-    return new Response(String(url).endsWith('SHA256SUMS.txt')?`${hash}  ${name}\n`:archive);};
+    if(String(url).endsWith('.minisig')) return new Response(minisig(Buffer.from(sums),`glyph-release repo=glyphmusic/server tag=v${version}`));
+    return new Response(String(url).endsWith('SHA256SUMS.txt')?sums:archive);};
   try {
-    const file=await install();assert.ok(fs.existsSync(file));assert.equal(calls,2);
-    assert.equal(await install(),file);assert.equal(calls,2,'valid cached binary must skip downloads');
+    const file=await install({keys:[testKey.pub]});assert.ok(fs.existsSync(file));assert.equal(calls,3);
+    assert.equal(await install({keys:[testKey.pub]}),file);assert.equal(calls,3,'valid cached binary must skip downloads');
     assert.deepEqual(fs.readFileSync(file),binary);
   } finally {
     global.fetch=previous.fetch;
@@ -66,12 +80,31 @@ test('installer rejects altered release bytes before writing any executable',asy
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'glyph-install-test-'));
   const previous={local:process.env.LOCALAPPDATA,cache:process.env.XDG_CACHE_HOME,fetch:global.fetch};
   process.env.LOCALAPPDATA=dir;process.env.XDG_CACHE_HOME=dir;
-  global.fetch=async url=>new Response(String(url).endsWith('SHA256SUMS.txt')
-    ? `${'a'.repeat(64)}  glyph-server-${require('../package.json').version}-${target()}.${process.platform==='win32'?'zip':'tar.gz'}\n`:'tampered');
-  try {await assert.rejects(install(),/SHA-256 mismatch/);assert.equal(fs.existsSync(executable()),false);}
+  const version=require('../package.json').version;
+  const sums=`${'a'.repeat(64)}  glyph-server-${version}-${target()}.${process.platform==='win32'?'zip':'tar.gz'}\n`;
+  global.fetch=async url=>new Response(String(url).endsWith('.minisig')?minisig(Buffer.from(sums),`glyph-release repo=glyphmusic/server tag=v${version}`)
+    :String(url).endsWith('SHA256SUMS.txt')?sums:'tampered');
+  try {
+    await assert.rejects(install({keys:[testKey.pub]}),/SHA-256 mismatch/);assert.equal(fs.existsSync(executable()),false);
+    // The published key does not know the throwaway key: nothing is installed.
+    await assert.rejects(install(),/not signed by the Glyph release key/);assert.equal(fs.existsSync(executable()),false);
+  }
   finally {
     global.fetch=previous.fetch;
     for(const [key,value] of [['LOCALAPPDATA',previous.local],['XDG_CACHE_HOME',previous.cache]]) {if(value===undefined) delete process.env[key];else process.env[key]=value;}
     fs.rmSync(dir,{recursive:true,force:true});
   }
+});
+test('signatures must match the key, the repository and the tag',()=>{
+  const data=Buffer.from('list');const comment='glyph-release repo=glyphmusic/server tag=v1.2.3';
+  verifySignature(data,minisig(data,comment),[testKey.pub],comment);
+  assert.throws(()=>verifySignature(Buffer.from('other'),minisig(data,comment),[testKey.pub],comment),/not signed/);
+  assert.throws(()=>verifySignature(data,minisig(data,comment),[testKey.pub],'glyph-release repo=glyphmusic/apps tag=v1.2.3'),/is for/);
+  assert.throws(()=>verifySignature(data,minisig(data,comment).replace('v1.2.3','v1.2.4'),[testKey.pub],'glyph-release repo=glyphmusic/server tag=v1.2.4'),/not signed/);
+  assert.throws(()=>verifySignature(data,minisig(data,comment),RELEASE_KEYS,comment),/not signed/);
+  assert.throws(()=>verifySignature(data,'garbage',[testKey.pub],comment),/cannot be read/);
+});
+test('the installer and the Rust updaters carry the same release key',()=>{
+  const pub=fs.readFileSync(path.join(__dirname,'..','..','release-key.pub'),'utf8').split(/\r?\n/)[1];
+  assert.deepEqual(RELEASE_KEYS,[pub]);
 });
