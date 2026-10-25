@@ -1,10 +1,7 @@
-# Glyph CLI / Server 0.8.0 - security patch
+# Glyph server 0.9.0 - 2026-10-25
 
-- Fix the release publication race that produced mismatched SHA-256 checksums and blocked npm installation. Every archive and the npm tarball is verified together before publication.
-- Signed update manifests, signed companion requests and a separate companion management token. Update the companion before deploying the Worker.
-- Isolate client-supplied resolver hints from shared caches, restrict cover fetch hosts and validate provider identifiers.
-- Support encrypted account sync and device pairing.
+- Public documentation MCP server at https://docs.glyph.my/mcp and /docs/mcp on self-hosted servers.
+- Search documentation, read pages or sections and list available pages without signing in.
+- Updated shared app protocol and embedded changelogs for Glyph 0.9.0.
 
-See CHANGELOG.md for the complete changes. npm publication remains a separate authenticated step.
-
-- YouTube results get an explicit-content rating from Deezer where available; unknown ratings show a question mark.
+See CHANGELOG.md for details.

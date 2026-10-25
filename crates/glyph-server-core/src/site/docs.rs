@@ -7,8 +7,11 @@
 //! as text.
 //!
 //! For search and LLMs: `search.json` (the index the search box loads),
-//! `llms.txt` and `llms-full.txt` (llmstxt.org), and every page as Markdown
-//! under its file name (`/getting-started/install.md`).
+//! `llms.txt` and `llms-full.txt` (llmstxt.org), every page as Markdown
+//! under its file name (`/getting-started/install.md`), and an MCP server
+//! for AI agents at `/mcp` ([`mcp`]).
+
+pub mod mcp;
 
 use crate::server::{Body, Request, Response};
 use crate::traits::{HttpRequest, Method, Services};
@@ -677,7 +680,7 @@ fn llms_txt(pages: &[(String, String)], nav: &Nav, origin: &str) -> String {
         "# Glyph docs\n\n> Documentation for Glyph, a free, open-source desktop music player for Windows, macOS and Linux that searches many legal music sources at once, and for its self-hostable server and `glyph` CLI, the YouTube companion and r-dlp.\n\n",
     );
     out.push_str(&format!(
-        "Every page is also available as Markdown: add `.md` to its address. All pages in one file: [llms-full.txt]({origin}/llms-full.txt). Source: https://github.com/{REPO}\n"
+        "Every page is also available as Markdown: add `.md` to its address. All pages in one file: [llms-full.txt]({origin}/llms-full.txt). MCP server to search and read the docs (no sign-in): {origin}/mcp. Source: https://github.com/{REPO}\n"
     ));
     let describe = |file: &str| -> String {
         pages.iter().find(|(f, _)| f == file).and_then(|(_, md)| front_matter(md).0).map(|d| format!(": {d}")).unwrap_or_default()

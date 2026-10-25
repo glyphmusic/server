@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-10-25
+
+### Added
+
+- **MCP server for the docs**: `https://docs.glyph.my/mcp` (and `/docs/mcp` on every server) lets AI agents search and read the documentation without signing in. Tools: `search_docs` (best-matching sections with snippet, address and path), `read_doc` (a page or one section as Markdown) and `list_docs` (every page with its description). It reads the same GitHub cache as the docs site, so a docs push shows up within about a minute. `llms.txt` names the endpoint.
+
 ## 0.8.0 - 2026-10-23
 
 ### Security

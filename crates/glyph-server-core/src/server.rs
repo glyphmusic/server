@@ -231,6 +231,11 @@ impl Server {
         if req.path == "/v1/access" && req.method == Method::Get {
             return Response::json(200, &serde_json::json!({"ok": true}));
         }
+        // Before the accounts: `/mcp` on the docs host is the docs' own MCP
+        // server, not the relay to a user's app.
+        if crate::site::docs::mcp::owns(&req) {
+            return crate::site::docs::mcp::handle(&svc, &req).await;
+        }
         if let Some(acc) = self.accounts.as_ref().filter(|_| crate::accounts::owns(req.path.trim_end_matches('/'))) {
             return acc.handle(&svc, req).await;
         }
