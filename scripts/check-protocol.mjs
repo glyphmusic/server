@@ -15,6 +15,7 @@ if(JSON.stringify(upstream)!==JSON.stringify(local)) throw new Error(`Files diff
 for(const name of local){
   const r=await fetch(`https://raw.githubusercontent.com/${repo}/${rev}/crates/glyph-protocol/src/${name}`,{headers});
   if(!r.ok) throw new Error(`Cannot fetch ${name}: HTTP ${r.status}`);
-  if(await r.text()!==readFileSync(new URL(`release-protocol/src/${name}`,root),'utf8')) throw new Error(`release-protocol/src/${name} differs from ${repo}@${rev}; run scripts/snapshot-protocol.mjs`);
+  // Git may check text out with CRLF on Windows; compare source content.
+  if((await r.text()).replace(/\r\n/g,'\n')!==readFileSync(new URL(`release-protocol/src/${name}`,root),'utf8').replace(/\r\n/g,'\n')) throw new Error(`release-protocol/src/${name} differs from ${repo}@${rev}; run scripts/snapshot-protocol.mjs`);
 }
 console.log(`Protocol snapshot matches ${repo}@${rev} (${local.length} files).`);
