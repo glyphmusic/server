@@ -107,10 +107,6 @@ pub const PROVIDER_HELP: [ProviderHelp; 5] = [
     },
 ];
 
-pub fn help_for(id: ProviderId) -> Option<&'static ProviderHelp> {
-    PROVIDER_HELP.iter().find(|h| h.id == id)
-}
-
 /// Provider names accepted on the command line (`remote keys set youtube`).
 pub fn parse_provider(name: &str) -> Option<ProviderId> {
     match name.trim().to_ascii_lowercase().as_str() {

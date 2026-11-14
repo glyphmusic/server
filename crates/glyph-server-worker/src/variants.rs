@@ -1,4 +1,3 @@
-pub const LEASE: &str = r#"INSERT INTO audio_variant_jobs(track_id,expires) VALUES(?1,?2) ON CONFLICT(track_id) DO UPDATE SET expires=excluded.expires WHERE audio_variant_jobs.expires<?3 RETURNING track_id"#;
 use std::{collections::HashMap, rc::Rc};
 use futures::StreamExt;
 use glyph_server_core::{chunks::{Manifest,Window,CHUNK_BYTES},media::{AudioVariant,byte_range}};
@@ -109,45 +108,3 @@ pub async fn store(db:&D1Database,bucket:&Bucket,id:&str,quality:AudioVariant,by
     Ok(())
 }
 
-/// Best-effort preparation of representations, one missing variant per
-/// invocation so background work stays within the Worker's 10 ms CPU budget.
-pub async fn warm(env: worker::Env, id: String, days:u32, cap:u64) -> Result<()> {
-    let Some(base)=super::secret(&env,"YTDLP_SERVICE_URL").filter(|v|v.starts_with("https://")) else{return Ok(())};
-    let Some(creds)=super::CompanionCreds::from_env(&env,glyph_server_core::companion_auth::Role::Service) else{return Ok(())};
-    let db=env.d1("GLYPH_DB")?;
-    let now=worker::Date::now().as_millis();
-    let cutoff=now.saturating_sub(u64::from(days)*86_400_000);
-    #[derive(serde::Deserialize)]struct Existing{quality:String}
-    let rows=db.prepare("SELECT quality FROM audio_variants WHERE track_id=?1 AND created>=?2")
-        .bind(&[s(&id),n(cutoff)])?.all().await?.results::<Existing>()?;
-    let done:Vec<_>=rows.into_iter().map(|r|r.quality).collect();
-    let Some(quality) = [AudioVariant::High,AudioVariant::Standard,AudioVariant::Low]
-        .into_iter()
-        .find(|q| !done.iter().any(|d| d == q.name()))
-    else { return Ok(()); };
-    let lease=db.prepare(LEASE)
-        .bind(&[s(&id),n(now+90_000),n(now)])?;
-    #[derive(serde::Deserialize)]struct Lease{#[allow(dead_code)]track_id:String}
-    let claimed=lease.first::<Lease>(None).await?;
-    if claimed.is_none(){return Ok(());}
-    // Account source/encoding work only when this installation can store it.
-    #[derive(serde::Deserialize)]struct Usage{size:u64}
-    let usage=db.prepare("SELECT COALESCE(SUM(size),0) AS size FROM audio_cache").first::<Usage>(None).await?;
-    let cur_usage = usage.map(|u| u.size);
-    if cur_usage.is_some_and(|u| u >= super::audio_cache::target(cap)) { return Ok(()); }
-    let url=format!("{}/internal/audio/{id}",base.trim_end_matches('/'));
-    let headers=creds.headers("GET",&url,b"")?;
-    headers.set("x-glyph-audio-quality",quality.name())?;
-    headers.set("x-glyph-audio-background","1")?;
-    let mut init=worker::RequestInit::new();
-    init.with_headers(headers).with_redirect(worker::RequestRedirect::Manual);
-    let mut response=worker::Fetch::Request(worker::Request::new_with_init(&url,&init)?).send().await?;
-    if response.status_code()!=200 { return Ok(()); }
-    let length=response.headers().get("content-length")?.and_then(|v|v.parse::<u64>().ok());
-    if !length.is_some_and(|v|v>0 && v<=32*1024*1024){return Ok(());}
-    let bytes=response.bytes().await?;
-    if bytes.len()>32*1024*1024 || Some(bytes.len() as u64)!=length { return Ok(()); }
-    let bucket=env.bucket("GLYPH_COVERS")?;
-    store(&db,&bucket,&id,quality,bytes,days,cap,cur_usage).await?;
-    Ok(())
-}

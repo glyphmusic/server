@@ -1386,7 +1386,6 @@ fn jam_pushes_once_someone_listens() {
 
 #[test]
 fn jam_push_budget_ends_in_one_fallback() {
-    use crate::traits::RateLimiter;
     use glyph_protocol::jam::Live;
     let none = serde_json::Value::Null;
     let push = Arc::new(RecPush::default());

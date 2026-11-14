@@ -208,6 +208,7 @@ pub fn render(cfg: &FileConfig) -> Result<String, String> {
 /// non-fatal warnings (e.g. when the Windows ACL could not be tightened).
 pub fn write_private(path: &Path, contents: &str) -> Result<Vec<String>, String> {
     use std::io::Write;
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut warnings = Vec::new();
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;

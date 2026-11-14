@@ -36,7 +36,8 @@ pub fn archive_name(version: &Version, target: &str) -> String {
 }
 
 /// First whitespace-separated token of a `.sha256` file (`<hex>  <name>` or just `<hex>`).
-pub fn parse_sha256(text: &str) -> Option<String> {
+#[cfg(test)]
+fn parse_sha256(text: &str) -> Option<String> {
     let h = text.split_whitespace().next()?.to_ascii_lowercase();
     (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
 }
