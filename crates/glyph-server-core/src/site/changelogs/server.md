@@ -4,6 +4,10 @@
 
 ## 0.10.0 - 2026-11-14
 
+### Security
+
+- `zip` 9.5.1 for the self-updater (critical advisory GHSA-m665-v7pm-7grj in 9.0.4) and `lru` 0.16.4. The Worker's test tooling uses patched `undici` and `sharp`; neither ships in the Worker.
+
 ### Added
 
 - **Audio behind short links**: `/p/<id>/audio/<n>` (also with a file name or extension, like `/audio/3.m4a`) serves song `n` of a shared link as a plain audio file, named "Artist - Title", so browsers play it and `yt-dlp <link>`, `curl -OJ` and other players can download it. The link page lists the songs as hidden `<audio>` tags for such tools. Listeners need no account of their own: the account that shared the link vouches for them, so its bans and YouTube quota apply. Servers that hand out provider links instead of streaming redirect to the listen page.
