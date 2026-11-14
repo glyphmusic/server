@@ -44,7 +44,7 @@ mode = "smart"
 enabled = false
 
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "cargo install -q worker-build --version 0.8.7 --locked && worker-build --release"
 
 # Workers KV: long-lived cache (resolver mappings, lyrics). Create it with
 #   npx wrangler kv namespace create GLYPH_KV

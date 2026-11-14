@@ -26,7 +26,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: glyph-server
       - uses: dtolnay/rust-toolchain@stable
@@ -58,7 +58,7 @@ jobs:
             (cd dist && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
           fi
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -70,10 +70,10 @@ jobs:
   npm-package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: glyph-server
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
@@ -82,7 +82,8 @@ jobs:
       - name: Build the portable Worker payload
         working-directory: glyph-server/crates/glyph-server-worker
         run: |
-          cargo install worker-build --locked
+          # Same version as the `worker` crate: newer worker-build refuses older crates.
+          cargo install worker-build --version 0.8.7 --locked
           worker-build --release
       - name: Verify package and build release tarball
         working-directory: glyph-server/npm
@@ -91,7 +92,7 @@ jobs:
           npm test
           npm pack
           sha256sum glyph-server-*.tgz > glyph-server-${GITHUB_REF_NAME#v}.tgz.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-npm
           path: |
@@ -105,8 +106,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true

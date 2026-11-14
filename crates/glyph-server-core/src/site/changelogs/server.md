@@ -7,6 +7,7 @@
 ### Security
 
 - `zip` 9.5.1 for the self-updater (critical advisory GHSA-m665-v7pm-7grj in 9.0.4) and `lru` 0.16.4. The Worker's test tooling uses patched `undici` and `sharp`; neither ships in the Worker.
+- CI runs with a read-only token, and the Worker tests check URLs exactly instead of by substring.
 
 ### Added
 
@@ -16,6 +17,7 @@
 
 - Site pages (`/`, `/download`, `/changelog`, `/plugins`) asked for on another host than the share origin (such as `api.glyph.my`) move there, and plugin pages name their canonical address, so search engines index each page once.
 - The Worker now answers every path on `glyph.my` (real 404s instead of Cloudflare's 522) and moves `www.glyph.my` to `glyph.my`. `robots.txt` leaves out `/cdn-cgi/`.
+- Dependencies: `axum` 0.8, `clap_mangen` 0.3, `dirs` 7, current `tokio`. Release builds pin `worker-build` 0.8.7, which matches the `worker` crate.
 
 ## 0.9.0 - 2026-10-25
 

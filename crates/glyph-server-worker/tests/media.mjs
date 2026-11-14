@@ -137,7 +137,7 @@ try {
   await scriptable.arrayBuffer();
   const yt = await fetch('/v1/audio/youtube/abcdefghijk');
   assert.equal(await yt.text(), sample);
-  assert.ok(calls.includes('https://companion.example/internal/audio/abcdefghijk'));
+  assert.ok(calls.some((url) => url === 'https://companion.example/internal/audio/abcdefghijk'));
   const wanted = { id: 'dz-test', source: 'deezer', title: 'Test', artist: 'Artist', duration_ms: 20000 };
   const lookup = await fetch('/v1/download', { method: 'POST', body: JSON.stringify({ track: wanted, priority: ['youtube'], youtube_only: true }) });
   assert.equal(lookup.status, 200);
@@ -154,7 +154,7 @@ try {
   assert.equal(await missing.json(), null);
   const search = await fetch('/v1/search?q=Artist%20Test');
   assert.match(await search.text(), /"provider":"youtube"/);
-  assert.ok(calls.includes('https://companion.example/internal/ytdlp'));
+  assert.ok(calls.some((url) => url === 'https://companion.example/internal/ytdlp'));
   const tooLarge = await fetch('/v1/resolve', { method: 'POST', body: 'x'.repeat(65537) });
   assert.equal(tooLarge.status, 413);
   await tooLarge.arrayBuffer();
