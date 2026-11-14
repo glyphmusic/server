@@ -1,7 +1,7 @@
-# Glyph server 0.9.0 - 2026-10-25
+# Glyph server 0.10.0 - 2026-11-14
 
-- Public documentation MCP server at https://docs.glyph.my/mcp and /docs/mcp on self-hosted servers.
-- Search documentation, read pages or sections and list available pages without signing in.
-- Updated shared app protocol and embedded changelogs for Glyph 0.9.0.
+- Shared links serve their songs as audio files at /p/<id>/audio/<n>: they play in the browser and download with yt-dlp or curl, without an account for the listener.
+- Site pages on other hosts move to the share origin; www.glyph.my moves to glyph.my and unknown paths get a real 404.
+- Embedded changelogs for Glyph 0.11.0 and r-dlp 0.2.2.
 
 See CHANGELOG.md for details.

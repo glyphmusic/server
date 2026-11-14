@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-11-14
+
+### Added
+
+- **Audio behind short links**: `/p/<id>/audio/<n>` (also with a file name or extension, like `/audio/3.m4a`) serves song `n` of a shared link as a plain audio file, named "Artist - Title", so browsers play it and `yt-dlp <link>`, `curl -OJ` and other players can download it. The link page lists the songs as hidden `<audio>` tags for such tools. Listeners need no account of their own: the account that shared the link vouches for them, so its bans and YouTube quota apply. Servers that hand out provider links instead of streaming redirect to the listen page.
+
+### Changed
+
+- Site pages (`/`, `/download`, `/changelog`, `/plugins`) asked for on another host than the share origin (such as `api.glyph.my`) move there, and plugin pages name their canonical address, so search engines index each page once.
+- The Worker now answers every path on `glyph.my` (real 404s instead of Cloudflare's 522) and moves `www.glyph.my` to `glyph.my`. `robots.txt` leaves out `/cdn-cgi/`.
+
 ## 0.9.0 - 2026-10-25
 
 ### Added
