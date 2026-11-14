@@ -58,7 +58,7 @@ jobs:
             (cd dist && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
           fi
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -91,7 +91,7 @@ jobs:
           npm test
           npm pack
           sha256sum glyph-server-*.tgz > glyph-server-${GITHUB_REF_NAME#v}.tgz.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-npm
           path: |
