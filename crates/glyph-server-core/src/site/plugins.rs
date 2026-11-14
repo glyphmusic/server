@@ -142,6 +142,7 @@ pub fn handle(req: &Request) -> Response {
         .replace("/*STRINGS*/", &script_json(&serde_json::Value::Object(strings)))
         .replace("/*ICONS*/", &script_json(&serde_json::Value::Object(icons)))
         .replace("{{lang}}", l.code())
+        .replace("{{canonical}}", &esc(&format!("https://glyph.my{}", req.path.trim_end_matches('/'))))
         .replace("{{icon_download}}", &svg(ICONS.iter().find(|i| i.0 == "download").map_or("", |i| i.1)));
     for key in ["page_title", "page_desc", "title", "sub", "download"] {
         let (_, en, de) = STRINGS.iter().find(|s| s.0 == key).expect("string");

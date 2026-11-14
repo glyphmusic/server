@@ -7,32 +7,16 @@ compatibility_date = "2025-01-01"
 # api.glyph.my: Cloudflare creates the DNS record and certificate on deploy.
 # workers.dev stays reachable for older app builds.
 workers_dev = true
-# glyph.my: the landing page (/) and short playlist links (/p/*,
-# SHARE_ORIGIN below). Needs a proxied DNS record for
-# glyph.my; the site pages and embedded assets must all reach this Worker.
+# glyph.my: every path reaches this Worker (pages, short links /p/*, jam
+# invites /jam/*, files), so unknown paths get a real 404 instead of
+# Cloudflare's 522 for the missing origin. www.glyph.my moves to glyph.my
+# (canonical_address in src/lib.rs). Both need proxied DNS records.
 routes = [
   { pattern = "api.glyph.my", custom_domain = true },
   # Docs, rendered from github.com/glyphmusic/docs; glyph.my/docs redirects there.
   { pattern = "docs.glyph.my", custom_domain = true },
-  { pattern = "glyph.my/docs*", zone_name = "glyph.my" },
-  { pattern = "glyph.my/", zone_name = "glyph.my" },
-  { pattern = "glyph.my/p/*", zone_name = "glyph.my" },
-  # Jam invites (the QR code in the app).
-  { pattern = "glyph.my/jam/*", zone_name = "glyph.my" },
-  { pattern = "glyph.my/download*", zone_name = "glyph.my" },
-  { pattern = "glyph.my/changelog*", zone_name = "glyph.my" },
-  # Plugin catalog and detail pages (/plugins, /plugins/<id>).
-  { pattern = "glyph.my/plugins*", zone_name = "glyph.my" },
-  { pattern = "glyph.my/shots/*", zone_name = "glyph.my" },
-  { pattern = "glyph.my/favicon.ico", zone_name = "glyph.my" },
-  { pattern = "glyph.my/icon.png", zone_name = "glyph.my" },
-  { pattern = "glyph.my/apple-touch-icon.png", zone_name = "glyph.my" },
-  { pattern = "glyph.my/site.webmanifest", zone_name = "glyph.my" },
-  { pattern = "glyph.my/og.png", zone_name = "glyph.my" },
-  { pattern = "glyph.my/robots.txt", zone_name = "glyph.my" },
-  { pattern = "glyph.my/sitemap.xml", zone_name = "glyph.my" },
-  { pattern = "glyph.my/llms.txt", zone_name = "glyph.my" },
-  { pattern = "glyph.my/.well-known/security.txt", zone_name = "glyph.my" },
+  { pattern = "glyph.my/*", zone_name = "glyph.my" },
+  { pattern = "www.glyph.my/*", zone_name = "glyph.my" },
 ]
 
 # Keep production diagnostics in sync with the Cloudflare dashboard.

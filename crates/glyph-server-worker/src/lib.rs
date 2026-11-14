@@ -655,7 +655,15 @@ async fn fetch(req: worker::Request, env: Env, ctx: Context) -> Result<worker::R
         let headers: Vec<(String, String)> = req.headers().entries().filter(|(k, _)| k == "accept" || k == "accept-language").collect();
         glyph_server_core::site::page_lang(&glyph_server_core::Request::new(to_core_method(req.method()), url.path(), headers, vec![], None))
     });
+    let https = req.url().is_ok_and(|u| u.scheme() == "https");
     match serve(req, env, ctx).await {
+        // HSTS: browsers stay on HTTPS (http:// already moves there, see
+        // canonical_address). Not on WebSocket upgrades; immutable headers
+        // (a passed-through fetch) are left as they are.
+        Ok(mut resp) if https && resp.status_code() != 101 => {
+            let _ = resp.headers_mut().set("strict-transport-security", "max-age=31536000");
+            Ok(resp)
+        }
         Err(e) if page.is_some() => {
             worker::console_error!("request failed: {e}");
             let resp = glyph_server_core::site::as_page(page, glyph_server_core::Response::error(glyph_server_core::ApiErr::new(500, "internal", "request failed")));
@@ -667,8 +675,26 @@ async fn fetch(req: worker::Request, env: Env, ctx: Context) -> Result<worker::R
     }
 }
 
+/// The one address search engines should index: `www.glyph.my` and plain
+/// `http://` on the site hosts move to `https://glyph.my` / `https://docs.glyph.my`.
+fn canonical_address(url: &worker::Url) -> Option<worker::Url> {
+    let host = url.host_str()?;
+    let to_host = match host {
+        "www.glyph.my" => "glyph.my",
+        "glyph.my" | "docs.glyph.my" if url.scheme() == "http" => host,
+        _ => return None,
+    };
+    let mut to = url.clone();
+    to.set_scheme("https").ok()?;
+    to.set_host(Some(to_host)).ok()?;
+    Some(to)
+}
+
 async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
     let url = req.url()?;
+    if let Some(to) = canonical_address(&url).filter(|_| matches!(req.method(), worker::Method::Get | worker::Method::Head)) {
+        return worker::Response::redirect_with_status(to, 301);
+    }
     let target = match url.query() {
         Some(q) => format!("{}?{}", url.path(), q),
         None => url.path().to_string(),
@@ -708,6 +734,26 @@ async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
     }
     if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
         return media::handle(&req, &request, &server, &ctx, &env).await;
+    }
+    // A song of a short link as a plain audio file (web player, yt-dlp, curl):
+    // from R2 when cached, else through the companion (and into R2).
+    if glyph_server_core::share::audio_target(&request.path).is_some() {
+        return match server.share_audio(&request).await {
+            Ok((inner, disposition)) => {
+                let resp = media::handle(&req, &inner, &server, &ctx, &env).await?;
+                if !(200..300).contains(&resp.status_code()) {
+                    return Ok(resp);
+                }
+                let headers = resp.headers().clone();
+                headers.set("content-disposition", &disposition)?;
+                Ok(resp.with_headers(headers))
+            }
+            Err(resp) => {
+                let headers = Headers::new();
+                for (k, v) in &resp.headers { headers.set(k, v)?; }
+                Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers))
+            }
+        };
     }
     let path = request.path.clone();
     let resp = server.handle(request).await;

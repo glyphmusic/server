@@ -42,6 +42,10 @@ pub struct Request {
     pub secure: bool,
     /// The caller is on this machine (loopback, no proxy headers).
     pub local: bool,
+    /// Account whose short link this audio is played through
+    /// (`/p/<id>/audio/<n>`, see [`Server::share_audio`]). Set by the server
+    /// itself, never from anything the client sends.
+    pub share_owner: Option<String>,
 }
 
 impl Request {
@@ -65,6 +69,7 @@ impl Request {
             approximate_location: None,
             secure: false,
             local: false,
+            share_owner: None,
         }
     }
 
@@ -183,6 +188,19 @@ impl Server {
         self.svc.read().unwrap().clone()
     }
 
+    /// `GET /p/<id>/audio/<n>`: song `n` of a short link as a plain audio
+    /// file (players, `yt-dlp`, `curl`). Hosts stream the returned
+    /// `/v1/audio/...` request like any other (from this server's cache, else
+    /// fetched now) and add `content-disposition` with the returned value.
+    /// `Err` is the finished response (not found, or a redirect where this
+    /// server does not stream audio itself).
+    pub async fn share_audio(&self, req: &Request) -> Result<(Request, String), Response> {
+        let Some(acc) = &self.accounts else {
+            return Err(Response::error(ApiErr::not_found("no such playlist link")));
+        };
+        acc.share_audio(&self.services(), req).await
+    }
+
     /// Swap in a modified config (other services are shared).
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
         let mut guard = self.svc.write().unwrap();
@@ -243,6 +261,10 @@ impl Server {
             return crate::site::docs::handle(&svc, &req).await;
         }
         if crate::site::owns(req.path.trim_end_matches('/')) {
+            // Pages live only on the share origin (glyph.my), not on the API host.
+            if let Some(to) = crate::site::moved_page(&req, svc.config.share_origin.as_deref()) {
+                return Response { status: 301, headers: vec![("location".into(), to), ("cache-control".into(), "public, max-age=3600".into())], body: Body::Bytes(Vec::new()) };
+            }
             return crate::site::handle(&req).unwrap_or_else(Response::error);
         }
         let Some((route, method)) = route(&req.path) else {
@@ -298,6 +320,20 @@ impl Server {
         };
         if let Some(ban) = svc.config.bans.find(&who, now) {
             return Err(banned(ban, now));
+        }
+        // A song played through someone's short link: the account that shared
+        // it vouches for the listener, so its bans and YouTube quota apply.
+        if let Some(owner) = req.share_owner.as_deref() {
+            let who = crate::bans::Subject { account: Some(owner), ..who };
+            if let Some(ban) = svc.config.bans.find(&who, now) {
+                return Err(banned(ban, now));
+            }
+            check_rules(&svc, &[
+                (format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8)),
+                (format!("{namespace}:guest:{ip}"), ip_key, base),
+            ]).await?;
+            if media { youtube_quota(&svc, req, &format!("user:{owner}")).await?; }
+            return self.check_account_access(req, true);
         }
         if self.accounts.is_some() && has_bearer {
             // Fixed IP ceiling: adding or rotating an install ID never raises it.

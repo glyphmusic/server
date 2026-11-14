@@ -10,5 +10,6 @@ Disallow: /account/
 Disallow: /internal/
 Disallow: /embed/
 Disallow: /p/*/listen/
+Disallow: /cdn-cgi/
 
 Sitemap: {ORIGIN}/sitemap.xml

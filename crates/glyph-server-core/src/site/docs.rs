@@ -46,16 +46,32 @@ pub fn owns(req: &Request, path: &str) -> bool {
     is_docs_host(req) || path == "/docs" || path.starts_with("/docs/")
 }
 
-/// Machine-readable routes next to the pages (relative to the docs root).
-fn docs_route(rest: &str) -> bool {
-    matches!(rest, "/search.json" | "/llms.txt" | "/llms-full.txt") || rest.ends_with(".md")
+/// robots.txt of the docs host. `/mcp` is the MCP endpoint, not a page;
+/// `/cdn-cgi/` is Cloudflare's own (scripts it injects).
+fn robots(origin: &str) -> String {
+    format!("# Glyph docs -- {origin}\nUser-agent: *\nAllow: /\nDisallow: /mcp\nDisallow: /cdn-cgi/\n\nSitemap: {origin}/sitemap.xml\n")
+}
+
+/// Every page of the navigation, at its canonical address.
+fn sitemap(nav: &Nav) -> String {
+    let mut seen = HashSet::new();
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    let home = std::iter::once("README.md");
+    for file in home.chain(nav.items().map(|(_, _, f)| f)) {
+        if let Some(path) = page_url(file, "").filter(|p| seen.insert(p.clone())) {
+            xml.push_str(&format!("  <url><loc>{}</loc></url>\n", escape(&format!("{DOCS_ORIGIN}{path}"))));
+        }
+    }
+    xml.push_str("</urlset>\n");
+    xml
 }
 
 pub async fn handle(svc: &Services, req: &Request) -> Response {
     let path = req.path.trim_end_matches('/');
     let docs_host = is_docs_host(req);
-    // Icons, robots.txt and the like are shared with the main site.
-    if docs_host && !path.is_empty() && !docs_route(path) && crate::site::owns(path) {
+    // Icons and the like are shared with the main site; its pages are not
+    // (`/plugins/...` here is a docs page, not the plugin catalog).
+    if docs_host && crate::site::shared_file(path) {
         return crate::site::handle(req).unwrap_or_else(Response::error);
     }
     if req.method != Method::Get {
@@ -65,6 +81,13 @@ pub async fn handle(svc: &Services, req: &Request) -> Response {
     if !docs_host && host(req) == "glyph.my" {
         return redirect(&format!("{DOCS_ORIGIN}{rest}"), 301);
     }
+    if docs_host && path == "/robots.txt" {
+        return text_response(200, "text/plain; charset=utf-8", "public, max-age=3600", robots(&crate::site::origin(req)).into_bytes());
+    }
+    // One address per page: `/faq/` moves to `/faq`.
+    if docs_host && !path.is_empty() && req.path.ends_with('/') {
+        return redirect(path, 301);
+    }
     let base = if docs_host { "" } else { "/docs" };
     // Links back to the main site: on docs.example.com that is example.com.
     let site = if docs_host { format!("https://{}", &host(req)["docs.".len()..]) } else { String::new() };
@@ -72,7 +95,7 @@ pub async fn handle(svc: &Services, req: &Request) -> Response {
     let origin = format!("{}{base}", crate::site::origin(req));
     let slug = rest.trim_start_matches('/');
     let raw = slug.strip_suffix(".md");
-    let special = matches!(slug, "search.json" | "llms.txt" | "llms-full.txt");
+    let special = matches!(slug, "search.json" | "llms.txt" | "llms-full.txt" | "sitemap.xml");
     let wanted = raw.map(|r| format!("{r}.md")).unwrap_or_else(|| format!("{slug}.md"));
     if !slug.is_empty() && !special && !valid_file(&wanted) {
         return page_response(404, &not_found(&site, base, ""));
@@ -88,6 +111,9 @@ pub async fn handle(svc: &Services, req: &Request) -> Response {
         Fetched::Failed => return page_response(503, &unavailable(&site, base)),
     };
     let nav = Nav::parse(&summary, base);
+    if slug == "sitemap.xml" {
+        return text_response(200, "application/xml; charset=utf-8", "public, max-age=3600", sitemap(&nav).into_bytes());
+    }
     if special {
         let ttl = if rev_ok { FILE_TTL_S } else { REF_TTL_S };
         let key = format!("docs:gen:{rev}:{base}:{origin}:{slug}");
@@ -858,6 +884,19 @@ mod tests {
         assert_eq!(block_on(s.handle(get("docs.glyph.my", "/nope"))).status, 404);
         assert_eq!(block_on(s.handle(get("docs.glyph.my", "/a%2e%2e/b"))).status, 404);
         assert_eq!(block_on(s.handle(get("docs.glyph.my", "/favicon.ico"))).status, 200);
+
+        // Main-site pages are not docs pages (Search Console: soft 404s).
+        h.http.on(&format!("{SHA}/plugins/quickstart.md"), 200, "# Quickstart\n\nMake one.\n");
+        let plugin_doc = text(block_on(s.handle(get("docs.glyph.my", "/plugins/quickstart"))));
+        assert!(plugin_doc.contains("<h1>Quickstart</h1>") && plugin_doc.contains("href=\"https://docs.glyph.my/plugins/quickstart\""));
+        assert_eq!(block_on(s.handle(get("docs.glyph.my", "/download"))).status, 404);
+        let slash = block_on(s.handle(get("docs.glyph.my", "/getting-started/install/")));
+        assert_eq!(slash.status, 301);
+        assert!(slash.headers.iter().any(|(k, v)| k == "location" && v == "/getting-started/install"));
+        let robots = text(block_on(s.handle(get("docs.glyph.my", "/robots.txt"))));
+        assert!(robots.contains("Sitemap: https://docs.glyph.my/sitemap.xml") && robots.contains("Disallow: /mcp") && !robots.contains("/p/"));
+        let map = text(block_on(s.handle(get("docs.glyph.my", "/sitemap.xml"))));
+        assert!(map.contains("<loc>https://docs.glyph.my/</loc>") && map.contains("<loc>https://docs.glyph.my/getting-started/install</loc>") && !map.contains("/download"));
 
         let moved = block_on(s.handle(get("glyph.my", "/docs/getting-started/install")));
         assert_eq!(moved.status, 301);

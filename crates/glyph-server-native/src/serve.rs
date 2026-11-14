@@ -299,7 +299,27 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     // Audio/cover streaming happens here, not in the core router (streamed bytes,
     // byte ranges and provider-side redirects).
     if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
-        return media(&st.server, &target, &headers, method, Some(ip)).await;
+        return media(&st.server, &target, &headers, method, Some(ip), None).await;
+    }
+    // A song of a short link as a plain audio file (web player, yt-dlp, curl).
+    if glyph_server_core::share::audio_target(&path_only).is_some() {
+        return match st.server.share_audio(&probe).await {
+            Ok((inner, disposition)) => {
+                let target = inner.path.clone();
+                let mut out = media(&st.server, &target, &headers, method, Some(ip), inner.share_owner).await;
+                if out.status().is_success() {
+                    if let Ok(v) = HeaderValue::try_from(disposition.as_str()) {
+                        out.headers_mut().insert(HeaderName::from_static("content-disposition"), v);
+                    }
+                }
+                out
+            }
+            Err(resp) => {
+                let mut out = Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::NOT_FOUND));
+                for (k, v) in &resp.headers { out = out.header(k.as_str(), v.as_str()); }
+                out.body(Body::from(resp.bytes().unwrap_or_default().to_vec())).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"))
+            }
+        };
     }
 
     let resp = st
@@ -353,13 +373,15 @@ fn audio_target(path: &str) -> Option<(glyph_protocol::ProviderId, String)> {
 /// `/v1/audio/{provider}/{id}` and `/v1/download/{provider}/{id}` for our own
 /// clients: the provider URL is resolved here (yt-dlp for YouTube) and the
 /// bytes are streamed through, so nothing short-lived ever reaches the app.
-async fn media(server: &Server, path: &str, headers: &[(String, String)], method: Method, ip: Option<String>) -> Response {
+/// `share_owner`: played through that account's short link (`/p/<id>/audio/<n>`).
+async fn media(server: &Server, path: &str, headers: &[(String, String)], method: Method, ip: Option<String>, share_owner: Option<String>) -> Response {
     use glyph_server_core::media;
     if !matches!(method, Method::Get) {
         return plain(StatusCode::METHOD_NOT_ALLOWED, "GET required");
     }
     let svc = server.services();
-    let request = Request::new(method, path, headers.to_vec(), vec![], ip);
+    let mut request = Request::new(method, path, headers.to_vec(), vec![], ip);
+    request.share_owner = share_owner;
     if let Err(e) = server.admit(&request, true).await {
         let r = glyph_server_core::Response::error(e);
         let mut out = Response::builder().status(r.status);

@@ -53,6 +53,25 @@ const FILES: &[(&str, &str, u32, &[u8])] = &[
     ("/apple-touch-icon.png", "image/png", 604800, include_bytes!("site/icon-256.png")),
 ];
 
+/// `Some(address)` when an HTML page of the site (`/`, `/download`,
+/// `/changelog`, `/plugins...`) is asked for on another host than the share
+/// origin, such as the API host: search engines then index it only once.
+/// Files (icons, robots.txt) stay where they are.
+pub fn moved_page(req: &Request, share_origin: Option<&str>) -> Option<String> {
+    let share = share_origin?.trim_end_matches('/');
+    let path = req.path.trim_end_matches('/');
+    let page = path.is_empty() || path == "/download" || path == "/changelog" || plugins::owns(path);
+    let host = req.header("host").unwrap_or("").to_ascii_lowercase();
+    let same = share.split_once("://").is_some_and(|(_, h)| h.eq_ignore_ascii_case(&host));
+    (page && req.method == Method::Get && !req.local && !host.is_empty() && !same).then(|| format!("{share}{}", if path.is_empty() { "/" } else { path }))
+}
+
+/// Icons and other files the docs host serves as they are. Its pages,
+/// robots.txt, sitemap.xml and llms.txt are its own.
+pub fn shared_file(path: &str) -> bool {
+    !matches!(path, "/robots.txt" | "/sitemap.xml" | "/llms.txt") && file(path).is_some()
+}
+
 fn file(path: &str) -> Option<&'static (&'static str, &'static str, u32, &'static [u8])> {
     FILES.iter().find(|f| f.0 == path)
 }
@@ -228,6 +247,18 @@ mod tests {
         let busy_html = String::from_utf8_lossy(busy.bytes().unwrap()).to_string();
         assert!(busy_html.contains("Try again in 7 s.") && busy.headers.iter().any(|(k, v)| k == "retry-after" && v == "7"));
         assert!(String::from_utf8_lossy(crate::share::error_page(503, "queue_full", None, crate::share::Lang::En).bytes().unwrap()).contains("Server busy"));
+    }
+
+    #[test]
+    fn pages_move_to_the_share_origin() {
+        let get = |host: &str, p: &str| Request::new(Method::Get, p, vec![("host".into(), host.into())], vec![], Some("1.2.3.4".into())).with_transport(true, false);
+        let share = Some("https://glyph.my");
+        assert_eq!(moved_page(&get("api.glyph.my", "/plugins/"), share).as_deref(), Some("https://glyph.my/plugins"));
+        assert_eq!(moved_page(&get("api.glyph.my", "/"), share).as_deref(), Some("https://glyph.my/"));
+        assert_eq!(moved_page(&get("glyph.my", "/download"), share), None);
+        assert_eq!(moved_page(&get("api.glyph.my", "/robots.txt"), share), None);
+        assert_eq!(moved_page(&get("api.glyph.my", "/"), None), None);
+        assert_eq!(moved_page(&get("localhost:8787", "/").with_transport(false, true), share), None);
     }
 
     #[test]

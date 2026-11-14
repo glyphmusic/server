@@ -112,6 +112,8 @@ pub async fn handle(
     let is_audio = core.path.starts_with("/v1/audio/") || is_download;
     let mut key = input.clone();
     key.set_query(None);
+    // `/p/<id>/audio/<n>` arrives here as its `/v1/audio/...` request.
+    key.set_path(&core.path);
     let upstream;
     let range = req.headers().get("range")?;
     if !is_audio {

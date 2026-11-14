@@ -208,6 +208,23 @@ fn youtube_account_switch_keeps_youtube_media_for_accounts() {
 }
 
 #[test]
+fn shared_links_vouch_for_guest_youtube_audio() {
+    let t = setup();
+    t.s.update_config(|c| { c.youtube_require_account = true; c.rate_limit_per_min = 1000; c.proxy_audio = true; });
+    let mut guest = Request::new(Method::Get,"/v1/audio/youtube/abcdefghijk",vec![],vec![],Some("link-listener".into()));
+    block_on(async {
+        assert_eq!(t.s.admit(&guest,true).await.unwrap_err().status,401);
+        // Through someone's short link the sharer's account counts.
+        guest.share_owner = Some("u_sharer".into());
+        assert!(t.s.admit(&guest,true).await.unwrap());
+    });
+    // Unknown links and songs stay 404; a song is never resolved for them.
+    let probe = Request::new(Method::Get,"/p/AbCd1234/audio/0.m4a",vec![],vec![],Some("link-listener".into()));
+    let resp = block_on(t.s.share_audio(&probe)).unwrap_err();
+    assert_eq!(resp.status,404);
+}
+
+#[test]
 fn account_gate_fails_closed_without_account_backend() {
     let h = harness(Default::default());
     let server = Server::from_arc(h.svc.clone());

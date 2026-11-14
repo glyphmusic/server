@@ -86,6 +86,51 @@ pub fn clean_kind(kind: Option<&str>) -> String {
     match kind { Some("album") => "album", Some("track") => "track", Some("artist") => "artist", _ => "playlist" }.to_string()
 }
 
+/// `/p/<id>/audio/<n>` (also with a file name or extension after `<n>`,
+/// like `/audio/3.m4a` or `/audio/3/Artist - Title.m4a`): the link id and `n`.
+pub fn audio_target(path: &str) -> Option<(&str, usize)> {
+    let (id, rest) = path.strip_prefix("/p/")?.split_once("/audio/")?;
+    let n = rest.split(['/', '.']).next()?;
+    if !valid_id(id) || n.is_empty() || n.len() > 4 || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((id, n.parse().ok()?))
+}
+
+/// File extension of the audio `/p/<id>/audio/<n>` most likely serves:
+/// free sources hand out MP3, everything else plays from YouTube (M4A).
+pub fn audio_ext(t: &glyph_protocol::Track) -> &'static str {
+    use glyph_protocol::ProviderId::*;
+    match t.source { Audius | Jamendo | Archive => "mp3", _ => "m4a" }
+}
+
+/// `content-disposition` for a song: `inline` (browsers play it), named
+/// "Artist - Title.<ext>" so `yt-dlp`, `curl -OJ` and "Save as" keep the name.
+pub fn audio_disposition(t: &glyph_protocol::Track, ext: &str) -> String {
+    let name: String = format!("{} - {}", t.artist.trim(), t.title.trim())
+        .chars()
+        .map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .take(150)
+        .collect();
+    let ascii: String = name.chars().map(|c| if c.is_ascii() && c != '%' && c != ';' { c } else { '_' }).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(format!("{name}.{ext}").as_bytes()).collect::<String>().replace('+', "%20");
+    format!("inline; filename=\"{ascii}.{ext}\"; filename*=UTF-8''{enc}")
+}
+
+/// One `<audio>` per song, never loaded by the page itself (`preload=none`,
+/// hidden; the player has its own). Tools that read plain HTML find the
+/// songs here: `yt-dlp <link>` downloads them, other players can add them.
+fn audio_tags(songs: &[glyph_protocol::Track], base: &str) -> String {
+    let mut out = String::from(r#"<div hidden aria-hidden="true">"#);
+    for (n, t) in songs.iter().take(MAX_LISTED).enumerate() {
+        let ext = audio_ext(t);
+        let mime = if ext == "mp3" { "audio/mpeg" } else { "audio/mp4" };
+        out.push_str(&format!(r#"<audio preload="none" src="{base}/audio/{n}.{ext}" title="{title}"><source src="{base}/audio/{n}.{ext}" type="{mime}"></audio>"#, title = escape(&format!("{} - {}", t.artist, t.title))));
+    }
+    out.push_str("</div>");
+    out
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
@@ -369,7 +414,12 @@ fn card_meta(p: &SharedPlaylist, songs: &[glyph_protocol::Track], link: &str, l:
     let audio = if songs.is_empty() {
         String::new()
     } else {
-        format!(r#"<meta property="og:audio" content="{link}/listen/0"><meta property="og:audio:type" content="audio/mpeg">"#, link = escape(link))
+        let ext = audio_ext(&songs[0]);
+        format!(
+            r#"<meta property="og:audio" content="{link}/audio/0.{ext}"><meta property="og:audio:type" content="{mime}">"#,
+            link = escape(link),
+            mime = if ext == "mp3" { "audio/mpeg" } else { "audio/mp4" },
+        )
     };
     format!(
         r##"<meta name="description" content="{desc}">
@@ -647,7 +697,8 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
 <main class="list"><aside class="left">{art}<div class="info"><span class="kind mono">[{kind}]</span><h1 class="title">{title}</h1><div class="subrow">{by}<span class="meta mono">{meta}</span></div></div>
 <a class="pill" id="open-app" href="glyph://p/{share_id}">{open_app}</a>{actions}<div class="acts2"><button class="ib" id="cp" type="button" data-tip="{copy}" aria-label="{copy}" data-link="{base}">{link_ic}</button><a class="ib" href="/download" data-tip="{dl}" aria-label="{dl}">{dl_ic}</a></div></aside>
 <section class="songs-col">{rows}</section></main>
-{bar}{js}</body></html>"#,
+{bar}{audio}{js}</body></html>"#,
+        audio = audio_tags(&songs, &base),
         share_id = escape(split_link(link).1),
         open_app = if l == Lang::De { "In Glyph öffnen" } else { "Open in Glyph" },
         head = head(l, &format!("{title} · Glyph"), &card_meta(p, &songs, link, l), "page"),
@@ -731,6 +782,20 @@ pub fn id_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_paths_and_file_names() {
+        assert_eq!(audio_target("/p/AbCd1234/audio/0"), Some(("AbCd1234", 0)));
+        assert_eq!(audio_target("/p/AbCd1234/audio/12.m4a"), Some(("AbCd1234", 12)));
+        assert_eq!(audio_target("/p/AbCd1234/audio/3/Artist - Song.mp3"), Some(("AbCd1234", 3)));
+        for bad in ["/p/AbCd1234/audio/", "/p/AbCd1234/audio/x", "/p/../audio/1", "/p/AbCd1234/listen/1", "/p/AbCd1234/audio/99999"] {
+            assert_eq!(audio_target(bad), None, "{bad}");
+        }
+        let t = serde_json::from_value::<glyph_protocol::Track>(serde_json::json!({"id": "x", "source": "youtube", "title": "Für \"Elise\"/2", "artist": "Beethoven"})).unwrap();
+        let d = audio_disposition(&t, "m4a");
+        assert!(d.starts_with(r#"inline; filename="Beethoven - F_r _Elise__2.m4a""#), "{d}");
+        assert!(d.contains("filename*=UTF-8''Beethoven%20-%20F%C3%BCr%20_Elise__2.m4a"), "{d}");
+    }
 
     #[test]
     fn ids_and_codes() {

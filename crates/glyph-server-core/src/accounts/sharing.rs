@@ -56,6 +56,11 @@ impl Accounts {
             if let Some(n) = sub.strip_prefix("listen/") {
                 return self.share_listen(svc, req, id, n).await;
             }
+            // Hosts stream `/p/<id>/audio/<n>` themselves (`Server::share_audio`).
+            if let Some(n) = sub.strip_prefix("audio/") {
+                let n = n.split(['/', '.']).next().unwrap_or_default();
+                return Ok(redirect(&format!("/p/{id}/listen/{n}"), "no-store"));
+            }
             if !sub.is_empty() {
                 return Err(ApiErr::not_found("unknown endpoint"));
             }
@@ -133,6 +138,9 @@ impl Accounts {
             Some(PlaybackSource::Preview { provider, url }) => (provider, url, true),
             _ => return Err(ApiErr::not_found("this song only plays in the Glyph app")),
         };
+        // Streamed by this server: through the link, so listeners need no
+        // account of their own (see `share_audio`).
+        let url = if url.starts_with("/v1/audio/") { format!("/p/{id}/audio/{n}") } else { url };
         // `?json`: the web players also show the source badge (`[YT]`) and
         // `[PREVIEW 0:30]` like the app's player bar.
         if req.query.get("json").is_some() {
@@ -141,5 +149,39 @@ impl Accounts {
             return Ok(r);
         }
         Ok(redirect(&url, "no-store"))
+    }
+
+    /// `GET /p/<id>/audio/<n>` (HEAD too) (see `Server::share_audio`): the
+    /// `/v1/audio/...` request for song `n`, on the account that shared the
+    /// link, plus its `content-disposition`. The host streams it from this
+    /// server's audio cache, else fetches it now (and caches it).
+    pub(crate) async fn share_audio(&self, svc: &Services, req: &Request) -> Result<(Request, String), Response> {
+        let fail = Response::error;
+        let (id, n) = crate::share::audio_target(&req.path).ok_or_else(|| fail(ApiErr::not_found("no such song")))?;
+        // Hosts map HEAD to `Get`.
+        if req.method != Method::Get {
+            return Err(fail(method()));
+        }
+        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        // Players ask again on every seek; the media limits apply on top.
+        self.limit(svc, &format!("share-audio:{ip}"), 3000, 3600).await.map_err(fail)?;
+        let share = self.store.share(id).await.map_err(store_err).map_err(fail)?.ok_or_else(|| fail(ApiErr::not_found("no such playlist link")))?;
+        let track = crate::share::songs(&share.code).into_iter().take(crate::share::MAX_LISTED).nth(n).ok_or_else(|| fail(ApiErr::not_found("no such song")))?;
+        if !svc.config.proxy_audio {
+            // This server hands out provider links instead of streaming.
+            return Err(redirect(&format!("/p/{id}/listen/{n}"), "no-store"));
+        }
+        let mut resolved = crate::resolver::resolve(svc, glyph_protocol::ResolveRequest { youtube_only: false, track: track.clone(), priority: vec![] }).await;
+        crate::media::proxy_playback(&mut resolved);
+        use glyph_protocol::PlaybackSource;
+        let path = match resolved.source {
+            Some(PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. }) if url.starts_with("/v1/audio/") => url,
+            _ => return Err(fail(ApiErr::not_found("this song only plays in the Glyph app"))),
+        };
+        let ext = if path.starts_with("/v1/audio/youtube/") { "m4a" } else { "mp3" };
+        let mut out = Request::new(req.method, &path, req.headers.clone(), Vec::new(), req.client_ip.clone()).with_transport(req.secure, req.local);
+        out.approximate_location = req.approximate_location.clone();
+        out.share_owner = Some(share.owner_id);
+        Ok((out, crate::share::audio_disposition(&track, ext)))
     }
 }
