@@ -13,3 +13,6 @@ npm/LICENSE-APACHE
 *.tgz
 dist/
 .cli-smoke/
+
+# Ban list + salt the native server writes next to server.toml
+bans.json
