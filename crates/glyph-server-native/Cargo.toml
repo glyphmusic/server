@@ -27,7 +27,7 @@ tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
 # `glyph completions <shell>` and `glyph man`.
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 toml = "0.8"
 semver = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
