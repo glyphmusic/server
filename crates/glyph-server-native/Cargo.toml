@@ -38,7 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
-dirs = "6"
+dirs = "7"
 getrandom = "0.3"
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
 tokio-util = "0.7"
