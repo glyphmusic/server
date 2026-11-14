@@ -42,7 +42,7 @@ dirs = "7"
 getrandom = "0.3"
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
 tokio-util = "0.7"
-axum-server = "0.8"
+axum-server = "0.9"
 url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
