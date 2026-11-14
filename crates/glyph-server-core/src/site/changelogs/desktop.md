@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Fixed
+
+- macOS: all text shows again. The macOS builds were made without GPUI's text system, so every label, title and value was blank while icons and controls still drew.
+- Songs behind YouTube's bot check play again with the built-in r-dlp (r-dlp 0.2.2): its visitor check failed over HTTP/2, so these songs either failed or fell back to the much slower yt-dlp.
+- A song clicked right after the start, before Glyph had finished connecting, now plays as soon as it is ready instead of showing "Backend offline" and doing nothing. A search typed in that moment runs again by itself.
+- YouTube through the Glyph server: when the server answers without YouTube audio for a song that should come from YouTube (for example with "Use YouTube only"), this computer tries itself with r-dlp before the song counts as not found.
+
+### Changed
+
+- Home appears with the last session's recommendations, popular songs and new releases right away; the fresh rows replace them as they arrive.
+- Recommendations load their seed songs side by side, and "New from artists you follow" loads four artists at a time instead of one after another with a pause each.
+- Settings › Playback › Sources is split into Search and YouTube, in the order things happen. The switch that turns YouTube and SoundCloud on or off now says so (it was labelled like a player fallback), and the texts no longer call yt-dlp the default.
+- Playback errors about YouTube are shown in the app's language instead of an English error message.
+
+## 0.10.1 - 2026-11-02
+
+### Fixed
+
+- Android: the first-start tour's buttons and live illustrations respond to taps again; sideways swipes still turn the page.
+- Android: the tour covers the screen fully instead of letting the home screen show through.
+
+## 0.10.0 - 2026-11-02
+
+### Added
+
+- First-start tour: after the splash on a fresh install (desktop and Android), seven short pages introduce search, the library, sound, lyrics, sync and Connect, and colour themes, each with a small live illustration to try out. Arrow keys, Enter and Escape on desktop, swipes on phones; Settings › About › Introduction shows it again.
+- A single song link (Spotify, YouTube including Shorts and live links, Deezer) pasted into the search bar adds that song to Liked Songs.
+- Android: Glyph appears in the share sheet. Shared song and playlist links, or plain text such as a song name, open like text pasted into the search bar.
+- Settings › Playback: "Skip songs that can't play" (on by default) and "Search longer", which tries more videos and other search wordings before a song counts as not found.
+- Deleted playlists can be removed from the trash for good.
+
+### Changed
+
+- Local YouTube playback tries the next good matches when the best video will not play and remembers the one that worked.
+- The built-in YouTube search retries once after a dropped connection and pauses for one minute only after three failures in a row, instead of ten minutes after the first.
+
+## 0.9.1 - 2026-10-26
+
+### Fixed
+
+- Mobile offline status links directly to Downloads; unavailable songs are dimmed while downloaded, local and fully cached audio remains playable. Search distinguishes unavailable sources from empty results and offers a retry.
+- Mobile playlists expose the existing song menu and reuse song data and sort order between frames; covers read only the songs needed for their mosaic.
+- Android stops submitting frames when the activity loses focus, keeping the playback task loop responsive for background track preloading and crossfades.
+- Touch dragging keeps sliders, equalizer bands, scrollbars and the profile image crop moving beyond the initial gesture threshold.
+- Mobile sheets and swipeable rows keep following the finger after moving away from the gesture's starting point.
+- Mouse-wheel control works on settings sliders, equalizer bands and mini-player bars, while seek and volume bars keep their configured step sizes.
+
 ## 0.9.0 - 2026-10-25
 
 ### Added
