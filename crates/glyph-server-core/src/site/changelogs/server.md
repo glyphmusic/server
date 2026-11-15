@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-11-15
+
+### Added
+
+- **Web player (`/web`)**: serves the Svelte web player (`glyph-web/` static assets on the Cloudflare Worker and optional `--web-dir` / `GLYPH_WEB_DIR` on the native server) with single-page route fallback, a CSP tailored to direct provider playback and the official YouTube embed, and a login link/redirect from the home page.
+- **Public charts & accounts**: adds Deezer public chart lookups and `/accounts` password-link and delete endpoints (`LinkPasswordReq`, `LinkDeleteReq`), plus updated profile section ordering (`playlists`, `recent`) and expanded MCP relay schemas (`glyph-protocol` 0.11.0).
+
+### Changed
+
+- Updated landing-page screenshots, plugin/share page SVG icons, and embedded changelogs (including Glyph 0.12.0).
+- Dependencies: `lru` 0.19.0 and `toml` 1.2.0+spec-1.1.0; CI and release caching workflows updated (`release-cache.yml`).
+
 ## 0.10.0 - 2026-11-14
 
 ### Security
