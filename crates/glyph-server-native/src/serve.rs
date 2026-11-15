@@ -828,7 +828,7 @@ mod tests {
             b.body(Body::from(body)).unwrap()
         };
         let settings = Settings::resolve(Default::default(), None, "test-nonexistent.toml".into());
-        let state = AppState { server: build_server(&settings,LogBuffer::new()),trust_proxy:false,tls:false };
+        let state = AppState { server: build_server(&settings,LogBuffer::new()),trust_proxy:false,tls:false,web_dir:None };
         // Companion mode must retain URL metadata between range requests.
         // The old NoCache implementation discarded this immediately.
         let cache = state.server.services().cache.clone();
