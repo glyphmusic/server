@@ -7,6 +7,15 @@ on:
 permissions:
   contents: read
 
+# Build cache in two layers: rust-cache restores the compiled dependencies,
+# sccache (workspace crates only) skips the server's own crates that did not
+# change since an earlier run. If the cache service fails, rustc compiles
+# normally instead of failing the job.
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WORKSPACE_WRAPPER: sccache
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
 jobs:
   native:
     strategy:
@@ -19,9 +28,14 @@ jobs:
         with:
           path: glyph-server
       - uses: dtolnay/rust-toolchain@stable
+      # Only main saves: tag and PR runs can restore caches from main, while
+      # caches saved by PRs would only fill the 10 GB repo limit and push out
+      # the release caches.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: glyph-server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Build and test
         working-directory: glyph-server
         run: cargo test --workspace
@@ -38,6 +52,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: glyph-server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Check worker for wasm32
         working-directory: glyph-server
         run: cargo check -p glyph-server-worker --target wasm32-unknown-unknown

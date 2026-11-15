@@ -80,6 +80,18 @@ pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Ca
     Ok(resp.data.into_iter().map(to_candidate).collect())
 }
 
+/// Songs popular right now: Deezer's public chart (no key), 30 songs.
+pub async fn chart(svc: &Services) -> PResult<Vec<Candidate>> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        data: Vec<DzTrack>,
+    }
+    let url = build_url("https://api.deezer.com/chart/0/tracks", &[("limit", "30")]);
+    let resp: Resp = fetch_json(svc, HttpRequest::get(url)).await?;
+    Ok(resp.data.into_iter().map(to_candidate).collect())
+}
+
 /// Exact lookup by ISRC (used by the resolver before text search).
 pub async fn by_isrc(svc: &Services, isrc: &str) -> PResult<Option<Candidate>> {
     if !isrc.chars().all(|c| c.is_ascii_alphanumeric()) || isrc.len() > 20 {

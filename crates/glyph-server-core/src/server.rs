@@ -133,6 +133,7 @@ enum Route {
     Resolve,
     Lyrics,
     Similar,
+    Chart,
     Import,
     Cover,
     Download,
@@ -146,6 +147,7 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/resolve" => (Route::Resolve, Method::Post),
         "/v1/lyrics" => (Route::Lyrics, Method::Get),
         "/v1/similar" => (Route::Similar, Method::Get),
+        "/v1/chart" => (Route::Chart, Method::Get),
         "/v1/import/spotify" => (Route::Import, Method::Post),
         "/v1/cover" => (Route::Cover, Method::Post),
         "/v1/download" => (Route::Download, Method::Post),
@@ -524,8 +526,12 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                     return Err(ApiErr::bad_request("track.title and track.artist are required"));
                 }
                 let wanted = r.get().track.clone();
+                // `?direct=1`: the provider's own URL (YouTube as its embed),
+                // never a `/v1/audio/...` path. The web player asks for this:
+                // it plays in the browser and no audio goes through the server.
+                let direct = matches!(req.query.get("direct"), Some("1" | "true"));
                 let mut resolved = resolver::resolve(svc, r).await;
-                if svc.config.proxy_audio { crate::media::proxy_playback(&mut resolved); }
+                if svc.config.proxy_audio && !direct { crate::media::proxy_playback(&mut resolved); }
                 // Not part of the cached answer: hints change independently.
                 resolved.youtube_hint = crate::hints::lookup(svc, &wanted).await;
                 Ok(Response::json(200, &resolved))
@@ -600,6 +606,22 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 };
                 let resp = SimilarResponse { tracks };
                 cache::put_json(&*svc.cache, &key, &resp, ttl).await;
+                Ok(Response::json(200, &resp))
+            }
+            Route::Chart => {
+                // Songs popular right now (Deezer's public chart): the web
+                // player's home page. Cached for an hour; a provider problem
+                // answers with an empty list, like radio.
+                let key = "chart:v1:deezer";
+                if let Some(hit) = cache::get_json::<SimilarResponse>(&*svc.cache, key).await {
+                    return Ok(Response::json(200, &hit));
+                }
+                let (tracks, ttl) = match providers::deezer::chart(svc).await {
+                    Ok(t) => (t.into_iter().map(|c| c.track).collect(), HOUR),
+                    Err(_) => (Vec::new(), SIMILAR_TROUBLE_TTL),
+                };
+                let resp = SimilarResponse { tracks };
+                cache::put_json(&*svc.cache, key, &resp, ttl).await;
                 Ok(Response::json(200, &resp))
             }
             Route::Import => {
@@ -998,5 +1020,39 @@ mod tests {
         assert_eq!(r.status, 200);
         let rr: glyph_protocol::ResolveResponse = serde_json::from_slice(r.bytes().unwrap()).unwrap();
         assert_eq!(rr.matched.unwrap().source, ProviderId::Audius);
+    }
+
+    #[test]
+    fn direct_resolve_never_hands_out_server_audio() {
+        let h = harness(Default::default());
+        h.http.on("audius.co", 200, r#"{"data":[{"id":"au1","title":"Get Lucky","duration":369,"user":{"name":"Daft Punk"}}]}"#);
+        let s = server(&h);
+        s.update_config(|c| c.proxy_audio = true);
+        let body = serde_json::to_vec(&ResolveRequest { youtube_only: false, track: track("x", ProviderId::Deezer, "Get Lucky", "Daft Punk", 369), priority: vec![] }).unwrap();
+        let url = |target: &str| {
+            let r = block_on(s.handle(Request::new(Method::Post, target, vec![], body.clone(), None)));
+            assert_eq!(r.status, 200);
+            let rr: glyph_protocol::ResolveResponse = serde_json::from_slice(r.bytes().unwrap()).unwrap();
+            match rr.source { Some(glyph_protocol::PlaybackSource::Stream { url, .. }) => url, other => panic!("{other:?}") }
+        };
+        assert!(url("/v1/resolve").starts_with("/v1/audio/audius/"));
+        let direct = url("/v1/resolve?direct=1");
+        assert!(direct.starts_with("https://") && !direct.contains("/v1/audio/"), "{direct}");
+    }
+
+    #[test]
+    fn chart_lists_popular_songs() {
+        let h = harness(Default::default());
+        h.http.on("chart/0/tracks", 200, r#"{"data":[{"id":3135556,"title":"Harder, Better, Faster, Stronger","duration":224,"artist":{"name":"Daft Punk"},"album":{"title":"Discovery","cover_medium":"https://cdn-images.dzcdn.net/x.jpg"}}]}"#);
+        let r = block_on(server(&h).handle(get("/v1/chart")));
+        assert_eq!(r.status, 200);
+        let v = json_of(&r);
+        assert_eq!(v["tracks"][0]["title"], "Harder, Better, Faster, Stronger");
+        assert_eq!(v["tracks"][0]["source"], "deezer");
+        let h = harness(Default::default());
+        h.http.on("chart/0/tracks", 500, "down");
+        let r = block_on(server(&h).handle(get("/v1/chart")));
+        assert_eq!(r.status, 200);
+        assert_eq!(json_of(&r)["tracks"].as_array().unwrap().len(), 0);
     }
 }

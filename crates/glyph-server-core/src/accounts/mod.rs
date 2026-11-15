@@ -295,6 +295,17 @@ struct PagePasswordReq {
     salt: Option<String>,
 }
 #[derive(Deserialize)]
+struct LinkPasswordReq {
+    login_id: String,
+    salt: String,
+    key: String,
+}
+#[derive(Deserialize)]
+struct LinkDeleteReq {
+    login_id: String,
+    confirm_handle: String,
+}
+#[derive(Deserialize)]
 struct PageReq {
     login_id: String,
     page_secret: String,

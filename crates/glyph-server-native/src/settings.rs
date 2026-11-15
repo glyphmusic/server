@@ -49,6 +49,11 @@ pub struct FileConfig {
     pub youtube_per_day: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_repo: Option<String>,
+    /// Folder with the built web player (glyph-apps/glyph-ui, `npm run
+    /// build:web` -> `dist-web`), served at `/web`. Relative to this file.
+    /// Unset = no web player.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_dir: Option<PathBuf>,
     pub admin: FileAdmin,
     pub tls: FileTls,
     pub keys: FileKeys,
@@ -169,6 +174,8 @@ pub struct Settings {
     pub playlist_max_tracks: usize,
     pub youtube_per_day: u32,
     pub update_repo: String,
+    /// Built web player served at `/web` (`web_dir`, `GLYPH_WEB_DIR`).
+    pub web_dir: Option<PathBuf>,
     pub admin_password_hash: Option<String>,
     pub tls: Option<TlsSettings>,
     pub secrets: Secrets,
@@ -347,6 +354,7 @@ impl Settings {
             playlist_max_tracks: file.playlist_max_tracks.unwrap_or(5_000).clamp(1, 50_000),
             youtube_per_day: file.youtube_per_day.unwrap_or(0).min(100_000),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
+            web_dir: env("GLYPH_WEB_DIR").map(PathBuf::from).or(file.web_dir).map(|d| if d.is_relative() { base.join(d) } else { d }),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,
             secrets,

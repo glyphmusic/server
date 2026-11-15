@@ -355,38 +355,36 @@ fn meta_line(songs: &[glyph_protocol::Track]) -> String {
 
 // ---- markup ----------------------------------------------------------------
 
-/// A Lucide icon (the same set the app ships in `glyph/assets/icons/ui`).
+/// A Glyph icon, copied from the app's own set in `glyph-apps/assets/icons/ui`
+/// (rules in `glyph-apps/docs/ICONS.md`). Solid parts carry their own fill.
 fn ic(name: &str) -> String {
-    let (filled, body) = match name {
-        "play" => (true, r#"<polygon points="6 3 20 12 6 21 6 3"/>"#),
-        "pause" => (true, r#"<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>"#),
-        "skip-back" => (false, r#"<polygon points="19 20 9 12 19 4 19 20"/><line x1="5" x2="5" y1="19" y2="5"/>"#),
-        "skip-forward" => (false, r#"<polygon points="5 4 15 12 5 20 5 4"/><line x1="19" x2="19" y1="5" y2="19"/>"#),
-        "shuffle" => (false, r#"<path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/>"#),
-        "repeat" => (false, r#"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>"#),
-        "repeat-1" => (false, r#"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/>"#),
-        "link-2" => (false, r#"<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>"#),
-        "copy" => (false, r#"<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>"#),
-        "volume-2" => (false, r#"<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>"#),
-        "volume-x" => (false, r#"<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>"#),
-        "music-2" => (false, r#"<circle cx="8" cy="18" r="4"/><path d="M12 18V2l7 4"/>"#),
-        "download" => (false, r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#),
-        "ellipsis-vertical" => (false, r#"<circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>"#),
-        "check" => (false, r#"<path d="M20 6 9 17l-5-5"/>"#),
-        "search" => (false, r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#),
-        "house" => (false, r#"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#),
-        "refresh-cw" => (false, r#"<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>"#),
-        "clock" => (false, r#"<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>"#),
-        "user-round" => (false, r#"<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>"#),
-        "server" => (false, r#"<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>"#),
-        "users" => (false, r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>"#),
-        "book-open" => (false, r#"<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>"#),
-        _ => (false, ""),
+    let body = match name {
+        "play" => r#"<path fill="currentColor" d="M9.14 5.79L17.36 10.71Q19.5 12 17.36 13.29L9.14 18.21Q7 19.5 7 17L7 7Q7 4.5 9.14 5.79Z"/>"#,
+        "pause" => r#"<rect fill="currentColor" x="6" y="4.5" width="4" height="15" rx="2"/><rect fill="currentColor" x="14" y="4.5" width="4" height="15" rx="2"/>"#,
+        "skip-back" => r#"<path fill="currentColor" d="M16.92 6.23L11.08 10.77Q9.5 12 11.08 13.23L16.92 17.77Q18.5 19 18.5 17L18.5 7Q18.5 5 16.92 6.23Z"/><path d="M5.5 5v14"/>"#,
+        "skip-forward" => r#"<path fill="currentColor" d="M7.08 6.23L12.92 10.77Q14.5 12 12.92 13.23L7.08 17.77Q5.5 19 5.5 17L5.5 7Q5.5 5 7.08 6.23Z"/><path d="M18.5 5v14"/>"#,
+        "shuffle" => r#"<path d="M2.5 18H5c2.2 0 3.4-1.4 4.6-3l4.8-6c1.2-1.6 2.4-3 4.6-3h.2"/><path fill="currentColor" d="M20.64 6.87L18.36 8.93Q17.4 9.8 17.4 8.5L17.4 3.5Q17.4 2.2 18.36 3.07L20.64 5.13Q21.6 6 20.64 6.87Z"/><path d="M2.5 6H5c1.6 0 2.7.7 3.7 1.8"/><path d="M17.4 18H17c-1.6 0-2.7-.7-3.7-1.8"/><path fill="currentColor" d="M20.64 18.87L18.36 20.93Q17.4 21.8 17.4 20.5L17.4 15.5Q17.4 14.2 18.36 15.07L20.64 17.13Q21.6 18 20.64 18.87Z"/>"#,
+        "repeat" => r#"<path d="M3.5 11.5V10a4 4 0 0 1 4-4h9.5"/><path fill="currentColor" d="M20.24 6.87L17.96 8.93Q17 9.8 17 8.5L17 3.5Q17 2.2 17.96 3.07L20.24 5.13Q21.2 6 20.24 6.87Z"/><path d="M20.5 12.5V14a4 4 0 0 1-4 4H7"/><path fill="currentColor" d="M3.76 17.13L6.04 15.07Q7 14.2 7 15.5L7 20.5Q7 21.8 6.04 20.93L3.76 18.87Q2.8 18 3.76 17.13Z"/>"#,
+        "repeat-1" => r#"<path d="M3.5 11.5V10a4 4 0 0 1 4-4h9.5"/><path fill="currentColor" d="M20.24 6.87L17.96 8.93Q17 9.8 17 8.5L17 3.5Q17 2.2 17.96 3.07L20.24 5.13Q21.2 6 20.24 6.87Z"/><path d="M20.5 12.5V14a4 4 0 0 1-4 4H7"/><path fill="currentColor" d="M3.76 17.13L6.04 15.07Q7 14.2 7 15.5L7 20.5Q7 21.8 6.04 20.93L3.76 18.87Q2.8 18 3.76 17.13Z"/><path d="M11 10.6l.6-.4a.4.4 0 0 1 .6.4v4.4"/>"#,
+        "link-2" => r#"<path d="M9 17H7a5 5 0 0 1 0-10h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><path d="M8.5 12h7"/>"#,
+        "copy" => r#"<rect x="8" y="8" width="13" height="13" rx="3.5"/><path d="M4.5 16A1.5 1.5 0 0 1 3 14.5V7a4 4 0 0 1 4-4h7.5A1.5 1.5 0 0 1 16 4.5"/>"#,
+        "volume-2" => r#"<path fill="currentColor" d="M11 5.3v13.4a1 1 0 0 1-1.6.8L6 16.5H4.5a2.5 2.5 0 0 1-2.5-2.5v-4a2.5 2.5 0 0 1 2.5-2.5H6l3.4-3a1 1 0 0 1 1.6.8Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13"/>"#,
+        "volume-x" => r#"<path fill="currentColor" d="M11 5.3v13.4a1 1 0 0 1-1.6.8L6 16.5H4.5a2.5 2.5 0 0 1-2.5-2.5v-4a2.5 2.5 0 0 1 2.5-2.5H6l3.4-3a1 1 0 0 1 1.6.8Z"/><path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/>"#,
+        "music-2" => r#"<circle fill="currentColor" cx="8" cy="17.5" r="3.5"/><path d="M11.5 17.5V5.2a1.5 1.5 0 0 1 2.2-1.3L18 6.3"/>"#,
+        "download" => r#"<path d="M12 3L12 11.3"/><path fill="currentColor" d="M11.13 14.54L9.07 12.26Q8.2 11.3 9.5 11.3L14.5 11.3Q15.8 11.3 14.93 12.26L12.87 14.54Q12 15.5 11.13 14.54Z"/><path d="M3.5 15.5V17a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-1.5"/>"#,
+        "ellipsis-vertical" => r#"<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>"#,
+        "check" => r#"<path d="M5 12.5L7.94 15.44Q9.5 17 11.06 15.44L19 7.5"/>"#,
+        "search" => r#"<circle cx="11" cy="11" r="7.5"/><path d="M20.5 20.5l-4.2-4.2"/>"#,
+        "house" => r#"<path d="M3 10.3a3 3 0 0 1 1.1-2.3l6-5a3 3 0 0 1 3.8 0l6 5a3 3 0 0 1 1.1 2.3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3Z"/><path d="M9.5 21v-4.5a2.5 2.5 0 0 1 5 0V21"/>"#,
+        "refresh-cw" => r#"<path d="M3.8 12A8.2 8.2 0 0 1 17.24 5.69"/><path fill="currentColor" d="M19.17 8.43L16.11 8.56Q14.81 8.62 15.64 7.62L18.84 3.77Q19.67 2.77 19.85 4.06L20.29 7.09Q20.47 8.38 19.17 8.43Z"/><path d="M20.2 12A8.2 8.2 0 0 1 6.76 18.31"/><path fill="currentColor" d="M4.83 15.57L7.89 15.44Q9.19 15.38 8.36 16.38L5.16 20.23Q4.33 21.23 4.15 19.94L3.71 16.91Q3.53 15.62 4.83 15.57Z"/>"#,
+        "clock" => r#"<circle cx="12" cy="12" r="9.5"/><path d="M12 7L12 10.4Q12 12 13.36 12.85L15.2 14"/>"#,
+        "user-round" => r#"<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>"#,
+        "server" => r#"<rect x="2.5" y="2.5" width="19" height="8" rx="3"/><rect x="2.5" y="13.5" width="19" height="8" rx="3"/><path d="M6.5 6.5h.01"/><path d="M6.5 17.5h.01"/>"#,
+        "users" => r#"<circle cx="9" cy="8" r="4"/><path d="M2 20.5a7 7 0 0 1 14 0"/><path d="M15.5 4.3a4 4 0 0 1 0 7.4"/><path d="M18 14.2a7 7 0 0 1 4 6.3"/>"#,
+        "book-open" => r#"<path d="M12 7.5C10.5 5.6 8.1 4.5 5 4.5H4.5a2 2 0 0 0-2 2V16a2 2 0 0 0 2 2H6c2.5 0 4.6.8 6 2.5"/><path d="M12 7.5c1.5-1.9 3.9-3 7-3h.5a2 2 0 0 1 2 2V16a2 2 0 0 1-2 2H18c-2.5 0-4.6.8-6 2.5"/><path d="M12 7.5v13"/>"#,
+        _ => "",
     };
-    format!(
-        r#"<svg class="ic" viewBox="0 0 24 24" fill="{}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{body}</svg>"#,
-        if filled { "currentColor" } else { "none" }
-    )
+    format!(r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{body}</svg>"#)
 }
 
 /// Rich-card tags for Discord, Slack, Telegram, X, iMessage, ... plus oEmbed

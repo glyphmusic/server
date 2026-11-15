@@ -70,6 +70,13 @@ impl Accounts {
                 self.store.delete_device(&a.user.id, &a.device.id).await.map_err(store_err)?;
                 return Ok(Response::json(200, &serde_json::json!({})));
             }
+            if rest == "all/signout" {
+                if m != Method::Post {
+                    return Err(method());
+                }
+                self.store.delete_user_devices(&a.user.id).await.map_err(store_err)?;
+                return Ok(Response::json(200, &serde_json::json!({})));
+            }
             return match m {
                 Method::Delete => {
                     if !self.store.delete_device(&a.user.id, rest).await.map_err(store_err)? {
@@ -297,11 +304,53 @@ impl Accounts {
             ("/v1/account/login/info", Method::Post) => {
                 let r: LoginIdReq = json_body(req, 4096)?;
                 let login = self.pending(svc, &r.login_id).await?;
+                let has_password = if login.link {
+                    match login.pending_user_id.as_deref() {
+                        Some(uid) => self.store.user(uid).await.map_err(store_err)?.is_some_and(|u| u.pw_hash.is_some()),
+                        None => false,
+                    }
+                } else {
+                    false
+                };
                 Ok(Response::json(200, &serde_json::json!({
                     "link": login.link,
                     "handle": if login.link { login.pending_handle.clone() } else { None },
+                    "has_password": has_password,
                     "user_code": if login.link { None } else { Some(login.user_code.clone()) },
                 })))
+            }
+            ("/v1/account/link/password", Method::Post) => {
+                self.limit(svc, &format!("acct-link-pw:{ip}"), 20, 600).await?;
+                let r: LinkPasswordReq = json_body(req, 4096)?;
+                let (login, user) = self.link_login(svc, &r.login_id).await?;
+                let salt = decode_exact(&r.salt, glyph_protocol::password_kdf::SALT_LEN, "salt")?;
+                let key = decode_exact(&r.key, glyph_protocol::password_kdf::KEY_LEN, "key")?;
+                self.store.set_password(&user.id, &b64(&salt), &key_hash(&key)).await.map_err(store_err)?;
+                self.store.delete_login(&login.id).await.map_err(store_err)?;
+                Ok(Response::json(200, &serde_json::json!({ "handle": user.handle, "password_saved": true })))
+            }
+            ("/v1/account/link/recovery_code", Method::Post) => {
+                self.limit(svc, &format!("acct-link-rc:{ip}"), 10, 600).await?;
+                let r: LoginIdReq = json_body(req, 4096)?;
+                let (login, user) = self.link_login(svc, &r.login_id).await?;
+                let fresh = self.recovery_code();
+                self.store.set_recovery(&user.id, &hash(&fresh)).await.map_err(store_err)?;
+                self.store.delete_login(&login.id).await.map_err(store_err)?;
+                Ok(Response::json(200, &serde_json::json!({ "handle": user.handle, "recovery_code": fresh })))
+            }
+            ("/v1/account/link/delete", Method::Post) => {
+                self.limit(svc, &format!("acct-link-del:{ip}"), 10, 600).await?;
+                let r: LinkDeleteReq = json_body(req, 1024)?;
+                let (login, user) = self.link_login(svc, &r.login_id).await?;
+                if r.confirm_handle.trim().trim_start_matches('@').to_ascii_lowercase() != user.handle {
+                    return Err(ApiErr::new(400, "handle_mismatch", "confirm_handle does not match"));
+                }
+                if let Some(b) = &self.blobs {
+                    b.delete_prefix(&format!("users/{}/", user.id)).await.map_err(store_err)?;
+                }
+                self.store.delete_user(&user.id, now + HANDLE_HOLD).await.map_err(store_err)?;
+                self.store.delete_login(&login.id).await.map_err(store_err)?;
+                Ok(Response::json(200, &serde_json::json!({ "handle": user.handle, "deleted": true })))
             }
             ("/v1/account/passkey/link", Method::Post) => {
                 let a = self.auth(svc, req).await?;
@@ -559,7 +608,7 @@ impl Accounts {
                 Ok(r)
             }
             (p, _) if matches!(p, "/v1/account" | "/v1/devices" | "/v1/sync/push" | "/v1/sync/pull" | "/v1/sync/export" | "/v1/account/recovery_code")
-                || p.starts_with("/v1/account/login/") || p.starts_with("/v1/account/passkey/") || p.starts_with("/v1/account/password")
+                || p.starts_with("/v1/account/login/") || p.starts_with("/v1/account/passkey/") || p.starts_with("/v1/account/password") || p.starts_with("/v1/account/link/")
                 || p == "/v1/account/recover" || p == "/v1/account/token/refresh" =>
             {
                 Err(method())
@@ -616,5 +665,13 @@ impl Accounts {
             }
             _ => Err(method()),
         }
+    }
+
+    /// Resolve a live, unexpired `link` session issued for browser security actions.
+    async fn link_login(&self, svc: &Arc<Services>, login_id: &str) -> Result<(Login, User), ApiErr> {
+        let login = self.pending(svc, login_id).await?;
+        let user_id = login.pending_user_id.as_deref().filter(|_| login.link).ok_or_else(unauthorized)?;
+        let user = self.store.user(user_id).await.map_err(store_err)?.ok_or_else(unauthorized)?;
+        Ok((login, user))
     }
 }

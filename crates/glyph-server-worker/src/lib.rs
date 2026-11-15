@@ -690,6 +690,50 @@ fn canonical_address(url: &worker::Url) -> Option<worker::Url> {
     Some(to)
 }
 
+/// A core response (error page, JSON error) as a Worker response.
+fn core_to_worker(resp: glyph_server_core::Response) -> Result<worker::Response> {
+    let headers = Headers::new();
+    for (k, v) in &resp.headers { headers.set(k, v)?; }
+    Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers))
+}
+
+/// `/web/*`: a file of the web player from the `ASSETS` binding (wrangler.toml
+/// `[assets]`, filled by `scripts/snapshot-web.mjs`). Page addresses that are
+/// not files get the app page (single-page app); headers come from the core
+/// (`site::web`). Without a built player this is the site's 404 page.
+async fn web_player(req: &worker::Request, env: &Env, request: &glyph_server_core::Request) -> Result<worker::Response> {
+    use glyph_server_core::site::web::{self, Target};
+    let page = glyph_server_core::site::page_lang(request);
+    let missing = || core_to_worker(glyph_server_core::site::as_page(page, glyph_server_core::Response::error(glyph_server_core::ApiErr::not_found("web player not found"))));
+    if !matches!(req.method(), worker::Method::Get | worker::Method::Head) {
+        return core_to_worker(glyph_server_core::Response::error(glyph_server_core::ApiErr::new(405, "method_not_allowed", "wrong HTTP method for this endpoint")));
+    }
+    let mut file = match web::target(&request.path) {
+        Some(Target::Redirect(to)) => {
+            let mut url = req.url()?;
+            url.set_path(to);
+            return worker::Response::redirect_with_status(url, 301);
+        }
+        Some(Target::File(f)) => f,
+        None => return missing(),
+    };
+    let Ok(assets) = env.assets("ASSETS") else { return missing() };
+    let mut resp = assets.fetch(format!("https://assets.local/{file}"), None).await?;
+    if resp.status_code() == 404 {
+        if let Some(index) = web::fallback(&file) {
+            file = index.to_string();
+            resp = assets.fetch(format!("https://assets.local/{file}"), None).await?;
+        }
+    }
+    if resp.status_code() != 200 {
+        return missing();
+    }
+    let body = resp.bytes().await?;
+    let headers = Headers::new();
+    for (k, v) in web::headers(&file) { headers.set(&k, &v)?; }
+    Ok(worker::Response::from_bytes(body)?.with_headers(headers))
+}
+
 async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worker::Response> {
     let url = req.url()?;
     if let Some(to) = canonical_address(&url).filter(|_| matches!(req.method(), worker::Method::Get | worker::Method::Head)) {
@@ -734,6 +778,13 @@ async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
     }
     if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
         return media::handle(&req, &request, &server, &ctx, &env).await;
+    }
+    // The web player (glyph.my/web): its built files from the static assets.
+    if glyph_server_core::site::web::owns(&request.path) {
+        if let Some(to) = glyph_server_core::site::moved_page(&request, server.services().config.share_origin.as_deref()) {
+            return worker::Response::redirect_with_status(worker::Url::parse(&to)?, 301);
+        }
+        return web_player(&req, &env, &request).await;
     }
     // A song of a short link as a plain audio file (web player, yt-dlp, curl):
     // from R2 when cached, else through the companion (and into R2).

@@ -1072,6 +1072,23 @@ fn device_location_is_host_derived_and_logout_revokes_both_tokens() {
 }
 
 #[test]
+fn signout_all_revokes_all_own_devices_only() {
+    let t = setup();
+    let (alice, _, _) = sign_up(&t, "alice_all");
+    let (bob, _, _) = sign_up(&t, "bob_all");
+    let login = start(&t, "Phone");
+    assert_eq!(call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code": login.user_code}), Some(&alice.access_token)).0, 200);
+    let LoginPollResponse::Done { session: phone } = poll(&t, &login) else { panic!() };
+    assert_eq!(call(&t, Method::Get, "/v1/devices", serde_json::Value::Null, Some(&alice.access_token)).1["devices"].as_array().unwrap().len(), 2);
+    assert_eq!(call(&t, Method::Get, "/v1/devices/all/signout", serde_json::Value::Null, Some(&alice.access_token)).0, 405);
+    assert_eq!(call(&t, Method::Post, "/v1/devices/all/signout", serde_json::Value::Null, Some(&alice.access_token)).0, 200);
+    assert_eq!(call(&t, Method::Get, "/v1/devices", serde_json::Value::Null, Some(&alice.access_token)).0, 401);
+    assert_eq!(call(&t, Method::Get, "/v1/devices", serde_json::Value::Null, Some(&phone.access_token)).0, 401);
+    assert_eq!(call(&t, Method::Post, "/v1/account/token/refresh", serde_json::json!({"refresh_token": phone.refresh_token}), None).0, 401);
+    assert_eq!(call(&t, Method::Get, "/v1/devices", serde_json::Value::Null, Some(&bob.access_token)).0, 200);
+}
+
+#[test]
 fn jam_relays_between_host_and_members() {
     let t = setup();
     t.s.update_config(|c| c.rate_limit_per_min = 1000);
@@ -1451,4 +1468,44 @@ fn jam_position_updates_are_small() {
     assert_eq!(call(&t, Method::Post, &at("/state"), state, Some(&host.access_token)).1["rev"], 4);
     let (_, v) = call(&t, Method::Get, &at("?rev=3"), none, Some(&ana.access_token));
     assert_eq!((v["rev"].as_u64(), v["now"]["position_ms"].as_u64()), (Some(4), Some(1000)));
+}
+
+#[test]
+fn browser_link_security_routes_password_recovery_and_delete() {
+    let t = setup();
+    let (s, _, old_rc) = sign_up(&t, "secweb");
+
+    // 1. Set password via browser link token.
+    let (st, v) = call(&t, Method::Post, "/v1/account/passkey/link", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 200, "{v}");
+    let link_id = v["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    let (_, info) = call(&t, Method::Post, "/v1/account/login/info", serde_json::json!({"login_id": link_id}), None);
+    assert_eq!((info["link"].as_bool(), info["has_password"].as_bool()), (Some(true), Some(false)));
+    let (st, v) = call(&t, Method::Post, "/v1/account/link/password", serde_json::json!({"login_id": link_id, "salt": b64(&[7u8; 16]), "key": b64(&[3u8; 32])}), None);
+    assert_eq!((st, v["password_saved"].as_bool()), (200, Some(true)));
+    assert_eq!(pw_login(&t, "secweb", &[3; 32]).0, 200);
+    // Consumed token cannot be reused.
+    let (st, _) = call(&t, Method::Post, "/v1/account/link/recovery_code", serde_json::json!({"login_id": link_id}), None);
+    assert_ne!(st, 200);
+
+    // 2. Rotate recovery code via new link token; info reports has_password=true.
+    let (_, v) = call(&t, Method::Post, "/v1/account/passkey/link", serde_json::Value::Null, Some(&s.access_token));
+    let link_id = v["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    let (_, info) = call(&t, Method::Post, "/v1/account/login/info", serde_json::json!({"login_id": link_id}), None);
+    assert_eq!(info["has_password"].as_bool(), Some(true));
+    let (st, v) = call(&t, Method::Post, "/v1/account/link/recovery_code", serde_json::json!({"login_id": link_id}), None);
+    let new_rc = v["recovery_code"].as_str().unwrap().to_string();
+    assert_eq!(st, 200);
+    assert!(new_rc.starts_with("glyph-rc-"));
+    assert_ne!(new_rc, old_rc);
+
+    // 3. Delete account via link token requires matching handle.
+    let (_, v) = call(&t, Method::Post, "/v1/account/passkey/link", serde_json::Value::Null, Some(&s.access_token));
+    let link_id = v["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    let (st, _) = call(&t, Method::Post, "/v1/account/link/delete", serde_json::json!({"login_id": link_id, "confirm_handle": "wrong"}), None);
+    assert_eq!(st, 400);
+    let (st, v) = call(&t, Method::Post, "/v1/account/link/delete", serde_json::json!({"login_id": link_id, "confirm_handle": "@SecWeb"}), None);
+    assert_eq!((st, v["deleted"].as_bool()), (200, Some(true)));
+    let (st, _) = call(&t, Method::Get, "/v1/account", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 401);
 }

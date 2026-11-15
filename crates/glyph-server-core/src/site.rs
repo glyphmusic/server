@@ -3,11 +3,13 @@
 //! `/plugins` (the plugin catalog, loaded from GitHub in the browser), the
 //! docs (`docs.rs`, on `docs.*` hosts and `/docs`), and
 //! what crawlers and chat apps look for (robots.txt, sitemap.xml, llms.txt, icons, the link-card image). The `/p/` playlist page
-//! (`share.rs`) uses the same stylesheet and ASCII note.
+//! (`share.rs`) uses the same stylesheet and ASCII note. The web player at
+//! `/web` (`web.rs`) is served by the hosts from its built files.
 
 pub mod changelog;
 pub mod docs;
 pub mod plugins;
+pub mod web;
 
 use crate::error::ApiErr;
 use crate::server::{Body, Request, Response};
@@ -60,7 +62,7 @@ const FILES: &[(&str, &str, u32, &[u8])] = &[
 pub fn moved_page(req: &Request, share_origin: Option<&str>) -> Option<String> {
     let share = share_origin?.trim_end_matches('/');
     let path = req.path.trim_end_matches('/');
-    let page = path.is_empty() || path == "/download" || path == "/changelog" || plugins::owns(path);
+    let page = path.is_empty() || path == "/download" || path == "/changelog" || plugins::owns(path) || web::owns(path);
     let host = req.header("host").unwrap_or("").to_ascii_lowercase();
     let same = share.split_once("://").is_some_and(|(_, h)| h.eq_ignore_ascii_case(&host));
     (page && req.method == Method::Get && !req.local && !host.is_empty() && !same).then(|| format!("{share}{}", if path.is_empty() { "/" } else { path }))
@@ -212,6 +214,8 @@ mod tests {
         let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert_eq!(r.status, 200);
         assert!(html.contains("function glyphNote") && html.contains("--pink") && !html.contains("/*NOTE*/"));
+        assert!(html.contains(r#"href="/web/#settings/account""#));
+        assert!(html.contains("glyph.web.account") && html.contains(r#"location.replace("/web/")"#));
         assert_eq!(block_on(s.handle(get("/shots/home.webp"))).status, 404);
         let shot = block_on(s.handle(get("/shots/home.jpg")));
         assert_eq!(shot.status, 200);
@@ -257,6 +261,8 @@ mod tests {
         assert_eq!(moved_page(&get("api.glyph.my", "/"), share).as_deref(), Some("https://glyph.my/"));
         assert_eq!(moved_page(&get("glyph.my", "/download"), share), None);
         assert_eq!(moved_page(&get("api.glyph.my", "/robots.txt"), share), None);
+        assert_eq!(moved_page(&get("api.glyph.my", "/web/search"), share).as_deref(), Some("https://glyph.my/web/search"));
+        assert_eq!(moved_page(&get("glyph.my", "/web/"), share), None);
         assert_eq!(moved_page(&get("api.glyph.my", "/"), None), None);
         assert_eq!(moved_page(&get("localhost:8787", "/").with_transport(false, true), share), None);
     }

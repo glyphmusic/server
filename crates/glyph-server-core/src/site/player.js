@@ -131,8 +131,8 @@ function glyphPlayer(base, count) {
     const b = $("brep");
     b.classList.toggle("on", repeat > 0);
     b.querySelector("svg").outerHTML = repeat === 2
-      ? '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>'
-      : '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>';
+      ? '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 11.5V10a4 4 0 0 1 4-4h9.5"/><path fill="currentColor" d="M20.24 6.87L17.96 8.93Q17 9.8 17 8.5L17 3.5Q17 2.2 17.96 3.07L20.24 5.13Q21.2 6 20.24 6.87Z"/><path d="M20.5 12.5V14a4 4 0 0 1-4 4H7"/><path fill="currentColor" d="M3.76 17.13L6.04 15.07Q7 14.2 7 15.5L7 20.5Q7 21.8 6.04 20.93L3.76 18.87Q2.8 18 3.76 17.13Z"/><path d="M11 10.6l.6-.4a.4.4 0 0 1 .6.4v4.4"/></svg>'
+      : '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 11.5V10a4 4 0 0 1 4-4h9.5"/><path fill="currentColor" d="M20.24 6.87L17.96 8.93Q17 9.8 17 8.5L17 3.5Q17 2.2 17.96 3.07L20.24 5.13Q21.2 6 20.24 6.87Z"/><path d="M20.5 12.5V14a4 4 0 0 1-4 4H7"/><path fill="currentColor" d="M3.76 17.13L6.04 15.07Q7 14.2 7 15.5L7 20.5Q7 21.8 6.04 20.93L3.76 18.87Q2.8 18 3.76 17.13Z"/></svg>';
     b.dataset.tip = repeat === 2 ? ds.repeatOne : ds.repeat;
     pop(b);
   };
@@ -170,8 +170,8 @@ function glyphPlayer(base, count) {
   }
   const drawSeek = bar($("seek"), (f) => { if (a.duration) a.currentTime = f * a.duration; }, false, (f) => fmt(f * (a.duration || 0)));
   const muteIcon = (m) => { $("mute").querySelector("svg").outerHTML = m
-    ? '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg>'
-    : '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg>';
+    ? '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill="currentColor" d="M11 5.3v13.4a1 1 0 0 1-1.6.8L6 16.5H4.5a2.5 2.5 0 0 1-2.5-2.5v-4a2.5 2.5 0 0 1 2.5-2.5H6l3.4-3a1 1 0 0 1 1.6.8Z"/><path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/></svg>'
+    : '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill="currentColor" d="M11 5.3v13.4a1 1 0 0 1-1.6.8L6 16.5H4.5a2.5 2.5 0 0 1-2.5-2.5v-4a2.5 2.5 0 0 1 2.5-2.5H6l3.4-3a1 1 0 0 1 1.6.8Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13"/></svg>';
     $("mute").dataset.tip = m ? ds.unmute : ds.mute; };
   const drawVol = bar($("vol"), (f) => { vol = f; a.volume = f; a.muted = f <= 0.001; muteIcon(a.muted); }, true, (f) => Math.round(f * 100) + "%");
   $("mute").onclick = () => { a.muted = !a.muted; drawVol(a.muted ? 0 : vol); muteIcon(a.muted); };
@@ -214,10 +214,10 @@ function glyphPlayer(base, count) {
       b.onclick = () => { close(); fn(); };
       m.append(b);
     };
-    const svg = (p, fill) => `<svg class="ic" viewBox="0 0 24 24" fill="${fill ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
-    item(svg('<polygon points="6 3 20 12 6 21 6 3"/>', true), ds.menuPlay, () => playSong(+r.dataset.n));
-    item(svg('<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>'), ds.menuCopy, () => copy(r.dataset.title + " — " + r.dataset.artist, ds.copiedSong));
-    item(svg('<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>'), ds.menuLink, () => copy(location.origin + base, ds.copied));
+    const svg = (p) => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+    item(svg('<path fill="currentColor" d="M9.14 5.79L17.36 10.71Q19.5 12 17.36 13.29L9.14 18.21Q7 19.5 7 17L7 7Q7 4.5 9.14 5.79Z"/>'), ds.menuPlay, () => playSong(+r.dataset.n));
+    item(svg('<rect x="8" y="8" width="13" height="13" rx="3.5"/><path d="M4.5 16A1.5 1.5 0 0 1 3 14.5V7a4 4 0 0 1 4-4h7.5A1.5 1.5 0 0 1 16 4.5"/>'), ds.menuCopy, () => copy(r.dataset.title + " — " + r.dataset.artist, ds.copiedSong));
+    item(svg('<path d="M9 17H7a5 5 0 0 1 0-10h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><path d="M8.5 12h7"/>'), ds.menuLink, () => copy(location.origin + base, ds.copied));
     document.body.append(m);
     const w = m.offsetWidth, h = m.offsetHeight;
     m.style.left = Math.max(6, Math.min(innerWidth - w - 6, x)) + "px";

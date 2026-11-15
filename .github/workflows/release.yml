@@ -32,6 +32,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Restores the compiled dependencies that release-cache.yml saves on
+      # main; a cache saved here would only be visible to this tag.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: glyph-server
+          shared-key: release-${{ matrix.target }}
+          save-if: false
       - name: Build
         working-directory: glyph-server
         run: cargo build --release -p glyph-server-native --target ${{ matrix.target }}
@@ -79,6 +86,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # Also restores worker-build from ~/.cargo/bin, so `cargo install`
+      # below finds it already installed.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: glyph-server
+          shared-key: release-worker
+          save-if: false
       - name: Build the portable Worker payload
         working-directory: glyph-server/crates/glyph-server-worker
         run: |

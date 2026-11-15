@@ -24,6 +24,8 @@ struct AppState {
     trust_proxy: bool,
     /// We terminate TLS ourselves.
     tls: bool,
+    /// Built web player for `/web` (settings `web_dir`).
+    web_dir: Option<std::path::PathBuf>,
 }
 
 pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
@@ -165,7 +167,12 @@ pub async fn run(s: Settings, logs: Arc<LogBuffer>, shutdown: impl Future<Output
     if let Some(rdlp) = crate::ytdlp_pool::init_rdlp(s.rdlp_path.as_deref()) { tracing::info!("r-dlp: {rdlp}"); }
     if let Some(program) = server.services().config.ytdlp_path.clone() { crate::ytdlp_pool::warm(program); }
     let enabled = server.services().config.enabled_providers();
-    let state = AppState { server, trust_proxy: s.trust_proxy, tls: s.tls.is_some() };
+    if let Some(dir) = &s.web_dir {
+        if !dir.join(glyph_server_core::site::web::INDEX).is_file() {
+            tracing::warn!("web_dir {} has no index.html: /web stays empty (build it with `npm run build:web` in glyph-apps/glyph-ui)", dir.display());
+        }
+    }
+    let state = AppState { server, trust_proxy: s.trust_proxy, tls: s.tls.is_some(), web_dir: s.web_dir.clone() };
     let app = Router::new().fallback(handle).with_state(state);
     let make = app.into_make_service_with_connect_info::<SocketAddr>();
     let addr: SocketAddr = s
@@ -296,6 +303,10 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     if std::env::var("YTDLP_SERVICE_TOKEN").ok().is_some_and(|t| t.len() >= 32) && path_only != "/v1/health" {
         return plain(StatusCode::NOT_FOUND, "not found");
     }
+    // The web player: its built files, the app page for page addresses.
+    if glyph_server_core::site::web::owns(&path_only) {
+        return web_player(st.web_dir.as_deref(), &probe).await;
+    }
     // Audio/cover streaming happens here, not in the core router (streamed bytes,
     // byte ranges and provider-side redirects).
     if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
@@ -341,6 +352,44 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         CoreBody::Stream(s) => Body::from_stream(s.map(|chunk| Ok::<Bytes, Infallible>(Bytes::from(chunk)))),
     };
     out.body(body).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"))
+}
+
+/// `/web/*` from `web_dir` (see `glyph_server_core::site::web`). Without a
+/// built player this is the site's 404 page.
+async fn web_player(dir: Option<&std::path::Path>, req: &Request) -> Response {
+    use glyph_server_core::site::web::{self, Target};
+    let missing = || {
+        let resp = glyph_server_core::site::as_page(
+            glyph_server_core::site::page_lang(req),
+            glyph_server_core::Response::error(glyph_server_core::ApiErr::not_found("web player not found")),
+        );
+        let mut out = Response::builder().status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::NOT_FOUND));
+        for (k, v) in &resp.headers { out = out.header(k.as_str(), v.as_str()); }
+        out.body(Body::from(resp.bytes().unwrap_or_default().to_vec())).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"))
+    };
+    if req.method != Method::Get {
+        return plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    }
+    let Some(dir) = dir else { return missing() };
+    let mut file = match web::target(&req.path) {
+        Some(Target::Redirect(to)) => {
+            return Response::builder().status(StatusCode::MOVED_PERMANENTLY).header("location", to).body(Body::empty())
+                .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"));
+        }
+        Some(Target::File(f)) => f,
+        None => return missing(),
+    };
+    let mut bytes = tokio::fs::read(dir.join(&file)).await;
+    if bytes.is_err() {
+        if let Some(index) = web::fallback(&file) {
+            file = index.to_string();
+            bytes = tokio::fs::read(dir.join(&file)).await;
+        }
+    }
+    let Ok(bytes) = bytes else { return missing() };
+    let mut out = Response::builder().status(StatusCode::OK);
+    for (k, v) in web::headers(&file) { out = out.header(k, v); }
+    out.body(Body::from(bytes)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "response build failed"))
 }
 
 /// Largest audio payload we hand out (a long mix in M4A/AAC).

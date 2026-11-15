@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>Glyph — every song, one quiet player</title>
+<script>try{var s=JSON.parse(localStorage.getItem("glyph.web.account")||"null");if(s&&s.refresh_token&&s.account)location.replace("/web/");}catch(e){}</script>
 <meta name="description" content="Glyph is a fast desktop music player for Windows, macOS and Linux. It searches many legal music sources at once and keeps your library, playlists and lyrics in one flat app.">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Glyph — every song, one quiet player">
@@ -36,9 +37,11 @@
 nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
 nav .brand { font-weight: 700; text-decoration: none; }
 /*BRAND*/
-nav .links { display: flex; gap: 3ch; }
+nav .links { display: flex; gap: 3ch; align-items: baseline; }
 nav .links a { color: var(--dim); text-decoration: none; }
 nav .links a:hover { color: var(--fg); }
+nav .links a.login { color: var(--fg); border: 1px solid var(--line); padding: 3px 1.2ch; }
+nav .links a.login:hover, nav .links a.login:focus-visible { border-color: var(--fg); background: var(--fg); color: var(--bg); outline: none; }
 
 .hero { position: relative; text-align: center; padding: 8px 0 56px; }
 .hero canvas { display: block; width: 100%; height: clamp(300px, 46vw, 420px); }
@@ -85,6 +88,7 @@ footer a { color: var(--dim); }
   .faq { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
+  nav .links { gap: 2ch; }
   nav .links a.opt { display: none; }
   .features { grid-template-columns: 1fr; }
 }
@@ -101,6 +105,7 @@ footer a { color: var(--dim); }
     <a class="opt" href="/changelog">changelog</a>
     <a href="/download">download</a>
     <a href="https://github.com/glyphmusic/apps">github</a>
+    <a class="login" href="/web/#settings/account">login</a>
   </div>
 </nav>
 

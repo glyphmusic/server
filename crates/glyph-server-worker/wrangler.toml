@@ -19,6 +19,18 @@ routes = [
   { pattern = "www.glyph.my/*", zone_name = "glyph.my" },
 ]
 
+# The web player (glyph.my/web, see glyph-apps/docs/WEB.md): its built files,
+# copied here by `node scripts/snapshot-web.mjs` before `wrangler deploy`.
+# The Worker answers every request first and reads these through the ASSETS
+# binding (src/lib.rs web_player), so it sets the headers and the
+# single-page fallback itself; nothing here is served at other paths.
+[assets]
+directory = "../../glyph-web"
+binding = "ASSETS"
+run_worker_first = true
+html_handling = "none"
+not_found_handling = "none"
+
 # Keep production diagnostics in sync with the Cloudflare dashboard.
 [observability.logs]
 enabled = true

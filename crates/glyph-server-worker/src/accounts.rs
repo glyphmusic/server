@@ -473,6 +473,11 @@ impl AccountStore for D1Store {
         Ok(self.run("DELETE FROM devices WHERE id = ?1 AND user_id = ?2", &[s(id), s(user_id)]).await? > 0)
     }
 
+    async fn delete_user_devices(&self, user_id: &str) -> StoreResult<()> {
+        self.run("DELETE FROM devices WHERE user_id = ?1", &[s(user_id)]).await?;
+        Ok(())
+    }
+
     async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
         let o = |v: Option<&str>| opt(&v.map(str::to_string));
         self.run("UPDATE devices SET ip_hash = COALESCE(?2, ip_hash), hw_hash = COALESCE(?3, hw_hash) WHERE id = ?1", &[s(id), o(ip_hash), o(hw_hash)])

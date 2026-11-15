@@ -201,6 +201,8 @@ pub trait AccountStore: MaybeSendSync {
     async fn touch_device(&self, id: &str, last_seen: u64, approximate_location: Option<&str>) -> StoreResult<()>;
     /// `false` when no such device belongs to the user.
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool>;
+    /// Remove all devices belonging to `user_id`.
+    async fn delete_user_devices(&self, user_id: &str) -> StoreResult<()>;
     /// Remember the hashes bans match on (only called when they changed).
     async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()>;
     /// Totals for the operator; `None` when the store cannot count.
@@ -433,6 +435,10 @@ impl AccountStore for MemStore {
             return Ok(true);
         }
         Ok(false)
+    }
+    async fn delete_user_devices(&self, user_id: &str) -> StoreResult<()> {
+        self.m.lock().unwrap().devices.retain(|_, d| d.user_id != user_id);
+        Ok(())
     }
     async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
         if let Some(d) = self.m.lock().unwrap().devices.get_mut(id) {

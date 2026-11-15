@@ -57,6 +57,8 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
 .act:disabled { border-color: var(--line); }
 .act.alt { border-color: var(--line); }
 .act.alt:hover, .act.alt:focus-visible { border-color: var(--fg); }
+.act.danger { border-color: var(--bad); color: var(--bad); }
+.act.danger:hover, .act.danger:focus-visible { background: var(--bad); color: var(--bg); }
 .or { display: flex; align-items: center; gap: 1ch; color: var(--dim); }
 .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .quiet { align-self: flex-start; color: var(--dim); }
@@ -152,7 +154,38 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
   </form>
 
   <div class="stack" id="p-link" hidden>
-    <button class="act" id="go-link" data-t="createpk"></button>
+    <div class="tabs" id="sec-tabs">
+      <button id="s-pk" data-t="sec_tab_pk"></button>
+      <button id="s-pw" data-t="sec_tab_pw"></button>
+      <button id="s-rc" data-t="sec_tab_rc"></button>
+      <button id="s-del" data-t="sec_tab_del"></button>
+    </div>
+    <div class="stack" id="sec-pk">
+      <button class="act" id="go-link" data-t="createpk"></button>
+    </div>
+    <form class="stack" id="sec-pw" hidden autocomplete="on">
+      <div class="field">
+        <label for="link-pw" data-t="password"></label>
+        <div class="input"><input id="link-pw" name="new-password" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="field">
+        <label for="link-pw2" data-t="repeat"></label>
+        <div class="input"><input id="link-pw2" type="password" autocomplete="new-password"></div>
+        <div class="note" data-t="pw_rules"></div>
+      </div>
+      <button class="act" id="go-link-pw" type="submit" data-t="pw_save"></button>
+    </form>
+    <div class="stack" id="sec-rc" hidden>
+      <div class="note" data-t="rc_gen_note"></div>
+      <button class="act" id="go-link-rc" type="button" data-t="rc_gen_btn"></button>
+    </div>
+    <form class="stack" id="sec-del" hidden autocomplete="off">
+      <div class="field">
+        <label for="del-handle" id="del-label" data-t="del_confirm"></label>
+        <div class="input"><span>@</span><input id="del-handle" autocapitalize="none" spellcheck="false"></div>
+      </div>
+      <button class="act danger" id="go-link-del" type="submit" data-t="del_btn"></button>
+    </form>
   </div>
 
   <div class="stack" id="p-rec" hidden>
@@ -188,11 +221,12 @@ button:disabled { color: var(--dim); background: none; cursor: default; }
 </main>
 <script>
 "use strict";
-const T = { title:"sign in", lead:"your library on every device.", link_title:"add passkey", link_lead:"sign in as @{h} without a password from now on.", code:"code in glyph", signin:"sign in", create:"new account", passkey:"continue with passkey", createpk:"create passkey", recover:"sign in with recovery code", recover_q:"lost your passkey? use a recovery code", password:"password", repeat:"repeat password", or:"or", create_btn:"create account", passkey_alt:"create a passkey instead", pw_rules:"at least 10 characters. it is hashed on this device, the server never sees it.", pw_short:"the password needs at least 10 characters.", pw_mismatch:"the passwords do not match.", login_failed:"handle or password wrong.", fill:"enter handle and password.", nokdf:"could not load the password module. reload the page or use a passkey.", back_q:"back to passkey", handle:"handle", rules:"3-20 characters: a-z 0-9 _", rc_label:"recovery code", rc:"your recovery code. store it somewhere safe, it is shown only once.", rc_reveal:"click to show", rc_show:"[show]", rc_hide:"[hide]", rc_copy:"[copy]", rc_copied:"[copied]", rc_dl:"[download .txt]", full:"device limit reached. remove one device to finish:", back:"done. close this tab and go back to glyph.", linked:"passkey added. you can close this tab.", remove:"remove", free:"is free", taken:"is taken", invalid:"3-20 characters: a-z 0-9 _", reserved:"is reserved", expired:"this sign-in expired. start again in glyph.", nopk:"this browser cannot use passkeys. use a pairing code in glyph instead.", failed:"that did not work. try again.", cancelled:"cancelled." };
+const T = { title:"sign in", lead:"your library on every device.", link_title:"add passkey", link_lead:"sign in as @{h} without a password from now on.", pw_set_title:"set password", pw_chg_title:"change password", pw_lead:"set or change the password for @{h}. other devices stay signed in.", pw_save:"save password", pw_saved:"password saved. you can close this tab.", rc_title:"recovery code", rc_lead:"generate a new recovery code for @{h}. the previous one stops working.", rc_gen_note:"store the new code safely. it is shown only once.", rc_gen_btn:"generate new recovery code", rc_done:"new recovery code created. save it, then close this tab.", del_title:"delete account", del_lead:"permanently delete @{h} and all synced library data.", del_confirm:"type your handle to confirm", del_btn:"delete account", del_done:"account deleted. you can close this tab.", handle_mismatch:"handle does not match.", sec_tab_pk:"passkey", sec_tab_pw:"password", sec_tab_rc:"recovery", sec_tab_del:"delete", code:"code in glyph", signin:"sign in", create:"new account", passkey:"continue with passkey", createpk:"create passkey", recover:"sign in with recovery code", recover_q:"lost your passkey? use a recovery code", password:"password", repeat:"repeat password", or:"or", create_btn:"create account", passkey_alt:"create a passkey instead", pw_rules:"at least 10 characters. it is hashed on this device, the server never sees it.", pw_short:"the password needs at least 10 characters.", pw_mismatch:"the passwords do not match.", login_failed:"handle or password wrong.", fill:"enter handle and password.", nokdf:"could not load the password module. reload the page or use a passkey.", back_q:"back to passkey", handle:"handle", rules:"3-20 characters: a-z 0-9 _", rc_label:"recovery code", rc:"your recovery code. store it somewhere safe, it is shown only once.", rc_reveal:"click to show", rc_show:"[show]", rc_hide:"[hide]", rc_copy:"[copy]", rc_copied:"[copied]", rc_dl:"[download .txt]", full:"device limit reached. remove one device to finish:", back:"done. close this tab and go back to glyph.", linked:"passkey added. you can close this tab.", remove:"remove", free:"is free", taken:"is taken", invalid:"3-20 characters: a-z 0-9 _", reserved:"is reserved", expired:"this sign-in expired. start again in glyph.", nopk:"this browser cannot use passkeys. use a pairing code in glyph instead.", failed:"that did not work. try again.", cancelled:"cancelled." };
 document.querySelectorAll("[data-t]").forEach(e => { e.textContent = T[e.dataset.t]; });
 const $ = id => document.getElementById(id);
 const loginId = location.pathname.split("/").filter(Boolean).pop();
-let pageSecret = null, limit = 5;
+const initAction = new URLSearchParams(location.search).get("action") || "passkey";
+let pageSecret = null, limit = 5, linkInfo = null;
 
 // "-- title -------------" filling the column.
 function rule(id, label) {
@@ -240,12 +274,41 @@ $("t-rec").onclick = () => show("rec");
 $("t-back").onclick = () => show("in");
 if (!window.PublicKeyCredential) { $("err").textContent = "!! " + T.nopk; }
 
+function showSecurity(act) {
+  const map = { passkey: "pk", password: "pw", recovery: "rc", delete: "del" };
+  const key = map[act] || "pk";
+  ["pk", "pw", "rc", "del"].forEach(k => {
+    $("sec-" + k).hidden = k !== key;
+    $("s-" + k).classList.toggle("on", k === key);
+  });
+  const h = (linkInfo && linkInfo.handle) || "";
+  if (key === "pw") {
+    rule("rule-start", linkInfo && linkInfo.has_password ? T.pw_chg_title : T.pw_set_title);
+    $("lead").textContent = T.pw_lead.replace("{h}", h);
+  } else if (key === "rc") {
+    rule("rule-start", T.rc_title);
+    $("lead").textContent = T.rc_lead.replace("{h}", h);
+  } else if (key === "del") {
+    rule("rule-start", T.del_title);
+    $("lead").textContent = T.del_lead.replace("{h}", h);
+    $("del-handle").placeholder = h;
+  } else {
+    rule("rule-start", T.link_title);
+    $("lead").textContent = T.link_lead.replace("{h}", h);
+  }
+  $("err").textContent = "";
+}
+$("s-pk").onclick = () => showSecurity("passkey");
+$("s-pw").onclick = () => showSecurity("password");
+$("s-rc").onclick = () => showSecurity("recovery");
+$("s-del").onclick = () => showSecurity("delete");
+
 api("/v1/account/login/info", { login_id: loginId }).then(info => {
   if (info.link) {
-    rule("rule-start", T.link_title);
-    $("lead").textContent = T.link_lead.replace("{h}", info.handle || "");
+    linkInfo = info;
     $("seg").hidden = true;
     show("link");
+    showSecurity(initAction);
   } else if (info.user_code) {
     $("ucode").textContent = info.user_code;
     $("codebox").hidden = false;
@@ -315,6 +378,29 @@ $("p-new").onsubmit = ev => {
   });
 };
 $("go-link").onclick = () => busy($("go-link"), async () => done(await create()));
+$("sec-pw").onsubmit = ev => {
+  ev.preventDefault();
+  busy($("go-link-pw"), async () => {
+    const pw = $("link-pw").value;
+    if (!pw) throw err("fill");
+    if ([...pw].length < 10) throw err("pw_short");
+    if (pw !== $("link-pw2").value) throw err("pw_mismatch");
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await derive(pw, salt);
+    done(await api("/v1/account/link/password", { login_id: loginId, salt: b2a(salt), key: b2a(key) }));
+  });
+};
+$("go-link-rc").onclick = () => busy($("go-link-rc"), async () => {
+  done(await api("/v1/account/link/recovery_code", { login_id: loginId }));
+});
+$("sec-del").onsubmit = ev => {
+  ev.preventDefault();
+  busy($("go-link-del"), async () => {
+    const typed = $("del-handle").value.trim().replace(/^@/, "").toLowerCase();
+    if (!typed) throw err("handle_mismatch");
+    done(await api("/v1/account/link/delete", { login_id: loginId, confirm_handle: typed }));
+  });
+};
 
 $("go-in").onclick = () => busy($("go-in"), async () => {
   const o = await api("/v1/account/passkey/login/options", { login_id: loginId });
@@ -340,6 +426,13 @@ function done(r) {
   $("done").hidden = false;
   rule("rule-done", "@" + r.handle);
   if (r.linked) { $("done-lead").textContent = "ok " + T.linked; return; }
+  if (r.password_saved) { $("done-lead").textContent = "ok " + T.pw_saved; return; }
+  if (r.deleted) { $("done-lead").textContent = "ok " + T.del_done; return; }
+  if (r.recovery_code && linkInfo) {
+    $("done-lead").textContent = "ok " + T.rc_done;
+    recoveryCode(r.handle, r.recovery_code);
+    return;
+  }
   pageSecret = r.page_secret;
   limit = r.device_limit;
   if (r.recovery_code) recoveryCode(r.handle, r.recovery_code);
