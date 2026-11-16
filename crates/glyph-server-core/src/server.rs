@@ -293,7 +293,7 @@ impl Server {
                 }
             }
         } else { None };
-        let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.blobs.is_some()));
+        let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.cache_blobs.is_some() || a.blobs.is_some()));
         match dispatch(&svc, route, req, features).await {
             Ok(mut r) => {
                 if let Body::Stream(stream) = r.body {
@@ -489,34 +489,55 @@ async fn check_rules_mode(svc: &Services, rules: &[(String, String, u32)], penal
 /// a YouTube thumbnail only when no square cover was found. Callers redirect to
 /// the answer, so a client-chosen URL elsewhere is never returned (no open redirect).
 pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option<String> {
+    find_cover_meta(svc, track).await.0
+}
+
+pub async fn find_cover_meta(svc: &Services, track: &glyph_protocol::Track) -> (Option<String>, Option<String>) {
     let own = track.cover_url.clone().filter(|u| glyph_protocol::cover_cache_allowed(u));
+    let own_album = track.album.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     if let Some(c) = own.as_ref().filter(|u| !crate::merge::is_youtube_cover(u)) {
-        return Some(c.clone());
+        if own_album.is_some() {
+            return (Some(c.clone()), own_album);
+        }
     }
     if let Some(isrc) = track.isrc.as_deref() {
-        let c = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc)).await
-            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url)
-            .filter(|u| !crate::merge::is_youtube_cover(u));
-        if c.is_some() {
-            return c;
+        if let Some(found) = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc))
+            .await
+            .and_then(Result::ok)
+            .flatten()
+        {
+            let cover = found.track.cover_url.filter(|u| !crate::merge::is_youtube_cover(u));
+            let album = found.track.album.filter(|a| !a.trim().is_empty()).or_else(|| own_album.clone());
+            if let Some(c) = cover.or_else(|| own.as_ref().filter(|u| !crate::merge::is_youtube_cover(u)).cloned()) {
+                return (Some(c), album);
+            }
         }
     }
     let want_title = crate::merge::normalize_title(&track.title);
-    let pick = |hits: Vec<providers::Candidate>| -> Option<String> {
+    let pick = |hits: Vec<providers::Candidate>| -> Option<(Option<String>, Option<String>)> {
         let matching: Vec<_> = hits.into_iter().filter(|c| {
-            c.track.cover_url.as_deref().is_some_and(|u| !crate::merge::is_youtube_cover(u))
-                && crate::merge::artists_match(&track.artist, &c.track.artist)
+            crate::merge::artists_match(&track.artist, &c.track.artist)
         }).collect();
-        matching.iter()
-            .find(|c| crate::merge::normalize_title(&c.track.title) == want_title)
+        let best = matching.iter()
+            .find(|c| c.track.cover_url.as_deref().is_some_and(|u| !crate::merge::is_youtube_cover(u)) && crate::merge::normalize_title(&c.track.title) == want_title)
             .or_else(|| {
                 matching.iter().find(|c| {
                     let nt = crate::merge::normalize_title(&c.track.title);
-                    !want_title.is_empty() && !nt.is_empty()
+                    c.track.cover_url.as_deref().is_some_and(|u| !crate::merge::is_youtube_cover(u))
+                        && !want_title.is_empty() && !nt.is_empty()
                         && crate::merge::word_similarity(&want_title, &nt) >= 0.85
                 })
             })
-            .and_then(|c| c.track.cover_url.clone())
+            .or_else(|| {
+                matching.iter().find(|c| {
+                    let nt = crate::merge::normalize_title(&c.track.title);
+                    c.track.album.is_some()
+                        && (nt == want_title || (!want_title.is_empty() && !nt.is_empty() && crate::merge::word_similarity(&want_title, &nt) >= 0.85))
+                })
+            })?;
+        let cover = best.track.cover_url.clone().filter(|u| !crate::merge::is_youtube_cover(u));
+        let album = best.track.album.clone().filter(|a| !a.trim().is_empty());
+        Some((cover, album))
     };
     let raw_query = format!("{} {}", track.artist, track.title);
     let clean_artist = crate::merge::normalize_artist(&track.artist);
@@ -531,13 +552,16 @@ pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option
         }
         for q in &queries {
             if let Ok(hits) = crate::search::search_provider(svc, provider, q).await {
-                if let Some(cover) = pick(hits) {
-                    return Some(cover);
+                if let Some((cover, album)) = pick(hits) {
+                    let resolved_cover = cover.or_else(|| own.as_ref().filter(|u| !crate::merge::is_youtube_cover(u)).cloned());
+                    if resolved_cover.is_some() || album.is_some() {
+                        return (resolved_cover.or(own), album.or(own_album));
+                    }
                 }
             }
         }
     }
-    own
+    (own, own_album)
 }
 
 /// What `/v1/health` advertises (see `glyph_protocol::capability`).
@@ -626,8 +650,8 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
             }
             Route::Cover => {
                 let track: crate::trust::Claimed<glyph_protocol::Track> = parse_body::<glyph_protocol::Track>(&req)?.into();
-                let cover = find_cover(svc, track.get()).await;
-                Ok(Response::json(200, &serde_json::json!({ "url": cover })))
+                let (cover, album) = find_cover_meta(svc, track.get()).await;
+                Ok(Response::json(200, &serde_json::json!({ "url": cover, "album": album })))
             }
             Route::Download => {
                 #[derive(serde::Deserialize)]
@@ -825,8 +849,9 @@ mod tests {
         h.http.on("api.deezer.com/search", 200, r#"{"data":[{"id":1,"title":"Song","duration":200,"artist":{"name":"Artist"},"album":{"title":"A","cover_big":"https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"}}]}"#);
         let mut t = track("1", ProviderId::Audius, "Song", "Artist", 200);
         t.cover_url = Some("https://evil.example/landing".into());
-        let cover = block_on(find_cover(&h.svc, &t));
+        let (cover, album) = block_on(find_cover_meta(&h.svc, &t));
         assert_eq!(cover.as_deref(), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));
+        assert_eq!(album.as_deref(), Some("A"));
         // YouTube thumbnails are skipped when Deezer has a real cover.
         t.cover_url = Some("https://i.ytimg.com/vi/x/hqdefault.jpg".into());
         assert_eq!(block_on(find_cover(&h.svc, &t)).as_deref(), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));

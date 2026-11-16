@@ -141,7 +141,7 @@ pub async fn handle(
         match core.query.get("quality") {
             Some(raw) => {
                 let Some(quality)=media::AudioVariant::parse(raw) else { return Response::error("invalid audio quality",400); };
-                if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
+                if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS"))) {
                     match super::variants::cached(ctx,&db,bucket,id,quality,range.as_deref(),req.method()==worker::Method::Head,svc.config.audio_cache_days).await {
                         Ok(Some(hit)) => return Ok(hit),
                         Ok(None) => {},
@@ -248,7 +248,7 @@ pub async fn handle(
     // Everything fetched through the companion is kept on Cloudflare (R2), so
     // a song plays once from the companion machine and from R2 after that,
     // even while that machine is off. The companion itself caches nothing.
-    let audio_bucket = env.bucket("GLYPH_COVERS").ok();
+    let audio_bucket = env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS")).ok();
     let r2_key = (companion && variant.is_none()).then(|| r2_audio_key(url.path())).flatten();
     let mut from_r2 = false;
     if let (Some(bucket), Some(k)) = (&audio_bucket, &r2_key) {
@@ -394,7 +394,7 @@ pub async fn handle(
     if let Some((id,quality))=variant {
         if length.is_none_or(|n|n>0 && n<=MAX_CACHE_BYTES)
             && (quality != media::AudioVariant::High || content_type.starts_with("audio/mp4")) {
-            if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_COVERS")) {
+            if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS"))) {
                 let mut copy=full.cloned()?;
                 let days=svc.config.audio_cache_days;
                 let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;

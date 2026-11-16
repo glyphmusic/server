@@ -1,7 +1,7 @@
-# Glyph server 0.11.3 - 2026-11-16
+# Glyph server 0.11.4 - 2026-11-16
 
-- **Artwork & Deduplication**: prefers non-YouTube album covers over YouTube thumbnails when merging tracks and resolving `/v1/cover` metadata.
-- **Sync Rate Limiting**: isolates `/v1/sync/*` quota so bursty sync traffic returns soft `429 rate_limited` without locking out the rest of the account's API requests.
-- **Web player (`/web`)**: embeds `glyph-web` `0.12.3` (PWA manifest/icons, background audio recovery, sync/rate-limit handling, and startup/UI guards) and `glyph-protocol` `0.12.3`.
+- **Storage Split**: separates cached covers/audio (`GLYPH_CACHE` -> `glyph-cache`) from user uploads (`GLYPH_USERS` -> `glyph-users`, keeping `GLYPH_COVERS` fallback) and updates Worker config name to `server`.
+- **Playback Poll & Cover Metadata**: avoids unnecessary Durable Object calls on single-device playback polls, routes `playback:` room scopes cleanly, and returns `{ url, album }` from `POST /v1/cover`.
+- **Web player (`/web`)**: embeds `glyph-web` `0.12.4` (Web Connect remote playback, Home quick-pick cards, album backfill, UI fixes) and `glyph-protocol` `0.12.4`.
 
 See CHANGELOG.md for details.

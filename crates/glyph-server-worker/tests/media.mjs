@@ -205,7 +205,7 @@ try {
 let variantComplete = false;
 let variantCalls = 0;
 const variantSample = sample + '\x00\x00\x00\x21freeglyph-variant-complete-v1';
-const variantMf = new Miniflare({ ...options, r2Buckets: ['GLYPH_COVERS'], outboundService: async request => {
+const variantMf = new Miniflare({ ...options, r2Buckets: ['GLYPH_CACHE', 'GLYPH_USERS'], outboundService: async request => {
   const url = new URL(request.url);
   if (url.hostname === 'companion.example' && url.pathname === '/internal/audio/broken00001') {
     return new Response(new ReadableStream({ start(controller) {

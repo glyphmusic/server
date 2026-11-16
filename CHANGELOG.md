@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.11.4 - 2026-11-16
+
+### Fixed
+
+- **Playback Poll & Room Routing**: skips contacting the Durable Object on `/v1/devices/playback/poll` when the account only has a single online device (`playback.rs`), and routes `playback:` scopes explicitly to `https://playback-room/*` (`jam_room.rs`).
+- **Cover & Album Lookup (`POST /v1/cover`)**: extended cover lookup (`find_cover_meta`) to return both `{ url, album }` metadata so clients can backfill missing album names alongside cover art.
+
+### Changed
+
+- **Worker Storage Split (`GLYPH_CACHE` & `GLYPH_USERS`)**: separated cached covers/audio (`glyph-cache` via `GLYPH_CACHE`) from user uploads (`glyph-users` via `GLYPH_USERS`, retaining `GLYPH_COVERS` fallback) and renamed the Worker config to `server` with `preview_urls = true` (`wrangler.toml`, `docs/SELF_HOSTING.md`).
+- **Web player (`/web`)**: embeds the `0.12.4` web player (`glyph-web/`) with Web Connect remote device playback, Home quick-pick cards (`ListCard`), album metadata backfill, and reconnect fixes, plus `glyph-protocol` `0.12.4`.
+
 ## 0.11.3 - 2026-11-16
 
 ### Fixed

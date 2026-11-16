@@ -346,6 +346,7 @@ fn setup_with(push: Option<Arc<dyn jam::JamPush>>) -> T {
     let s = Server::from_arc(h.svc.clone()).with_accounts(Accounts {
         store: Arc::new(MemStore::default()),
         blobs: Some(blobs.clone()),
+        cache_blobs: None,
         entropy: Arc::new(Counter::default()),
         origin: ORIGIN.into(),
         extra_origins: vec![],
@@ -875,6 +876,7 @@ fn passkey_domain_must_contain_the_origin() {
     let make = |origin: &str, rp: Option<&str>| Accounts {
         store: Arc::new(MemStore::default()),
         blobs: None,
+        cache_blobs: None,
         entropy: Arc::new(Counter::default()),
         origin: origin.into(),
         extra_origins: vec![],
@@ -1298,11 +1300,15 @@ fn account_playback_states_live_in_the_push_room() {
     let room = Arc::new(StatePush::default());
     let t = setup_with(Some(room.clone()));
     let (owner, _, _) = sign_up(&t, "room_owner");
+    let state = serde_json::json!({"track":null,"playing":true,"position_ms":1000,"duration_ms":null,"volume":0.5,"available":true});
+    let poll_path = "/v1/devices/playback/poll";
+    // Single device on the account: poll does not touch the push/jam room.
+    assert_eq!(call(&t, Method::Post, poll_path, state.clone(), Some(&owner.access_token)).0, 200);
+    assert!(room.0.lock().unwrap().is_empty());
+
     let login = start(&t, "Phone");
     call(&t, Method::Post, "/v1/account/login/approve", serde_json::json!({"user_code":login.user_code}), Some(&owner.access_token));
     let LoginPollResponse::Done { session: phone } = poll(&t, &login) else { panic!() };
-    let state = serde_json::json!({"track":null,"playing":true,"position_ms":1000,"duration_ms":null,"volume":0.5,"available":true});
-    let poll_path = "/v1/devices/playback/poll";
     assert_eq!(call(&t, Method::Post, poll_path, state.clone(), Some(&phone.access_token)).0, 200);
     assert!(room.0.lock().unwrap().contains_key(&phone.device_id));
     // The room answers for presence: the phone is online without a store entry.

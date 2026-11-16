@@ -619,7 +619,7 @@ impl Accounts {
 
     /// `GET /v1/covers/{sha256(url)}?u={url}`: fetch once, keep in R2.
     pub(super) async fn cached_cover(&self, svc: &Arc<Services>, req: &Request, name: &str) -> Result<Response, ApiErr> {
-        let Some(blobs) = &self.blobs else { return Err(ApiErr::not_found("cover cache disabled")) };
+        let Some(blobs) = self.cache_blobs.as_ref().or(self.blobs.as_ref()) else { return Err(ApiErr::not_found("cover cache disabled")) };
         let url = req.query.required("u")?;
         if !is_sha256_hex(name) || hash(url) != name || !glyph_protocol::cover_cache_allowed(url) {
             return Err(ApiErr::bad_request("cover url not allowed"));

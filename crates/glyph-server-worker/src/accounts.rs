@@ -741,11 +741,48 @@ impl D1Store {
 
 pub struct R2Blobs {
     pub bucket: worker::Bucket,
-    pub db: Option<D1Database>,
 }
 
 #[async_trait(?Send)]
 impl BlobStore for R2Blobs {
+    async fn get(&self, key: &str) -> StoreResult<Option<(Vec<u8>, String)>> {
+        let Some(obj) = self.bucket.get(key).execute().await.map_err(err)? else { return Ok(None) };
+        let ct = obj.http_metadata().content_type.unwrap_or_else(|| "application/octet-stream".into());
+        let Some(body) = obj.body() else { return Ok(None) };
+        Ok(Some((body.bytes().await.map_err(err)?, ct)))
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> StoreResult<()> {
+        if bytes.is_empty() || bytes.len() > 32 * 1024 * 1024 {
+            return Err(StoreError("invalid upload size".into()));
+        }
+        let meta = worker::HttpMetadata { content_type: Some(content_type.into()), ..Default::default() };
+        self.bucket.put(key, bytes).http_metadata(meta).execute().await.map_err(err)?;
+        Ok(())
+    }
+
+    async fn delete_prefix(&self, prefix: &str) -> StoreResult<()> {
+        loop {
+            let list = self.bucket.list().prefix(prefix).limit(1000).execute().await.map_err(err)?;
+            let keys: Vec<String> = list.objects().iter().map(|o| o.key()).collect();
+            if keys.is_empty() {
+                return Ok(());
+            }
+            self.bucket.delete_multiple(keys).await.map_err(err)?;
+            if !list.truncated() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+pub struct R2CacheBlobs {
+    pub bucket: worker::Bucket,
+    pub db: Option<D1Database>,
+}
+
+#[async_trait(?Send)]
+impl BlobStore for R2CacheBlobs {
     async fn get(&self, key: &str) -> StoreResult<Option<(Vec<u8>, String)>> {
         let Some(obj) = self.bucket.get(key).execute().await.map_err(err)? else { return Ok(None) };
         let ct = obj.http_metadata().content_type.unwrap_or_else(|| "application/octet-stream".into());
@@ -772,8 +809,6 @@ impl BlobStore for R2Blobs {
             self.bucket.delete_multiple(keys.clone()).await.map_err(err)?;
             if let Some(db) = &self.db {
                 let keys = serde_json::to_string(&keys).map_err(|_| StoreError("storage accounting failed".into()))?;
-                // In-flight uploads keep their reservation even if the user's
-                // existing ready objects have been deleted concurrently.
                 db.prepare("DELETE FROM audio_cache WHERE state='ready' AND key IN (SELECT value FROM json_each(?1))")
                     .bind(&[s(&keys)]).map_err(err)?.run().await.map_err(err)?;
             }

@@ -73,7 +73,8 @@ Create the storage:
 ```
 npx wrangler kv namespace create GLYPH_KV
 npx wrangler d1 create glyph
-npx wrangler r2 bucket create glyph-covers     # optional, cover cache
+npx wrangler r2 bucket create glyph-cache      # optional, cover & audio cache
+npx wrangler r2 bucket create glyph-users      # optional, user avatars/banners & playlist covers
 ```
 
 Then edit `wrangler.toml`. **The checked-in file contains the IDs and domain of

@@ -162,6 +162,13 @@ impl Accounts {
         devices: &[Device],
         now: u64,
     ) -> Result<std::collections::HashMap<String, State>, ApiErr> {
+        if devices.iter().all(|d| d.id == me) {
+            let mut online = std::collections::HashMap::new();
+            if let Some(state) = report {
+                online.insert(me.to_string(), state.clone());
+            }
+            return Ok(online);
+        }
         if let Some(push) = &self.push {
             if let Some(states) = push.playback_states(scope, me, report).await {
                 return Ok(states.into_iter().collect());

@@ -64,10 +64,12 @@ pub trait Entropy: MaybeSendSync {
 
 pub struct Accounts {
     pub store: Arc<dyn AccountStore>,
-    /// R2 on the Worker; `None` disables both cover routes.
+    /// R2 user uploads (`users/`); `None` disables profile/playlist cover uploads.
     pub blobs: Option<Arc<dyn BlobStore>>,
+    /// R2 cover cache (`covers/`); falls back to `blobs` when unset.
+    pub cache_blobs: Option<Arc<dyn BlobStore>>,
     pub entropy: Arc<dyn Entropy>,
-    /// Public origin of this server, e.g. `https://glyph-server.glyphmusic.workers.dev`.
+    /// Public origin of this server, e.g. `https://server.glyphmusic.workers.dev`.
     pub origin: String,
     /// More allowed WebAuthn origins (mobile apps, `android:apk-key-hash:...`).
     pub extra_origins: Vec<String>,

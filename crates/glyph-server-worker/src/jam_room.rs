@@ -301,7 +301,8 @@ impl JamPush for RoomPush {
             init.with_method(worker::Method::Post)
                 .with_headers(headers)
                 .with_body(Some(serde_json::to_string(&body).map_err(|e| worker::Error::RustError(e.to_string()))?.into()));
-            let mut resp = stub.fetch_with_request(Request::new_with_init("https://jam-room/states", &init)?).await?;
+            let url = if scope.starts_with("playback:") { "https://playback-room/states" } else { "https://jam-room/states" };
+            let mut resp = stub.fetch_with_request(Request::new_with_init(url, &init)?).await?;
             if resp.status_code() != 200 {
                 return Err(worker::Error::RustError(format!("status {}", resp.status_code())));
             }
@@ -328,5 +329,6 @@ pub async fn connect(env: &Env, code: &str, live: &str) -> Result<worker::Respon
     headers.set("x-glyph-handle", handle)?;
     let mut init = RequestInit::new();
     init.with_method(worker::Method::Get).with_headers(headers);
-    stub.fetch_with_request(Request::new_with_init("https://jam-room/connect", &init)?).await
+    let url = if code.starts_with("playback:") { "https://playback-room/connect" } else { "https://jam-room/connect" };
+    stub.fetch_with_request(Request::new_with_init(url, &init)?).await
 }

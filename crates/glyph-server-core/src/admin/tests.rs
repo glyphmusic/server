@@ -393,7 +393,7 @@ fn account_gate_requires_a_backend_and_old_admin_clients_preserve_it() {
     struct Entropy;
     impl crate::accounts::Entropy for Entropy { fn fill(&self, bytes: &mut [u8]) { bytes.fill(1); } }
     t.server = t.server.with_accounts(crate::accounts::Accounts {
-        store:Arc::new(crate::accounts::store::MemStore::default()),blobs:None,entropy:Arc::new(Entropy),
+        store:Arc::new(crate::accounts::store::MemStore::default()),blobs:None,cache_blobs:None,entropy:Arc::new(Entropy),
         origin:"https://glyph.example".into(),extra_origins:vec![],rp_id:None,push:None,
     });
     assert_eq!(call(&t,req(Method::Put,"/admin/v1/limits",required,token)).0,200);

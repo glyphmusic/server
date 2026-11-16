@@ -4,8 +4,8 @@
 //! `YOUTUBE_API_KEY`, `JAMENDO_CLIENT_ID`, `SOUNDCLOUD_CLIENT_ID`,
 //! `SOUNDCLOUD_CLIENT_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`,
 //! `LASTFM_API_KEY`. Optional: D1 `GLYPH_DB` + var `PUBLIC_ORIGIN` enable
-//! accounts and sync, R2 `GLYPH_COVERS` the cover cache, Durable Object
-//! `JAM_ROOM` jam pushes. Compiled for wasm32 only.
+//! accounts and sync, R2 `GLYPH_CACHE` the cover/audio cache, R2
+//! `GLYPH_USERS` user uploads, Durable Object `JAM_ROOM` jam pushes.
 #![cfg(target_arch = "wasm32")]
 mod accounts;
 mod abuse;
@@ -255,12 +255,15 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
     // Bans and exact limits in D1 (requires 0009); per-request quotas in the Cache API.
     let api_cache = api.clone();
     let limiter = Arc::new(abuse::D1Limiter { db: env.d1("GLYPH_DB").ok(), rt: rt.clone(), admin: Arc::new(glyph_server_core::ratelimit::CacheRateLimiter::new(api.clone(), rt.clone())) });
-    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_admin:CompanionCreds::from_env(env, Role::Admin), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: env.bucket("GLYPH_COVERS").ok() }));
+    let cache_bucket = |env: &Env| env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS")).ok();
+    let users_bucket = env.bucket("GLYPH_USERS").or_else(|_| env.bucket("GLYPH_COVERS")).ok();
+    let server = Server::new(Services { http: Arc::new(FetchClient), cache, limiter, rt, cmds: commands, config }).with_host(Arc::new(WorkerHost { companion_url:secret(env,"YTDLP_SERVICE_URL"), companion_admin:CompanionCreds::from_env(env, Role::Admin), db: env.d1("GLYPH_DB").ok(), cache: api_cache, bucket: cache_bucket(env) }));
     // Accounts need the D1 database and the public origin (passkeys are bound to it).
     match (env.d1("GLYPH_DB"), secret(env, "PUBLIC_ORIGIN").filter(|o| o.starts_with("https://") || o.starts_with("http://localhost"))) {
         (Ok(db), Some(origin)) => server.with_accounts(glyph_server_core::accounts::Accounts {
             store: Arc::new(accounts::D1Store::new(db)),
-            blobs: env.bucket("GLYPH_COVERS").ok().map(|bucket| Arc::new(accounts::R2Blobs { bucket, db: env.d1("GLYPH_DB").ok() }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
+            blobs: users_bucket.map(|bucket| Arc::new(accounts::R2Blobs { bucket }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
+            cache_blobs: cache_bucket(env).map(|bucket| Arc::new(accounts::R2CacheBlobs { bucket, db: env.d1("GLYPH_DB").ok() }) as Arc<dyn glyph_server_core::accounts::store::BlobStore>),
             entropy: Arc::new(accounts::WebCrypto),
             origin: origin.trim_end_matches('/').to_string(),
             extra_origins: secret(env, "ACCOUNT_EXTRA_ORIGINS").map(|v| v.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect()).unwrap_or_default(),
@@ -599,7 +602,7 @@ async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::Sched
     if storage::maintain(&db).await.is_err() {
         worker::console_error!("D1 storage cleanup/measurement failed");
     }
-    let Ok(bucket) = env.bucket("GLYPH_COVERS") else { return; };
+    let Ok(bucket) = env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS")) else { return; };
     let limits = saved_limits(&env).await;
     let days = limits.as_ref().map(|l| l.audio_cache_days).unwrap_or(15);
     let cap = u64::from(limits.as_ref().map(|l| l.audio_cache_max_gb).unwrap_or(10))*1_000_000_000;
