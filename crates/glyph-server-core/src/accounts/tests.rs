@@ -1605,3 +1605,43 @@ fn mcp_sessions_claim_rename_and_revoke() {
     let (st, _) = call(&t, Method::Post, "/mcp", serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}), Some(&manual_token));
     assert_eq!(st, 401);
 }
+
+#[test]
+fn sync_uses_dedicated_quota_without_global_lockout() {
+    let t = setup();
+    let (session, _, _) = sign_up(&t, "sync_quota");
+    t.s.update_config(|c| c.rate_limit_per_min = 1);
+    t.h.rt.advance(61_000);
+
+    // Sync gets 10x * 4 = 40 requests/min even at rate_limit_per_min = 1,
+    // without eating into the regular API quota or triggering a 15-minute lockout.
+    for _ in 0..40 {
+        let (st, _) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some(&session.access_token));
+        assert_eq!(st, 200);
+    }
+
+    // Request #41..#60 hits soft 429 rate_limited, never temporarily_blocked.
+    for _ in 0..20 {
+        let (st, body) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some(&session.access_token));
+        assert_eq!(st, 429);
+        assert_eq!(body["code"].as_str(), Some("rate_limited"));
+    }
+
+    // Regular authenticated API routes still work normally in the same window.
+    let (st, _) = call(&t, Method::Get, "/v1/account", serde_json::Value::Null, Some(&session.access_token));
+    assert_eq!(st, 200);
+
+    // Forged bearer tokens on sync routes never get the sync multiplier.
+    for _ in 0..1 {
+        let (st, _) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some("forged"));
+        assert_ne!(st, 429);
+    }
+    let (st, body) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some("forged"));
+    assert_eq!(st, 429);
+    assert_eq!(body["code"].as_str(), Some("rate_limited"));
+
+    // After the 60s window resets, sync works again.
+    t.h.rt.advance(61_000);
+    let (st, _) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some(&session.access_token));
+    assert_eq!(st, 200);
+}

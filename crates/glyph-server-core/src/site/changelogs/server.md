@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.11.3 - 2026-11-16
+
+### Fixed
+
+- **Artwork & Deduplication**: prefer non-YouTube cover artwork over YouTube thumbnails when merging search/resolve tracks (`prefer_cover`) and when looking up track covers (keeping YouTube only as a last-resort fallback).
+- **Sync Rate Limiting**: gave authenticated `/v1/sync/*` endpoints a dedicated quota without triggering temporary 15-minute global lockout strikes (`admit_rules_checked`), keeping normal authenticated API routes unaffected while rejecting forged tokens with standard limits.
+
+### Changed
+
+- **Web player (`/web`)**: embeds the `0.12.3` web player (`glyph-web/`) with PWA manifest/icons, improved background playback recovery, `429`/sync retry improvements, solid `NowPlayingSheet` background, and startup/canvas guards.
+- Updated embedded `glyph-protocol` (`0.12.3`) and repository changelogs.
+
 ## 0.11.2 - 2026-11-16
 
 ### Changed

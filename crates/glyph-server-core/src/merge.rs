@@ -169,6 +169,29 @@ pub fn provider_rank(p: ProviderId) -> u8 {
     }
 }
 
+/// `true` when `url` points to a YouTube image host (`ytimg.com`, `youtube.com`, `ggpht.com`).
+pub fn is_youtube_cover(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let h = host.to_ascii_lowercase();
+    ["ytimg.com", "youtube.com", "ggpht.com"]
+        .iter()
+        .any(|s| h == *s || h.ends_with(&format!(".{s}")))
+}
+
+/// Keeps `primary` unless it is missing or a YouTube thumbnail and `other` is
+/// a non-YouTube cover.
+pub fn prefer_cover(primary: &mut Option<String>, other: &Option<String>) {
+    let Some(next) = other.as_deref() else { return };
+    if primary.as_deref().is_none_or(|cur| is_youtube_cover(cur) && !is_youtube_cover(next)) {
+        *primary = Some(next.to_string());
+    }
+}
+
 /// Fold `other` into `primary`: record its id under `external_ids` and fill gaps.
 pub fn merge_into(primary: &mut Track, other: &Track) {
     if other.source != primary.source {
@@ -188,7 +211,7 @@ pub fn merge_into(primary: &mut Track, other: &Track) {
     }
     fill!(album);
     fill!(duration_ms);
-    fill!(cover_url);
+    prefer_cover(&mut primary.cover_url, &other.cover_url);
     fill!(isrc);
     fill!(permalink);
 }
@@ -331,5 +354,23 @@ mod tests {
         assert_eq!(word_similarity("a b c", "a b c"), 1.0);
         assert_eq!(word_similarity("a b", "c d"), 0.0);
         assert!((word_similarity("a b", "b c") - 1.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn merge_prefers_non_youtube_cover() {
+        let mut yt = track("yt1", YouTube, "Song", "Artist", 200);
+        yt.cover_url = Some("https://i.ytimg.com/vi/yt1/hqdefault.jpg".into());
+        let mut dz = track("dz1", Deezer, "Song", "Artist", 200);
+        dz.cover_url = Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg".into());
+
+        let out = dedupe(vec![yt.clone(), dz.clone()]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].cover_url, dz.cover_url);
+
+        let mut sp = track("sp1", Spotify, "Song", "Artist", 200);
+        sp.cover_url = Some("https://i.scdn.co/image/abc".into());
+        let mut merged = sp.clone();
+        merge_into(&mut merged, &yt);
+        assert_eq!(merged.cover_url, sp.cover_url);
     }
 }

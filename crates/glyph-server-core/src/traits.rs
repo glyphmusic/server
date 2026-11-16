@@ -164,14 +164,22 @@ pub trait RateLimiter: MaybeSendSync {
     /// Returns `Err((true, retry_after_s))` if `principal` is blocked, or
     /// `Err((false, retry_after_s))` if rate-limited.
     async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64)> {
+        self.admit_rules_checked(rules, window_s, true).await
+    }
+    /// Same as [`admit_rules`](Self::admit_rules), but when `penalize` is false
+    /// hitting the window cap returns `429 rate_limited` without recording
+    /// strikes toward a temporary global lockout. Existing bans still apply.
+    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64)> {
         for (quota_key, principal, limit) in rules {
             if let Some(retry) = self.blocked(principal).await {
                 return Err((true, retry));
             }
             if let RateDecision::Limited { retry_after_s } = self.check(quota_key, *limit, window_s).await {
-                self.penalize(principal).await;
-                if let Some(retry) = self.blocked(principal).await {
-                    return Err((true, retry));
+                if penalize {
+                    self.penalize(principal).await;
+                    if let Some(retry) = self.blocked(principal).await {
+                        return Err((true, retry));
+                    }
                 }
                 return Err((false, retry_after_s));
             }

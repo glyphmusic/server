@@ -339,25 +339,48 @@ impl Server {
             if media { youtube_quota(&svc, req, &format!("user:{owner}")).await?; }
             return self.check_account_access(req, true);
         }
+        let is_sync = !media && is_sync_route(&req.path);
         if self.accounts.is_some() && has_bearer {
-            // Fixed IP ceiling: adding or rotating an install ID never raises it.
-            check_rules(&svc, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))]).await?;
-            if let Some(a) = &self.accounts {
-                if let Some((user, device)) = a.abuse_identity(&svc, req).await {
-                    let who = crate::bans::Subject { account: Some(user.as_str()), ..who };
-                    if let Some(ban) = svc.config.bans.find(&who, now) {
-                        return Err(banned(ban, now));
+            if is_sync {
+                if let Some(a) = &self.accounts {
+                    if let Some((user, device)) = a.abuse_identity(&svc, req).await {
+                        let who = crate::bans::Subject { account: Some(user.as_str()), ..who };
+                        if let Some(ban) = svc.config.bans.find(&who, now) {
+                            return Err(banned(ban, now));
+                        }
+                        a.mark(&svc, &device, req).await;
+                        let sync_base = svc.config.rate_limit_per_min.max(1).saturating_mul(10);
+                        let sync_lim = sync_base.saturating_mul(4);
+                        let u_key = format!("user:{user}");
+                        let d_key = format!("device:{}", device.id);
+                        check_rules_mode(&svc, &[
+                            (format!("sync:{ip_key}"), ip_key, sync_base.saturating_mul(8)),
+                            (format!("sync:{u_key}"), u_key, sync_lim),
+                            (format!("sync:{d_key}"), d_key, sync_lim),
+                        ], false).await?;
+                        return self.check_account_access(req, true);
                     }
-                    a.mark(&svc, &device, req).await;
-                    if media { youtube_quota(&svc, req, &format!("user:{user}")).await?; }
-                    let u_key = format!("user:{user}");
-                    let d_key = format!("device:{}", device.id);
-                    let lim = base.saturating_mul(4);
-                    check_rules(&svc, &[
-                        (format!("{namespace}:{u_key}"), u_key, lim),
-                        (format!("{namespace}:{d_key}"), d_key, lim),
-                    ]).await?;
-                    return self.check_account_access(req, true);
+                }
+            } else {
+                // Fixed IP ceiling: adding or rotating an install ID never raises it.
+                check_rules(&svc, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))]).await?;
+                if let Some(a) = &self.accounts {
+                    if let Some((user, device)) = a.abuse_identity(&svc, req).await {
+                        let who = crate::bans::Subject { account: Some(user.as_str()), ..who };
+                        if let Some(ban) = svc.config.bans.find(&who, now) {
+                            return Err(banned(ban, now));
+                        }
+                        a.mark(&svc, &device, req).await;
+                        if media { youtube_quota(&svc, req, &format!("user:{user}")).await?; }
+                        let u_key = format!("user:{user}");
+                        let d_key = format!("device:{}", device.id);
+                        let lim = base.saturating_mul(4);
+                        check_rules_mode(&svc, &[
+                            (format!("{namespace}:{u_key}"), u_key, lim),
+                            (format!("{namespace}:{d_key}"), d_key, lim),
+                        ], false).await?;
+                        return self.check_account_access(req, true);
+                    }
                 }
             }
             let mut rules = vec![(format!("{namespace}:guest:{ip}"), ip_key, base)];
@@ -439,8 +462,18 @@ async fn youtube_quota(svc: &Services, req: &Request, who: &str) -> Result<(), A
     Ok(())
 }
 
+/// Sync routes for signed-in devices (`/v1/sync/*`).
+fn is_sync_route(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    p == "/v1/sync" || p.starts_with("/v1/sync/")
+}
+
 async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<(), ApiErr> {
-    if let Err((banned, retry)) = svc.limiter.admit_rules(rules, 60).await {
+    check_rules_mode(svc, rules, true).await
+}
+
+async fn check_rules_mode(svc: &Services, rules: &[(String, String, u32)], penalize: bool) -> Result<(), ApiErr> {
+    if let Err((banned, retry)) = svc.limiter.admit_rules_checked(rules, 60, penalize).await {
         let mut e = ApiErr::rate_limited(retry);
         if banned {
             e.body.code = "temporarily_blocked".into();
@@ -451,24 +484,60 @@ async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<
     Ok(())
 }
 
-/// Cover art for `track`: its own when it is on a known cover host, else
-/// Deezer by ISRC, else a Deezer search hit. Callers redirect to the answer,
-/// so a client-chosen URL elsewhere is never returned (no open redirect).
+/// Cover art for `track`: its own non-YouTube cover when it is on a known cover
+/// host, else Deezer (by ISRC then search) or Spotify search, falling back to
+/// a YouTube thumbnail only when no square cover was found. Callers redirect to
+/// the answer, so a client-chosen URL elsewhere is never returned (no open redirect).
 pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option<String> {
-    if let Some(c) = track.cover_url.clone().filter(|u| glyph_protocol::cover_cache_allowed(u)) {
-        return Some(c);
+    let own = track.cover_url.clone().filter(|u| glyph_protocol::cover_cache_allowed(u));
+    if let Some(c) = own.as_ref().filter(|u| !crate::merge::is_youtube_cover(u)) {
+        return Some(c.clone());
     }
     if let Some(isrc) = track.isrc.as_deref() {
         let c = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc)).await
-            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url);
+            .and_then(Result::ok).flatten().and_then(|c| c.track.cover_url)
+            .filter(|u| !crate::merge::is_youtube_cover(u));
         if c.is_some() {
             return c;
         }
     }
-    let query = format!("{} {}", track.artist, track.title);
-    crate::search::search_provider(svc, ProviderId::Deezer, &query).await.ok()
-        .and_then(|hits| hits.into_iter().find(|c| crate::merge::artists_match(&track.artist, &c.track.artist) && crate::merge::normalize_title(&track.title) == crate::merge::normalize_title(&c.track.title)))
-        .and_then(|c| c.track.cover_url)
+    let want_title = crate::merge::normalize_title(&track.title);
+    let pick = |hits: Vec<providers::Candidate>| -> Option<String> {
+        let matching: Vec<_> = hits.into_iter().filter(|c| {
+            c.track.cover_url.as_deref().is_some_and(|u| !crate::merge::is_youtube_cover(u))
+                && crate::merge::artists_match(&track.artist, &c.track.artist)
+        }).collect();
+        matching.iter()
+            .find(|c| crate::merge::normalize_title(&c.track.title) == want_title)
+            .or_else(|| {
+                matching.iter().find(|c| {
+                    let nt = crate::merge::normalize_title(&c.track.title);
+                    !want_title.is_empty() && !nt.is_empty()
+                        && crate::merge::word_similarity(&want_title, &nt) >= 0.85
+                })
+            })
+            .and_then(|c| c.track.cover_url.clone())
+    };
+    let raw_query = format!("{} {}", track.artist, track.title);
+    let clean_artist = crate::merge::normalize_artist(&track.artist);
+    let clean_query = format!("{clean_artist} {want_title}");
+    let mut queries = vec![raw_query.clone()];
+    if !clean_artist.is_empty() && !want_title.is_empty() && !clean_query.eq_ignore_ascii_case(&raw_query) {
+        queries.push(clean_query);
+    }
+    for provider in [ProviderId::Deezer, ProviderId::Spotify] {
+        if !svc.config.provider_enabled(provider) {
+            continue;
+        }
+        for q in &queries {
+            if let Ok(hits) = crate::search::search_provider(svc, provider, q).await {
+                if let Some(cover) = pick(hits) {
+                    return Some(cover);
+                }
+            }
+        }
+    }
+    own
 }
 
 /// What `/v1/health` advertises (see `glyph_protocol::capability`).
@@ -757,9 +826,14 @@ mod tests {
         let mut t = track("1", ProviderId::Audius, "Song", "Artist", 200);
         t.cover_url = Some("https://evil.example/landing".into());
         let cover = block_on(find_cover(&h.svc, &t));
-        assert_ne!(cover.as_deref(), Some("https://evil.example/landing"));
+        assert_eq!(cover.as_deref(), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));
+        // YouTube thumbnails are skipped when Deezer has a real cover.
         t.cover_url = Some("https://i.ytimg.com/vi/x/hqdefault.jpg".into());
-        assert_eq!(block_on(find_cover(&h.svc, &t)).as_deref(), Some("https://i.ytimg.com/vi/x/hqdefault.jpg"));
+        assert_eq!(block_on(find_cover(&h.svc, &t)).as_deref(), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));
+        // When no metadata cover exists, YouTube stays the last-resort fallback.
+        let mut yt_only = track("2", ProviderId::YouTube, "Unlisted Mix", "Unknown Creator", 200);
+        yt_only.cover_url = Some("https://i.ytimg.com/vi/y/hqdefault.jpg".into());
+        assert_eq!(block_on(find_cover(&h.svc, &yt_only)).as_deref(), Some("https://i.ytimg.com/vi/y/hqdefault.jpg"));
     }
 
     #[test]

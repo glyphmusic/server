@@ -75,9 +75,9 @@ impl RateLimiter for D1Limiter {
     /// Bans are read from D1 (one batched read, no write); the per-request
     /// quotas are counted in the Cache API, so ordinary traffic writes
     /// nothing to D1. Only violations write (strikes, then a ban).
-    async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64)> {
+    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64)> {
         if rules.is_empty() { return Ok(()); }
-        let Some(db) = &self.db else { return self.admin.admit_rules(rules, window_s).await; };
+        let Some(db) = &self.db else { return self.admin.admit_rules_checked(rules, window_s, penalize).await; };
         let now = self.rt.now_ms();
         let mut principals: Vec<&str> = Vec::with_capacity(rules.len());
         for (_, p, _) in rules {
@@ -93,7 +93,7 @@ impl RateLimiter for D1Limiter {
         );
         let mut ban_args: Vec<JsValue> = principals.iter().map(|p| key(&format!("ban:{p}"))).collect();
         ban_args.push(num(now));
-        let Ok(ban_stmt) = db.prepare(&ban_sql).bind(&ban_args) else { return self.admin.admit_rules(rules, window_s).await; };
+        let Ok(ban_stmt) = db.prepare(&ban_sql).bind(&ban_args) else { return self.admin.admit_rules_checked(rules, window_s, penalize).await; };
         match ban_stmt.first::<Row>(None).await {
             Ok(Some(row)) => {
                 let left = row.expires.saturating_sub(now);
@@ -102,13 +102,15 @@ impl RateLimiter for D1Limiter {
                 }
             }
             Ok(None) => {}
-            Err(_) => return self.admin.admit_rules(rules, window_s).await,
+            Err(_) => return self.admin.admit_rules_checked(rules, window_s, penalize).await,
         }
         for (quota_key, principal, limit) in rules {
             if let RateDecision::Limited { retry_after_s } = self.admin.check(quota_key, *limit, window_s).await {
-                self.penalize(principal).await;
-                if let Some(retry) = self.blocked(principal).await {
-                    return Err((true, retry));
+                if penalize {
+                    self.penalize(principal).await;
+                    if let Some(retry) = self.blocked(principal).await {
+                        return Err((true, retry));
+                    }
                 }
                 return Err((false, retry_after_s));
             }

@@ -26,6 +26,7 @@ pub(crate) struct DzArtist {
 #[derive(Deserialize)]
 pub(crate) struct DzAlbum {
     pub title: Option<String>,
+    pub cover_big: Option<String>,
     pub cover_medium: Option<String>,
 }
 
@@ -42,7 +43,7 @@ pub(crate) fn to_candidate(t: DzTrack) -> Candidate {
     out.explicit = t.explicit_lyrics == Some(true);
     if let Some(a) = t.album {
         out.album = a.title;
-        out.cover_url = a.cover_medium;
+        out.cover_url = a.cover_big.or(a.cover_medium);
     }
     let pb = t
         .preview

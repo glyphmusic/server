@@ -1,6 +1,7 @@
-# Glyph server 0.11.2 - 2026-11-16
+# Glyph server 0.11.3 - 2026-11-16
 
-- Ships the `glyph-web` `0.12.2` web player update (cover loading via `/v1/cover` for `[LF]` tracks, `401` token refresh/reset recovery on `/v1/account` and `/v1/devices`, progressive list/cover loading & unloading, hidden mobile scrollbars, solid mobile bottom player bar, and focus outline cleanup).
-- Updates embedded `glyph-protocol` (`0.12.2`) and changelogs.
+- **Artwork & Deduplication**: prefers non-YouTube album covers over YouTube thumbnails when merging tracks and resolving `/v1/cover` metadata.
+- **Sync Rate Limiting**: isolates `/v1/sync/*` quota so bursty sync traffic returns soft `429 rate_limited` without locking out the rest of the account's API requests.
+- **Web player (`/web`)**: embeds `glyph-web` `0.12.3` (PWA manifest/icons, background audio recovery, sync/rate-limit handling, and startup/UI guards) and `glyph-protocol` `0.12.3`.
 
 See CHANGELOG.md for details.
