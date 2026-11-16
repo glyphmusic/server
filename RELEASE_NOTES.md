@@ -1,7 +1,6 @@
-# Glyph server 0.11.1 - 2026-11-16
+# Glyph server 0.11.2 - 2026-11-16
 
-- Fixes unauthenticated `<img src>` fetches on `/v1/profiles/{handle}/images/{sha256}` while keeping private profiles and playlists authenticated (`401`).
-- Ships the `glyph-web` 0.12.1 web player update (hidden off-screen YouTube embed, Document PiP mini player, queue preloading, batched sync pushes, `/web#mcp-connect=`).
-- Adds cached 14-day `GET /v1/artist` lookup, Worker `PATCH`/`DELETE` CORS for MCP session management, and `glyph-protocol` 0.12.1 snapshot.
+- Ships the `glyph-web` `0.12.2` web player update (cover loading via `/v1/cover` for `[LF]` tracks, `401` token refresh/reset recovery on `/v1/account` and `/v1/devices`, progressive list/cover loading & unloading, hidden mobile scrollbars, solid mobile bottom player bar, and focus outline cleanup).
+- Updates embedded `glyph-protocol` (`0.12.2`) and changelogs.
 
 See CHANGELOG.md for details.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.11.2 - 2026-11-16
+
+### Changed
+
+- **Web player (`/web`)**: embeds the `0.12.2` web player (`glyph-web/`) with `/v1/cover` lookup for Last.fm/synced tracks, clean `401` token refresh & stale-session recovery on `/v1/account` and `/v1/devices`, progressive playlist/queue loading & offscreen cover unloading, hidden mobile scrollbars, solid mobile bottom bar, and focus/tap box removal.
+- Updated embedded protocol (`glyph-protocol` `0.12.2`) and repository changelogs.
+
 ## 0.11.1 - 2026-11-16
 
 ### Fixed
