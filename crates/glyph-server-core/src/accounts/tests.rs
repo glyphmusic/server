@@ -1003,6 +1003,8 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     let pic_sha = settings["avatar"].as_str().unwrap().to_string();
     let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), b"text".to_vec(), None)));
     assert_eq!(r.status, 400);
+    let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{pic_sha}"), vec![], vec![], None)));
+    assert_eq!(r.status, 200);
     let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/profiles/owner/images/{pic_sha}"), bearer(&viewer), vec![], None)));
     assert_eq!(r.status, 200);
     assert_eq!(&r.bytes().unwrap()[8..12], b"WEBP");
@@ -1507,5 +1509,99 @@ fn browser_link_security_routes_password_recovery_and_delete() {
     let (st, v) = call(&t, Method::Post, "/v1/account/link/delete", serde_json::json!({"login_id": link_id, "confirm_handle": "@SecWeb"}), None);
     assert_eq!((st, v["deleted"].as_bool()), (200, Some(true)));
     let (st, _) = call(&t, Method::Get, "/v1/account", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 401);
+}
+
+#[test]
+fn mcp_sessions_claim_rename_and_revoke() {
+    let t = setup();
+    let (s, _, _) = sign_up(&t, "mcpuser");
+
+    // 1. Named manual MCP token creates a tracked session.
+    let (st, tok) = call(&t, Method::Post, "/v1/mcp/token", serde_json::json!({"name": "Cursor Work"}), Some(&s.access_token));
+    assert_eq!(st, 200, "{tok}");
+    let manual_token = tok["token"].as_str().unwrap().to_string();
+    let manual_sid = tok["session_id"].as_str().unwrap().to_string();
+
+    // 2. OAuth register + authorize + /v1/mcp/oauth/claim + approve + token exchange.
+    let (st, reg) = call(
+        &t,
+        Method::Post,
+        "/oauth/register",
+        serde_json::json!({"client_name": "Claude", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]}),
+        None,
+    );
+    assert_eq!(st, 201, "{reg}");
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+    let verifier = "test-verifier-1234567890-abcdef";
+    let challenge = b64(&Sha256::digest(verifier.as_bytes()));
+    let auth_url = format!(
+        "/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256",
+        client_id,
+        url::form_urlencoded::byte_serialize(b"https://claude.ai/api/mcp/auth_callback").collect::<String>(),
+        challenge
+    );
+    let auth_res = block_on(t.s.handle(Request::new(Method::Get, &auth_url, vec![], vec![], Some("1.2.3.4".into()))));
+    assert_eq!(auth_res.status, 200);
+    let html = String::from_utf8(auth_res.bytes().unwrap_or_default().to_vec()).unwrap();
+    let marker = "#mcp-connect=";
+    let start = html.find(marker).expect("missing #mcp-connect link") + marker.len();
+    let auth_id: String = html[start..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+
+    let (st, approval) = call(&t, Method::Post, "/v1/mcp/oauth/claim", serde_json::json!({"id": auth_id}), Some(&s.access_token));
+    assert_eq!((st, approval["client"].as_str()), (200, Some("Claude")));
+    let (st, _) = call(&t, Method::Post, "/v1/mcp/approve", serde_json::json!({"id": auth_id, "allow": true}), Some(&s.access_token));
+    assert_eq!(st, 200);
+    let (st, polled) = call(&t, Method::Get, &format!("/oauth/authorize/poll?id={auth_id}"), serde_json::Value::Null, None);
+    assert_eq!((st, polled["status"].as_str()), (200, Some("allowed")));
+    let redir = url::Url::parse(polled["redirect"].as_str().unwrap()).unwrap();
+    let code = redir.query_pairs().find(|(k, _)| k == "code").unwrap().1.into_owned();
+
+    let form_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code", &code)
+        .append_pair("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+        .append_pair("client_id", &client_id)
+        .append_pair("code_verifier", verifier)
+        .finish()
+        .into_bytes();
+    let tok_res = block_on(t.s.handle(Request::new(Method::Post, "/oauth/token", vec![], form_body, Some("1.2.3.4".into()))));
+    assert_eq!(tok_res.status, 200);
+    let tok_json: serde_json::Value = serde_json::from_slice(tok_res.bytes().unwrap_or_default()).unwrap();
+    let oauth_access = tok_json["access_token"].as_str().unwrap().to_string();
+    let oauth_refresh = tok_json["refresh_token"].as_str().unwrap().to_string();
+
+    // 3. Using an MCP token updates last_used_at and list returns both sessions with site.
+    let (st, ping) = call(&t, Method::Post, "/mcp", serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}), Some(&manual_token));
+    assert_eq!((st, ping["jsonrpc"].as_str()), (200, Some("2.0")));
+    let (st, list) = call(&t, Method::Get, "/v1/mcp/sessions", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 200);
+    let sessions = list.as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "{list}");
+    let oauth_row = sessions.iter().find(|x| x["kind"] == "oauth").unwrap();
+    let oauth_sid = oauth_row["id"].as_str().unwrap().to_string();
+    assert_eq!(oauth_row["site"].as_str(), Some("claude.ai"));
+
+    // 4. Rename session.
+    let (st, renamed) = call(&t, Method::Patch, &format!("/v1/mcp/sessions/{oauth_sid}"), serde_json::json!({"name": "Claude Desktop"}), Some(&s.access_token));
+    assert_eq!((st, renamed["name"].as_str()), (200, Some("Claude Desktop")));
+
+    // 5. Revoke OAuth session -> invalidates bearer token and refresh token immediately.
+    let (st, _) = call(&t, Method::Delete, &format!("/v1/mcp/sessions/{oauth_sid}"), serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 200);
+    let (st, _) = call(&t, Method::Post, "/mcp", serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}), Some(&oauth_access));
+    assert_eq!(st, 401);
+    let refresh_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", &oauth_refresh)
+        .finish()
+        .into_bytes();
+    let ref_res = block_on(t.s.handle(Request::new(Method::Post, "/oauth/token", vec![], refresh_body, Some("1.2.3.4".into()))));
+    assert_eq!(ref_res.status, 400);
+
+    // 6. Revoke manual token session as well.
+    let (st, _) = call(&t, Method::Delete, &format!("/v1/mcp/sessions/{manual_sid}"), serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 200);
+    let (st, _) = call(&t, Method::Post, "/mcp", serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}), Some(&manual_token));
     assert_eq!(st, 401);
 }

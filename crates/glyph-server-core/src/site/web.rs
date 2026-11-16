@@ -19,7 +19,7 @@ pub const INDEX: &str = "index.html";
 /// hosts (Audius content nodes are run by many operators), so `media-src` and
 /// `img-src` allow any HTTPS host; scripts, frames and API calls are pinned:
 /// this origin, YouTube's IFrame API and its privacy embed host.
-pub const WEB_CSP: &str = "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src https: blob:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://www.youtube.com; font-src 'self' data:; manifest-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'";
+pub const WEB_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.youtube.com https://s.ytimg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src https: blob:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://www.youtube.com; font-src 'self' data:; manifest-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'";
 
 /// What a request under [`PREFIX`] gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +141,7 @@ mod tests {
         let page = headers(INDEX);
         assert_eq!(get(&page, "cache-control").as_deref(), Some("no-cache"));
         let csp = get(&page, "content-security-policy").unwrap();
-        assert!(csp.contains("frame-src https://www.youtube-nocookie.com") && csp.contains("media-src https:") && csp.contains("connect-src 'self'"));
+        assert!(csp.contains("frame-src https://www.youtube-nocookie.com") && csp.contains("media-src https:") && csp.contains("connect-src 'self'") && csp.contains("'wasm-unsafe-eval'"));
         let js = headers("assets/index-abc.js");
         assert_eq!(get(&js, "content-type").as_deref(), Some("text/javascript; charset=utf-8"));
         assert!(get(&js, "cache-control").unwrap().contains("immutable"));

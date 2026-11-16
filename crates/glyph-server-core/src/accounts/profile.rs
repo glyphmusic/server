@@ -104,15 +104,29 @@ impl Accounts {
     }
 
     pub(super) async fn profile_route(&self, svc: &Services, req: &Request, path: &str) -> Result<Response, ApiErr> {
-        let a = self.auth(svc, req).await?;
         let m = req.method;
         if let Some(rest) = path.strip_prefix("/v1/profiles/") {
             if m != Method::Get {
                 return Err(method());
             }
+            if is_profile_image_path(rest) {
+                let viewer = if req.header("authorization").is_some() {
+                    Some(self.auth(svc, req).await?.user)
+                } else {
+                    None
+                };
+                let limit_key = match &viewer {
+                    Some(u) => format!("prof-view:{}", u.id),
+                    None => format!("prof-img:{}", req.client_ip.as_deref().unwrap_or("unknown")),
+                };
+                self.limit(svc, &limit_key, 240, 60).await?;
+                return self.view(viewer.as_ref(), rest).await;
+            }
+            let a = self.auth(svc, req).await?;
             self.limit(svc, &format!("prof-view:{}", a.user.id), 240, 60).await?;
-            return self.view(&a.user, rest).await;
+            return self.view(Some(&a.user), rest).await;
         }
+        let a = self.auth(svc, req).await?;
         let now = svc.rt.now_ms();
         let mut p = self.profile_of(&a.user.id).await?;
         match (path, m) {
@@ -190,14 +204,14 @@ impl Accounts {
         }
     }
 
-    async fn view(&self, viewer: &User, rest: &str) -> Result<Response, ApiErr> {
+    async fn view(&self, viewer: Option<&User>, rest: &str) -> Result<Response, ApiErr> {
         let mut parts = rest.splitn(3, '/');
         let raw = parts.next().unwrap_or_default();
         let gone = || ApiErr::not_found("no such profile");
         let handle = super::normalize_handle(raw).map_err(|_| gone())?;
         let user = self.store.user_by_handle(&handle).await.map_err(store_err)?.ok_or_else(gone)?;
         let p = self.profile_of(&user.id).await?;
-        let own = user.id == viewer.id;
+        let own = viewer.is_some_and(|v| user.id == v.id);
         let open = p.public || own;
         match (parts.next(), parts.next()) {
             (None, _) => {
@@ -267,6 +281,12 @@ impl Accounts {
             serde_json::from_str::<serde_json::Value>(v).ok().is_some_and(|v| v["cover"].as_str() == Some(sha))
         }))
     }
+}
+
+fn is_profile_image_path(rest: &str) -> bool {
+    let mut parts = rest.splitn(3, '/');
+    let (_handle, sub, arg) = (parts.next(), parts.next(), parts.next());
+    sub == Some("images") && arg.is_some_and(|s| !s.is_empty())
 }
 
 /// Decode untrusted uploads with bounded resources, discard metadata/animation,

@@ -1,7 +1,7 @@
-# Glyph server 0.11.0 - 2026-11-15
+# Glyph server 0.11.1 - 2026-11-16
 
-- Hosts the `/web` player (`glyph-web/` assets on the Worker; `--web-dir` / `GLYPH_WEB_DIR` on the native server) with SPA fallback, CSP for direct streams and YouTube embeds, and login integration on the landing page.
-- Adds Deezer public chart support, account password-link/delete endpoints, and protocol `0.11.0` profile section ordering and MCP relay tools.
-- Updates `lru` (0.19.0), `toml` (1.2.0), site icons/screenshots, and embedded changelogs for Glyph 0.12.0.
+- Fixes unauthenticated `<img src>` fetches on `/v1/profiles/{handle}/images/{sha256}` while keeping private profiles and playlists authenticated (`401`).
+- Ships the `glyph-web` 0.12.1 web player update (hidden off-screen YouTube embed, Document PiP mini player, queue preloading, batched sync pushes, `/web#mcp-connect=`).
+- Adds cached 14-day `GET /v1/artist` lookup, Worker `PATCH`/`DELETE` CORS for MCP session management, and `glyph-protocol` 0.12.1 snapshot.
 
 See CHANGELOG.md for details.

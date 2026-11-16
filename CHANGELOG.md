@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.11.1 - 2026-11-16
+
+### Fixed
+
+- **Accounts & Profiles (`/v1/profiles/{handle}/images/{sha256}`)**: allows unauthenticated `<img src>` fetches of stored profile/playlist artwork while keeping private profile JSON and playlists protected behind authentication (`401`).
+- **Web player (`/web`)**: embeds the `0.12.1` web player bundle (`glyph-web/`) with YouTube embed compositing fix, Document PiP mini player, queue preloading, batched sync pushes, `/web#mcp-connect=` pairing, and updated landing page screenshots (`?v=0.12.1`).
+- **Worker CORS**: allows `PATCH` and `DELETE` preflight methods for MCP session management endpoints.
+
+### Changed
+
+- **Artist metadata & MCP**: adds cached 14-day `GET /v1/artist` endpoint and MCP settings/session protocol updates (`glyph-protocol` 0.12.1).
+
 ## 0.11.0 - 2026-11-15
 
 ### Added

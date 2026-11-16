@@ -56,7 +56,7 @@ struct Auth {
     redirect_uri: String,
     code_challenge: String,
     state: Option<String>,
-    /// Set once a handle was entered.
+    /// Set once a handle was entered or `/web` claimed this request.
     user_id: Option<String>,
     code: String,
     /// "pending" | "allowed" | "denied"
@@ -67,8 +67,72 @@ struct Auth {
 struct Grant {
     user_id: String,
     client_id: String,
+    #[serde(default)]
+    client_name: String,
     redirect_uri: String,
     code_challenge: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TokenRecord {
+    user_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SessionRecord {
+    id: String,
+    name: String,
+    client_name: String,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    site: Option<String>,
+    kind: String,
+    created_at: u64,
+    #[serde(default)]
+    last_used_at: Option<u64>,
+    #[serde(default)]
+    token_hashes: Vec<String>,
+    #[serde(default)]
+    refresh_hashes: Vec<String>,
+}
+
+fn session_scope(user_id: &str) -> String {
+    format!("mcp_sess:{user_id}")
+}
+
+fn clean_session_label(s: &str, fallback: &str) -> String {
+    let cleaned: String = s.trim().chars().filter(|c| !c.is_control()).take(60).collect();
+    if cleaned.is_empty() { fallback.to_string() } else { cleaned }
+}
+
+fn site_from_uri(uri: &str) -> Option<String> {
+    let u = url::Url::parse(uri).ok()?;
+    if matches!(u.scheme(), "http" | "https") {
+        let host = u.host_str()?;
+        return Some(match u.port() {
+            Some(p) => format!("{host}:{p}"),
+            None => host.to_string(),
+        });
+    }
+    let s = u.scheme();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+impl SessionRecord {
+    fn to_wire(&self) -> glyph_protocol::mcp::Session {
+        glyph_protocol::mcp::Session {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            client_name: self.client_name.clone(),
+            site: self.site.clone(),
+            kind: self.kind.clone(),
+            created_at: self.created_at,
+            last_used_at: self.last_used_at,
+        }
+    }
 }
 
 fn form(body: &[u8]) -> std::collections::HashMap<String, String> {
@@ -84,7 +148,7 @@ fn oauth_err(status: u16, code: &str, desc: &str) -> Response {
 fn cors(mut r: Response) -> Response {
     r.headers.push(("access-control-allow-origin".into(), "*".into()));
     r.headers.push(("access-control-allow-headers".into(), "authorization, content-type, mcp-protocol-version".into()));
-    r.headers.push(("access-control-allow-methods".into(), "GET, POST, OPTIONS".into()));
+    r.headers.push(("access-control-allow-methods".into(), "GET, POST, PATCH, DELETE, OPTIONS".into()));
     r
 }
 
@@ -124,13 +188,29 @@ impl Accounts {
         (!svc.config.mcp_relay).then(|| ApiErr::new(404, "mcp_disabled", "the owner of this server turned AI assistant access (MCP) off"))
     }
 
-    /// The user an MCP bearer token belongs to.
+    /// The user an MCP bearer token belongs to. Rejects tokens whose session
+    /// was revoked and updates `last_used_at` (throttled to 60s).
     async fn mcp_user(&self, svc: &Services, req: &Request) -> Option<String> {
         let token = req.header("authorization")?.strip_prefix("Bearer ")?.trim();
         if token.len() < 32 || token.len() > 200 {
             return None;
         }
-        self.store.mcp_get(TOKENS, &hash(token), svc.rt.now_ms()).await.ok()?
+        let now = svc.rt.now_ms();
+        let raw = self.store.mcp_get(TOKENS, &hash(token), now).await.ok()??;
+        let Ok(rec) = serde_json::from_str::<TokenRecord>(&raw) else {
+            // Backwards compatibility with legacy tokens storing bare user_id.
+            return Some(raw);
+        };
+        if let Some(sid) = rec.session_id.as_deref() {
+            let scope = session_scope(&rec.user_id);
+            let raw_sess = self.store.mcp_get(&scope, sid, now).await.ok()??;
+            let mut s: SessionRecord = serde_json::from_str(&raw_sess).ok()?;
+            if s.last_used_at.is_none_or(|t| now.saturating_sub(t) >= 60_000) {
+                s.last_used_at = Some(now);
+                let _ = self.store.mcp_put(&scope, sid, &serde_json::to_string(&s).unwrap_or_default(), now + REFRESH_TTL_MCP).await;
+            }
+        }
+        Some(rec.user_id)
     }
 
     fn unauth_mcp(&self) -> Response {
@@ -262,7 +342,13 @@ impl Accounts {
                 // One code per approval: the authorization is used up here.
                 self.store.mcp_delete(AUTHS, id).await.map_err(store_err)?;
                 let code = self.random_hex(24);
-                let g = Grant { user_id, client_id: auth.client_id, redirect_uri: auth.redirect_uri.clone(), code_challenge: auth.code_challenge };
+                let g = Grant {
+                    user_id,
+                    client_id: auth.client_id,
+                    client_name: auth.client_name,
+                    redirect_uri: auth.redirect_uri.clone(),
+                    code_challenge: auth.code_challenge,
+                };
                 self.store.mcp_put(CODES, &hash(&code), &serde_json::to_string(&g).unwrap_or_default(), now + CODE_TTL).await.map_err(store_err)?;
                 let mut target = url::Url::parse(&auth.redirect_uri).map_err(|_| ApiErr::bad_request("bad redirect"))?;
                 target.query_pairs_mut().append_pair("code", &code);
@@ -275,11 +361,29 @@ impl Accounts {
             ("/oauth/token", Method::Post) => {
                 self.limit(svc, &format!("mcp-token:{ip}"), 30, 600).await?;
                 let f = form(&req.body);
-                let issue = |user_id: String, client_id: String| async move {
+                let issue = |user_id: String, client_id: String, mut session: SessionRecord, old_refresh_hash: Option<String>| async move {
                     let (access, refresh) = (self.random_hex(32), self.random_hex(32));
-                    self.store.mcp_put(TOKENS, &hash(&access), &user_id, now + ACCESS_TTL_MCP).await.map_err(store_err)?;
-                    let r = serde_json::json!({ "user_id": user_id, "client_id": client_id }).to_string();
-                    self.store.mcp_put(REFRESH, &hash(&refresh), &r, now + REFRESH_TTL_MCP).await.map_err(store_err)?;
+                    let (access_hash, refresh_hash) = (hash(&access), hash(&refresh));
+                    if let Some(old_r) = old_refresh_hash {
+                        session.refresh_hashes.retain(|h| h != &old_r);
+                    }
+                    session.token_hashes.push(access_hash.clone());
+                    if session.token_hashes.len() > 6 {
+                        session.token_hashes.drain(..session.token_hashes.len() - 6);
+                    }
+                    session.refresh_hashes.push(refresh_hash.clone());
+                    if session.refresh_hashes.len() > 6 {
+                        session.refresh_hashes.drain(..session.refresh_hashes.len() - 6);
+                    }
+                    session.last_used_at = Some(now);
+                    self.store
+                        .mcp_put(&session_scope(&user_id), &session.id, &serde_json::to_string(&session).unwrap_or_default(), now + REFRESH_TTL_MCP)
+                        .await
+                        .map_err(store_err)?;
+                    let tok_val = serde_json::to_string(&TokenRecord { user_id: user_id.clone(), session_id: Some(session.id.clone()) }).unwrap_or_default();
+                    self.store.mcp_put(TOKENS, &access_hash, &tok_val, now + ACCESS_TTL_MCP).await.map_err(store_err)?;
+                    let r = serde_json::json!({ "user_id": user_id, "client_id": client_id, "session_id": session.id }).to_string();
+                    self.store.mcp_put(REFRESH, &refresh_hash, &r, now + REFRESH_TTL_MCP).await.map_err(store_err)?;
                     Ok::<_, ApiErr>(cors(Response::json(
                         200,
                         &serde_json::json!({ "access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MCP / 1000, "refresh_token": refresh, "scope": "glyph" }),
@@ -298,7 +402,31 @@ impl Accounts {
                         if f.get("redirect_uri") != Some(&g.redirect_uri) || f.get("client_id") != Some(&g.client_id) || challenge != g.code_challenge {
                             return Ok(oauth_err(400, "invalid_grant", "redirect_uri, client_id or code_verifier does not match"));
                         }
-                        issue(g.user_id, g.client_id).await
+                        let client_name = if g.client_name.is_empty() {
+                            self.store
+                                .mcp_get(CLIENTS, &g.client_id, now)
+                                .await
+                                .map_err(store_err)?
+                                .and_then(|c| serde_json::from_str::<Client>(&c).ok())
+                                .map(|c| c.name)
+                                .unwrap_or_else(|| "AI assistant".into())
+                        } else {
+                            g.client_name.clone()
+                        };
+                        let label = clean_session_label(&client_name, "AI assistant");
+                        let session = SessionRecord {
+                            id: format!("ms_{}", self.random_hex(12)),
+                            name: label.clone(),
+                            client_name: label,
+                            client_id: Some(g.client_id.clone()),
+                            site: site_from_uri(&g.redirect_uri),
+                            kind: "oauth".into(),
+                            created_at: now,
+                            last_used_at: Some(now),
+                            token_hashes: Vec::new(),
+                            refresh_hashes: Vec::new(),
+                        };
+                        issue(g.user_id, g.client_id, session, None).await
                     }
                     Some("refresh_token") => {
                         let key = hash(f.get("refresh_token").map(String::as_str).unwrap_or(""));
@@ -311,7 +439,41 @@ impl Accounts {
                         if self.store.user(&user_id).await.map_err(store_err)?.is_none() {
                             return Ok(oauth_err(400, "invalid_grant", "account deleted"));
                         }
-                        issue(user_id, r["client_id"].as_str().unwrap_or("").to_string()).await
+                        let client_id = r["client_id"].as_str().unwrap_or("").to_string();
+                        let session = if let Some(sid) = r["session_id"].as_str() {
+                            let Some(s) = self
+                                .store
+                                .mcp_get(&session_scope(&user_id), sid, now)
+                                .await
+                                .map_err(store_err)?
+                                .and_then(|v| serde_json::from_str::<SessionRecord>(&v).ok())
+                            else {
+                                return Ok(oauth_err(400, "invalid_grant", "session revoked"));
+                            };
+                            s
+                        } else {
+                            let cname = self
+                                .store
+                                .mcp_get(CLIENTS, &client_id, now)
+                                .await
+                                .map_err(store_err)?
+                                .and_then(|c| serde_json::from_str::<Client>(&c).ok())
+                                .map(|c| clean_session_label(&c.name, "AI assistant"))
+                                .unwrap_or_else(|| "AI assistant".into());
+                            SessionRecord {
+                                id: format!("ms_{}", self.random_hex(12)),
+                                name: cname.clone(),
+                                client_name: cname,
+                                client_id: (!client_id.is_empty()).then(|| client_id.clone()),
+                                site: None,
+                                kind: "oauth".into(),
+                                created_at: now,
+                                last_used_at: Some(now),
+                                token_hashes: Vec::new(),
+                                refresh_hashes: Vec::new(),
+                            }
+                        };
+                        issue(user_id, client_id, session, Some(key)).await
                     }
                     _ => Ok(oauth_err(400, "unsupported_grant_type", "authorization_code or refresh_token")),
                 }
@@ -340,9 +502,107 @@ impl Accounts {
             ("/mcp", _) => Err(method()),
             ("/v1/mcp/token", Method::Post) => {
                 let a = self.auth(svc, req).await?;
+                let opt: glyph_protocol::mcp::TokenRequest = if req.body.is_empty() {
+                    Default::default()
+                } else {
+                    json_body(req, 4096)?
+                };
+                let label = clean_session_label(opt.name.as_deref().unwrap_or(""), "Manual token");
+                let origin_site = req
+                    .header("origin")
+                    .or_else(|| req.header("referer"))
+                    .and_then(site_from_uri)
+                    .or_else(|| site_from_uri(&origin));
                 let token = self.random_hex(32);
-                self.store.mcp_put(TOKENS, &hash(&token), &a.user.id, now + REFRESH_TTL_MCP).await.map_err(store_err)?;
-                Ok(Response::json(200, &glyph_protocol::mcp::TokenResponse { token, url: format!("{origin}/mcp") }))
+                let tok_hash = hash(&token);
+                let sid = format!("ms_{}", self.random_hex(12));
+                let session = SessionRecord {
+                    id: sid.clone(),
+                    name: label,
+                    client_name: "Manual token".into(),
+                    client_id: None,
+                    site: origin_site,
+                    kind: "token".into(),
+                    created_at: now,
+                    last_used_at: None,
+                    token_hashes: vec![tok_hash.clone()],
+                    refresh_hashes: Vec::new(),
+                };
+                self.store
+                    .mcp_put(&session_scope(&a.user.id), &sid, &serde_json::to_string(&session).unwrap_or_default(), now + REFRESH_TTL_MCP)
+                    .await
+                    .map_err(store_err)?;
+                let tok_val = serde_json::to_string(&TokenRecord { user_id: a.user.id.clone(), session_id: Some(sid.clone()) }).unwrap_or_default();
+                self.store.mcp_put(TOKENS, &tok_hash, &tok_val, now + REFRESH_TTL_MCP).await.map_err(store_err)?;
+                Ok(Response::json(200, &glyph_protocol::mcp::TokenResponse { token, url: format!("{origin}/mcp"), session_id: Some(sid) }))
+            }
+            ("/v1/mcp/sessions", Method::Get) => {
+                let a = self.auth(svc, req).await?;
+                let scope = session_scope(&a.user.id);
+                let mut rows: Vec<SessionRecord> = self
+                    .store
+                    .mcp_list(&scope, "ms_", now)
+                    .await
+                    .map_err(store_err)?
+                    .into_iter()
+                    .filter_map(|(_, v)| serde_json::from_str::<SessionRecord>(&v).ok())
+                    .collect();
+                rows.sort_by(|x, y| y.last_used_at.unwrap_or(y.created_at).cmp(&x.last_used_at.unwrap_or(x.created_at)));
+                let wire: Vec<glyph_protocol::mcp::Session> = rows.iter().map(SessionRecord::to_wire).collect();
+                Ok(Response::json(200, &wire))
+            }
+            (p, m) if p.starts_with("/v1/mcp/sessions/") => {
+                let a = self.auth(svc, req).await?;
+                let sid = p.trim_start_matches("/v1/mcp/sessions/");
+                if sid.is_empty() || sid.contains('/') {
+                    return Err(ApiErr::not_found("no such session"));
+                }
+                let scope = session_scope(&a.user.id);
+                let Some(mut rec) = self.store.mcp_get(&scope, sid, now).await.map_err(store_err)?.and_then(|v| serde_json::from_str::<SessionRecord>(&v).ok()) else {
+                    return Err(ApiErr::not_found("no such session"));
+                };
+                match m {
+                    Method::Patch => {
+                        let patch: glyph_protocol::mcp::SessionPatch = json_body(req, 4096)?;
+                        rec.name = clean_session_label(&patch.name, &rec.client_name);
+                        self.store
+                            .mcp_put(&scope, sid, &serde_json::to_string(&rec).unwrap_or_default(), now + REFRESH_TTL_MCP)
+                            .await
+                            .map_err(store_err)?;
+                        Ok(Response::json(200, &rec.to_wire()))
+                    }
+                    Method::Delete => {
+                        for th in &rec.token_hashes {
+                            let _ = self.store.mcp_delete(TOKENS, th).await;
+                        }
+                        for rh in &rec.refresh_hashes {
+                            let _ = self.store.mcp_delete(REFRESH, rh).await;
+                        }
+                        self.store.mcp_delete(&scope, sid).await.map_err(store_err)?;
+                        Ok(Response::json(200, &serde_json::json!({})))
+                    }
+                    _ => Err(method()),
+                }
+            }
+            ("/v1/mcp/oauth/claim", Method::Post) => {
+                let a = self.auth(svc, req).await?;
+                let req_claim: glyph_protocol::mcp::ClaimRequest = json_body(req, 4096)?;
+                let Some(mut auth) = self.store.mcp_get(AUTHS, &req_claim.id, now).await.map_err(store_err)?.and_then(|x| serde_json::from_str::<Auth>(&x).ok()) else {
+                    return Err(ApiErr::not_found("this request expired"));
+                };
+                if auth.status != "pending" || (auth.user_id.is_some() && auth.user_id.as_deref() != Some(a.user.id.as_str())) {
+                    return Err(ApiErr::not_found("this request expired"));
+                }
+                auth.user_id = Some(a.user.id.clone());
+                self.store.mcp_put(AUTHS, &req_claim.id, &serde_json::to_string(&auth).unwrap_or_default(), now + AUTH_TTL).await.map_err(store_err)?;
+                Ok(Response::json(
+                    200,
+                    &glyph_protocol::mcp::Approval {
+                        id: req_claim.id,
+                        client: auth.client_name,
+                        code: auth.code,
+                    },
+                ))
             }
             ("/v1/mcp/pull", Method::Get) => {
                 let a = self.auth(svc, req).await?;
@@ -447,23 +707,28 @@ impl Accounts {
     }
 }
 
-/// The sign-in page an assistant opens: the user enters their @handle and
-/// confirms in the app; the page then sends the browser back to the assistant.
+/// The sign-in page an assistant opens: the user can confirm in `/web`
+/// (with zero typing when already signed in) or enter their @handle to approve
+/// from another device; the page then sends the browser back to the assistant.
 fn authorize_page(auth: Option<(&str, &str, &str)>, error: &str) -> Response {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
     let body = match auth {
         Some((id, client, code)) => format!(
             r#"<h1>Connect {client}</h1>
-<p class="sub">{client} wants to control Glyph for you: playback, queue, playlists and likes.</p>
-<form id="f"><label for="h">Your Glyph account</label><input id="h" placeholder="@handle" autocomplete="username" autofocus required><div class="row"><button>Continue</button></div></form>
-<div id="wait" hidden><p class="sub">Confirm in the Glyph app on a signed-in device. It shows the same code:</p><div class="code">{code}</div><p class="muted">Nothing appears? Turn on Settings › Integrations › AI assistants › Through the server.</p></div>
+<p class="sub">{client} wants to control Glyph for you: playback, queue, playlists, library and settings (as allowed in your preferences).</p>
+<a id="web-btn" class="web-btn" href="/web#mcp-connect={id_esc}" target="_blank" rel="noopener">Connect in Glyph Web</a>
+<div class="div"><span>or confirm via @handle</span></div>
+<form id="f"><label for="h">Your Glyph account</label><input id="h" placeholder="@handle" autocomplete="username" required><div class="row"><button>Continue</button></div></form>
+<div id="wait" hidden><p class="sub">Confirm in Glyph Web or on a signed-in device. It shows the same code:</p><div class="code">{code}</div><p class="muted">Nothing appears? Turn on Settings › Integrations › AI assistants › Through the server.</p></div>
 <p id="msg" class="muted"></p>
 <script>
-const id={id:?};const msg=document.getElementById('msg');
+const id={id:?};const msg=document.getElementById('msg');let polling=false;
+function startPoll(){{if(polling)return;polling=true;poll()}}
+document.getElementById('web-btn').addEventListener('click',()=>{{document.getElementById('wait').hidden=false;startPoll()}});
 document.getElementById('f').onsubmit=async e=>{{e.preventDefault();
  const r=await fetch('/oauth/authorize/start',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({{id,handle:document.getElementById('h').value}})}});
  if(!r.ok){{msg.textContent=(await r.json().catch(()=>({{}}))).message||'Something went wrong.';return}}
- document.getElementById('f').hidden=true;document.getElementById('wait').hidden=false;poll()}};
+ document.getElementById('f').hidden=true;document.getElementById('wait').hidden=false;startPoll()}};
 async function poll(){{const r=await fetch('/oauth/authorize/poll?id='+id);const j=await r.json();
  if(j.status==='allowed'){{msg.textContent='Connected. Returning to the assistant…';location.href=j.redirect;return}}
  if(j.status==='denied'){{msg.textContent='Declined in the app.';return}}
@@ -472,13 +737,14 @@ async function poll(){{const r=await fetch('/oauth/authorize/poll?id='+id);const
 </script>"#,
             client = esc(client),
             code = esc(code),
+            id_esc = esc(id),
             id = id,
         ),
         None => format!("<h1>Something went wrong</h1><p class=\"sub\">{}</p>", esc(error)),
     };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glyph · Connect an assistant</title>
-<style>*{{box-sizing:border-box}}body{{background:#09090b;color:#f2f2f2;font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}}main{{width:100%;max-width:460px;padding:24px;border-radius:12px;background:#171717;display:flex;flex-direction:column;gap:18px}}.logo{{font:700 15px "JetBrains Mono",ui-monospace,monospace;color:#ff5fa2}}h1{{margin:0;font-size:20px;font-weight:700;color:rgba(255,255,255,.95)}}p{{margin:0}}.sub{{color:rgba(255,255,255,.7)}}form,#wait{{display:flex;flex-direction:column;gap:8px}}[hidden]{{display:none!important}}label{{font-size:13px;color:rgba(255,255,255,.55)}}input{{width:100%;height:40px;padding:0 12px;border-radius:8px;border:1px solid transparent;background:rgba(255,255,255,.07);color:#fff;font:inherit;font-size:14px;outline:none}}input:focus{{border-color:rgba(255,255,255,.2)}}input::placeholder{{color:rgba(255,255,255,.35)}}.row{{display:flex;justify-content:flex-end;margin-top:10px}}button{{height:40px;padding:0 24px;border-radius:8px;border:0;background:#fff;color:#000;font:inherit;font-weight:600;cursor:pointer}}button:hover{{background:rgba(255,255,255,.88)}}.code{{height:64px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(255,255,255,.07);font:700 26px "JetBrains Mono",ui-monospace,monospace;letter-spacing:2px;color:#ff5fa2}}.muted{{color:rgba(255,255,255,.45);font-size:13px}}#msg:empty{{display:none}}</style></head><body><main><div class="logo">glyph</div>{body}</main></body></html>"#
+<style>*{{box-sizing:border-box}}body{{background:#09090b;color:#f2f2f2;font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}}main{{width:100%;max-width:460px;padding:24px;border-radius:12px;background:#171717;display:flex;flex-direction:column;gap:16px}}.logo{{font:700 15px "JetBrains Mono",ui-monospace,monospace;color:#ff5fa2}}h1{{margin:0;font-size:20px;font-weight:700;color:rgba(255,255,255,.95)}}p{{margin:0}}.sub{{color:rgba(255,255,255,.7)}}.web-btn{{height:42px;border-radius:8px;background:#fff;color:#000;font-weight:600;text-decoration:none;display:flex;align-items:center;justify-content:center;cursor:pointer}}.web-btn:hover{{background:rgba(255,255,255,.88)}}.div{{display:flex;align-items:center;gap:10px;color:rgba(255,255,255,.4);font-size:12px}}.div::before,.div::after{{content:'';flex:1;height:1px;background:rgba(255,255,255,.1)}}form,#wait{{display:flex;flex-direction:column;gap:8px}}[hidden]{{display:none!important}}label{{font-size:13px;color:rgba(255,255,255,.55)}}input{{width:100%;height:40px;padding:0 12px;border-radius:8px;border:1px solid transparent;background:rgba(255,255,255,.07);color:#fff;font:inherit;font-size:14px;outline:none}}input:focus{{border-color:rgba(255,255,255,.2)}}input::placeholder{{color:rgba(255,255,255,.35)}}.row{{display:flex;justify-content:flex-end;margin-top:10px}}button{{height:40px;padding:0 24px;border-radius:8px;border:0;background:rgba(255,255,255,.12);color:#fff;font:inherit;font-weight:600;cursor:pointer}}button:hover{{background:rgba(255,255,255,.18)}}.code{{height:64px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(255,255,255,.07);font:700 26px "JetBrains Mono",ui-monospace,monospace;letter-spacing:2px;color:#ff5fa2}}.muted{{color:rgba(255,255,255,.45);font-size:13px}}#msg:empty{{display:none}}</style></head><body><main><div class="logo">glyph</div>{body}</main></body></html>"#
     );
     Response {
         status: 200,
@@ -495,7 +761,7 @@ async function poll(){{const r=await fetch('/oauth/authorize/poll?id='+id);const
 
 #[cfg(test)]
 mod tests {
-    use super::redirect_ok;
+    use super::{clean_session_label, redirect_ok, site_from_uri};
 
     #[test]
     fn redirects() {
@@ -506,5 +772,14 @@ mod tests {
         assert!(!redirect_ok("http://evil.example/cb"));
         assert!(!redirect_ok("javascript://alert(1)"));
         assert!(!redirect_ok("https://x.example/#frag"));
+    }
+
+    #[test]
+    fn session_metadata_helpers() {
+        assert_eq!(site_from_uri("https://claude.ai/api/mcp/auth_callback").as_deref(), Some("claude.ai"));
+        assert_eq!(site_from_uri("http://127.0.0.1:33418/callback").as_deref(), Some("127.0.0.1:33418"));
+        assert_eq!(site_from_uri("cursor://anysphere.cursor-retrieval/oauth/callback").as_deref(), Some("cursor"));
+        assert_eq!(clean_session_label("  Claude\nDesktop  ", "AI assistant"), "ClaudeDesktop");
+        assert_eq!(clean_session_label("   ", "Manual token"), "Manual token");
     }
 }

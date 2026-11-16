@@ -138,6 +138,7 @@ enum Route {
     Cover,
     Download,
     YouTubeHint,
+    Artist,
 }
 
 fn route(path: &str) -> Option<(Route, Method)> {
@@ -152,6 +153,7 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/cover" => (Route::Cover, Method::Post),
         "/v1/download" => (Route::Download, Method::Post),
         "/v1/youtube/hint" => (Route::YouTubeHint, Method::Post),
+        "/v1/artist" => (Route::Artist, Method::Get),
         _ => return None,
     })
 }
@@ -546,6 +548,12 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                     .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
                     .ok_or_else(|| ApiErr::bad_request("missing install id"))?;
                 Ok(Response::json(200, &crate::hints::report(svc, &voter, r).await?))
+            }
+            Route::Artist => {
+                let name = req.query.required("name")?;
+                let lang = req.query.get("lang").unwrap_or("en");
+                let resp = crate::artist::lookup(svc, name, lang).await?;
+                Ok(Response::json(200, &resp))
             }
             Route::Cover => {
                 let track: crate::trust::Claimed<glyph_protocol::Track> = parse_body::<glyph_protocol::Track>(&req)?.into();
@@ -1054,5 +1062,33 @@ mod tests {
         let r = block_on(server(&h).handle(get("/v1/chart")));
         assert_eq!(r.status, 200);
         assert_eq!(json_of(&r)["tracks"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn artist_endpoint_returns_metadata() {
+        let h = harness(Default::default());
+        h.http.on(
+            "api.deezer.com/search/artist",
+            200,
+            r#"{"data":[{"id":1,"name":"Muse","picture_xl":"https://dz/xl.jpg","nb_fan":5000000,"link":"https://deezer/muse"}]}"#,
+        );
+        h.http.on(
+            "en.wikipedia.org/w/api.php",
+            200,
+            r#"{"query":{"search":[{"title":"Muse"}]}}"#,
+        );
+        h.http.on(
+            "en.wikipedia.org/api/rest_v1/page/summary/Muse",
+            200,
+            r#"{"type":"standard","description":"English rock band","extract":"Muse are an English rock band.","content_urls":{"desktop":{"page":"https://en.wikipedia.org/wiki/Muse"}},"originalimage":{"source":"https://commons/muse.jpg","width":1920,"height":1080}}"#,
+        );
+        let r = block_on(server(&h).handle(get("/v1/artist?name=Muse")));
+        assert_eq!(r.status, 200);
+        let v = json_of(&r);
+        assert_eq!(v["name"], "Muse");
+        assert_eq!(v["photo"], "https://dz/xl.jpg");
+        assert_eq!(v["banner"], "https://commons/muse.jpg");
+        assert_eq!(v["fans"], 5000000);
+        assert_eq!(v["verified"], true);
     }
 }
