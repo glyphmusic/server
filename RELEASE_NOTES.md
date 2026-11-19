@@ -1,7 +1,6 @@
-# Glyph server 0.11.4 - 2026-11-16
+# Glyph server 0.11.5 - 2026-11-19
 
-- **Storage Split**: separates cached covers/audio (`GLYPH_CACHE` -> `glyph-cache`) from user uploads (`GLYPH_USERS` -> `glyph-users`, keeping `GLYPH_COVERS` fallback) and updates Worker config name to `server`.
-- **Playback Poll & Cover Metadata**: avoids unnecessary Durable Object calls on single-device playback polls, routes `playback:` room scopes cleanly, and returns `{ url, album }` from `POST /v1/cover`.
-- **Web player (`/web`)**: embeds `glyph-web` `0.12.4` (Web Connect remote playback, Home quick-pick cards, album backfill, UI fixes) and `glyph-protocol` `0.12.4`.
+- **Whole artist pages**: `GET /v1/artist` now also returns the artist's top songs, the discography and similar artists, cached for 14 days. One lookup serves every app, so artist pages open fast and the same for everyone.
+- Older apps ignore the new fields and keep working as before.
 
 See CHANGELOG.md for details.

@@ -1,6 +1,6 @@
 {
   "name": "glyph-server",
-  "version": "0.11.4",
+  "version": "0.11.5",
   "description": "Glyph CLI: install, diagnose and manage Glyph servers and companions",
   "license": "MIT OR Apache-2.0",
   "repository": {
