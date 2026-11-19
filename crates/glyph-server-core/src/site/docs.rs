@@ -533,19 +533,64 @@ impl Nav {
         })
     }
 
+    /// The window's nav (glyph-ui settings/Nav.svelte): `## Group` labels,
+    /// top pages, and the pages under one on a thin line, open while it or
+    /// one of them is the current page.
     fn render(&self, current: &str) -> String {
-        let mut html = String::from("<ul>");
+        const CHEV: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6.5L13.44 10.44Q15 12 13.44 13.56L9.5 17.5"/></svg>"#;
+        let mut html = String::new();
+        let mut i = 0;
+        while i < self.0.len() {
+            let (title, href, file, depth) = match &self.0[i] {
+                Entry::Group(g) => {
+                    html.push_str(&format!("<div class=\"gl\">{}</div>", escape(g)));
+                    i += 1;
+                    continue;
+                }
+                Entry::Item { title, href, file, depth } => (title, href, file, *depth),
+            };
+            let mut end = i + 1;
+            while let Some(Entry::Item { depth: d, .. }) = self.0.get(end) {
+                if *d <= depth {
+                    break;
+                }
+                end += 1;
+            }
+            let kids: Vec<_> = self.0[i + 1..end]
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Item { title, href, file, depth: d } => Some((title, href, file, *d - depth)),
+                    Entry::Group(_) => None,
+                })
+                .collect();
+            let cur = |f: &str| if f == current { " aria-current=\"page\"" } else { "" };
+            let open = file == current || kids.iter().any(|k| k.2.as_str() == current);
+            let chev = if kids.is_empty() { String::new() } else { format!("<span class=\"chev{}\">{CHEV}</span>", if open { " open" } else { "" }) };
+            html.push_str(&format!("<a class=\"pg\" href=\"{}\"{}><span class=\"nm\">{}</span>{chev}</a>", escape(href), cur(file), escape(title)));
+            if !kids.is_empty() {
+                html.push_str(if open { "<div class=\"subs\">" } else { "<div class=\"subs\" hidden>" });
+                for (t, h, f, d) in kids {
+                    let deep = if d > 1 { " deep" } else { "" };
+                    html.push_str(&format!("<a class=\"sub{deep}\" href=\"{}\"{}>{}</a>", escape(h), cur(f), escape(t)));
+                }
+                html.push_str("</div>");
+            }
+            i = end;
+        }
+        html
+    }
+
+    /// The `## Group` heading `current` sits under, if any.
+    fn group(&self, current: &str) -> Option<&str> {
+        let mut group = None;
         for e in &self.0 {
             match e {
-                Entry::Group(g) => html.push_str(&format!("</ul><p class=\"grp\">{}</p><ul>", escape(g))),
-                Entry::Item { title, href, file, depth } => {
-                    let cur = if file == current { " aria-current=\"page\"" } else { "" };
-                    html.push_str(&format!("<li class=\"d{}\"><a href=\"{}\"{cur}>{}</a></li>", (*depth).min(3), escape(href), escape(title)));
-                }
+                Entry::Group(g) => group = Some(g.as_str()),
+                Entry::Item { file, .. } if file == current => return group,
+                Entry::Item { .. } => {}
             }
         }
-        html.push_str("</ul>");
-        html.replace("<ul></ul>", "")
+        None
     }
 
     /// Previous and next page around `current`.
@@ -554,10 +599,10 @@ impl Nav {
         let Some(i) = items.iter().position(|(_, _, f)| *f == current) else { return String::new() };
         let mut html = String::new();
         if let Some((t, h, _)) = i.checked_sub(1).and_then(|p| items.get(p)) {
-            html.push_str(&format!("<a class=\"prev\" href=\"{}\"><span>previous</span>{}</a>", escape(h), escape(t)));
+            html.push_str(&format!("<a class=\"prev\" href=\"{}\"><span>Previous</span>{}</a>", escape(h), escape(t)));
         }
         if let Some((t, h, _)) = items.get(i + 1) {
-            html.push_str(&format!("<a class=\"next\" href=\"{}\"><span>next</span>{}</a>", escape(h), escape(t)));
+            html.push_str(&format!("<a class=\"next\" href=\"{}\"><span>Next</span>{}</a>", escape(h), escape(t)));
         }
         html
     }
@@ -743,10 +788,10 @@ fn llms_full(pages: &[(String, String)], origin: &str) -> String {
 // ------------------------------------------------------------------ pages
 
 #[allow(clippy::too_many_arguments)]
-fn fill(site: &str, base: &str, title: &str, description: &str, canonical: &str, markdown: &str, nav: &str, body: &str) -> String {
+fn fill(site: &str, base: &str, title: &str, description: &str, canonical: &str, markdown: &str, nav: &str, body: &str, onpage: &str) -> String {
     include_str!("docs.html")
-        .replace("/*BASE*/", crate::site::BASE_CSS)
-        .replace("/*BRAND*/", &crate::site::brand_icon_css("nav .brand"))
+        .replace("/*PANEL*/", crate::site::PANEL_CSS)
+        .replace("/*GLOW*/", crate::share::GLOW_JS)
         .replace("{{TITLE}}", &escape(title))
         .replace("{{DESC}}", &escape(description))
         .replace("{{CANON}}", &escape(canonical))
@@ -755,39 +800,47 @@ fn fill(site: &str, base: &str, title: &str, description: &str, canonical: &str,
         .replace("{{BASE}}", &escape(base))
         .replace("{{MD}}", &escape(markdown))
         .replace("{{NAV}}", nav)
+        .replace("{{ONPAGE}}", onpage)
         .replace("{{BODY}}", body)
 }
 
 fn page(site: &str, base: &str, file: &str, doc: &Doc, nav: &Nav) -> String {
     let path = page_url(file, "").unwrap_or_default();
-    let mut body = format!("<h1>{}</h1>", escape(&doc.title));
+    // Title as in the Settings window: the group dim, then the page.
+    let mut body = match nav.group(file) {
+        Some(g) => format!("<h1><span class=\"crumb\">{}</span><span class=\"sep\">›</span>{}</h1>", escape(g), escape(&doc.title)),
+        None => format!("<h1>{}</h1>", escape(&doc.title)),
+    };
     if let Some(d) = &doc.description {
         body.push_str(&format!("<p class=\"lead\">{}</p>", escape(d)));
     }
+    // Sections: inline under the lead on narrow screens, in the right column on wide ones.
+    let mut onpage = String::new();
     if doc.sections.len() >= 3 {
         let list: String = doc.sections.iter().map(|(id, t)| format!("<li><a href=\"#{id}\">{}</a></li>", escape(t))).collect();
         body.push_str(&format!("<nav class=\"onpage\" aria-label=\"On this page\"><ul>{list}</ul></nav>"));
+        onpage = format!("<div class=\"gl\">On this page</div><ul>{list}</ul>");
     }
     body.push_str(&doc.html);
     body.push_str(&format!(
-        "<div class=\"pager\">{}</div><p class=\"edit\"><a href=\"https://github.com/{REPO}/edit/{BRANCH}/{f}\">edit this page on github</a> · <a href=\"{base}/{f}\">markdown</a></p>",
+        "<div class=\"pager\">{}</div><p class=\"edit\"><a href=\"https://github.com/{REPO}/edit/{BRANCH}/{f}\">Edit this page on GitHub</a> · <a href=\"{base}/{f}\">Markdown</a></p>",
         nav.pager(file),
         f = escape(file)
     ));
     let description = doc.description.clone().unwrap_or_else(|| "Documentation for Glyph, the free music player.".into());
-    fill(site, base, &doc.title, &description, &format!("{DOCS_ORIGIN}{path}"), &format!("{base}/{file}"), &nav.render(file), &body)
+    fill(site, base, &doc.title, &description, &format!("{DOCS_ORIGIN}{path}"), &format!("{base}/{file}"), &nav.render(file), &body, &onpage)
 }
 
 fn not_found(site: &str, base: &str, summary: &str) -> String {
     let nav = Nav::parse(summary, base);
     let home = if base.is_empty() { "/" } else { base };
     let body = format!("<h1>not found</h1><p class=\"lead\">This page does not exist (any more). Search above, or start at the <a href=\"{home}\">docs home</a>.</p>");
-    fill(site, base, "Not found", "Page not found.", DOCS_ORIGIN, &format!("{base}/llms.txt"), &nav.render(""), &body)
+    fill(site, base, "Not found", "Page not found.", DOCS_ORIGIN, &format!("{base}/llms.txt"), &nav.render(""), &body, "")
 }
 
 fn unavailable(site: &str, base: &str) -> String {
     let body = format!("<h1>docs unavailable</h1><p class=\"lead\">The docs could not be loaded right now. Try again in a minute, or read them on <a href=\"https://github.com/{REPO}\">GitHub</a>.</p>");
-    fill(site, base, "Docs unavailable", "The docs could not be loaded.", DOCS_ORIGIN, &format!("{base}/llms.txt"), "", &body)
+    fill(site, base, "Docs unavailable", "The docs could not be loaded.", DOCS_ORIGIN, &format!("{base}/llms.txt"), "", &body, "")
 }
 
 #[cfg(test)]
@@ -853,9 +906,12 @@ mod tests {
     fn navigation_from_summary() {
         let nav = Nav::parse("# Table of contents\n\n* [Welcome](README.md)\n\n## Getting started\n\n* [Install](getting-started/install.md)\n  * [Linux](getting-started/linux.md)\n", "/docs");
         let html = nav.render("getting-started/install.md");
-        assert!(html.contains("<p class=\"grp\">Getting started</p>"));
-        assert!(html.contains("<a href=\"/docs/getting-started/install\" aria-current=\"page\">Install</a>"));
-        assert!(html.contains("class=\"d1\""));
+        assert!(html.contains("<div class=\"gl\">Getting started</div>"));
+        assert!(html.contains("<a class=\"pg\" href=\"/docs/getting-started/install\" aria-current=\"page\"><span class=\"nm\">Install</span><span class=\"chev open\">"));
+        assert!(html.contains("<div class=\"subs\"><a class=\"sub\" href=\"/docs/getting-started/linux\">Linux</a></div>"));
+        assert!(nav.render("README.md").contains("<div class=\"subs\" hidden>"));
+        assert_eq!(nav.group("getting-started/linux.md"), Some("Getting started"));
+        assert_eq!(nav.group("README.md"), None);
         let pager = nav.pager("getting-started/install.md");
         assert!(pager.contains("href=\"/docs/\"") && pager.contains("href=\"/docs/getting-started/linux\""));
         assert_eq!(slug("Play on another computer (MPD)"), "play-on-another-computer-mpd");
@@ -879,7 +935,7 @@ mod tests {
 
         let install = block_on(s.handle(get("docs.glyph.my", "/getting-started/install")));
         assert_eq!(install.status, 200);
-        assert!(text(install).contains("aria-current=\"page\">Install"));
+        assert!(text(install).contains("aria-current=\"page\"><span class=\"nm\">Install</span>"));
 
         assert_eq!(block_on(s.handle(get("docs.glyph.my", "/nope"))).status, 404);
         assert_eq!(block_on(s.handle(get("docs.glyph.my", "/a%2e%2e/b"))).status, 404);

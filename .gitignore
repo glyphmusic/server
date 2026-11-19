@@ -16,3 +16,8 @@ dist/
 
 # Ban list + salt the native server writes next to server.toml
 bans.json
+
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.11.5 - 2026-11-19
+
+### Changed
+
+- **Whole artist pages (`GET /v1/artist`)**: the answer now also holds the artist's popular songs (`top`, Deezer top 25), the discography (`releases`: id, title, cover, release day, type, newest first) and related artists (`similar`, which was always empty before). It stays in the cache 14 days (key `artist:v2:...`), so one lookup serves every app: the apps no longer search and ask Deezer and Last.fm themselves for each artist page. Deezer's three extra calls run beside the Wikipedia lookup. Older apps ignore the new fields.
+
 ## 0.11.4 - 2026-11-16
 
 ### Fixed

@@ -17,6 +17,8 @@ use crate::traits::Method;
 
 /// Stylesheet shared by every page of the site.
 pub const BASE_CSS: &str = include_str!("site/base.css");
+/// The reading pages (/changelog, docs): the app's Settings window look.
+pub const PANEL_CSS: &str = include_str!("site/panel.css");
 /// `glyphNote(canvas, rowH)`: the app's splash animation.
 pub const NOTE_JS: &str = include_str!("site/note.js");
 /// The app icon, shown next to the brand name.
@@ -135,9 +137,10 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
     if req.path.trim_end_matches('/') == "/changelog" {
         let releases = changelog::releases();
         let html = include_str!("site/changelog.html")
-            .replace("/*BASE*/", BASE_CSS)
-            .replace("/*BRAND*/", &brand_icon_css("nav .brand"))
+            .replace("/*PANEL*/", PANEL_CSS)
+            .replace("/*GLOW*/", crate::share::GLOW_JS)
             .replace("<!--COUNT-->", &format!("{} releases.", releases.len()))
+            .replace("<!--LATEST-->", &changelog::render_latest(&releases))
             .replace("<!--VERSIONS-->", &changelog::render_index(&releases))
             .replace("<!--RELEASES-->", &changelog::render(&releases));
         return Ok(html_response(200, html, "public, max-age=300"));
@@ -222,7 +225,7 @@ mod tests {
         let log = block_on(s.handle(get("/changelog")));
         let log_html = String::from_utf8_lossy(log.bytes().unwrap()).to_string();
         assert_eq!(log.status, 200);
-        assert!(log_html.contains("data-repo=\"r-dlp\"") && !log_html.contains("<!--RELEASES-->") && !log_html.contains("/*BASE*/"));
+        assert!(log_html.contains("data-repo=\"r-dlp\"") && !log_html.contains("<!--RELEASES-->") && !log_html.contains("<!--LATEST-->") && !log_html.contains("/*PANEL*/") && log_html.contains("function glyphGlow") && !log_html.contains("/*BASE*/"));
         let dl = block_on(s.handle(get("/download")));
         let dl_html = String::from_utf8_lossy(dl.bytes().unwrap()).to_string();
         assert_eq!(dl.status, 200);

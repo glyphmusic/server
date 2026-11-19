@@ -122,16 +122,97 @@ fn anchor(r: &Release) -> String {
     escape(&format!("{}-{}", r.repo, r.version))
 }
 
-/// The version list beside the releases: one link per release, newest first.
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// `(year, month 1-12, day)` of a `YYYY-MM-DD` date.
+fn ymd(date: &str) -> Option<(&str, usize, u32)> {
+    let mut parts = date.splitn(3, '-');
+    let year = parts.next().filter(|y| y.len() == 4)?;
+    let month: usize = parts.next()?.parse().ok().filter(|m| (1..=12).contains(m))?;
+    let day: u32 = parts.next()?.get(..2)?.parse().ok()?;
+    Some((year, month, day))
+}
+
+/// `2026-11-18` -> `18 Nov 2026`; anything else stays as written.
+fn nice_date(date: &str) -> String {
+    match ymd(date) {
+        Some((y, m, d)) => format!("{d} {} {y}", &MONTHS[m - 1][..3]),
+        None => date.to_string(),
+    }
+}
+
+/// `2026-11-18` -> `November 2026`; no date -> `Undated`.
+fn month_label(date: &str) -> String {
+    match ymd(date) {
+        Some((y, m, _)) => format!("{} {y}", MONTHS[m - 1]),
+        None => "Undated".into(),
+    }
+}
+
+/// Short name of a repository in chips.
+fn label(repo: &str) -> &str {
+    match repo {
+        "desktop" => "app",
+        other => other,
+    }
+}
+
+/// Long name of a repository in the "newest" rows.
+fn long_label(repo: &str) -> &str {
+    match repo {
+        "desktop" => "Desktop & phone app",
+        "server" => "Server & CLI",
+        "companion" => "Companion",
+        "r-dlp" => "r-dlp",
+        other => other,
+    }
+}
+
+/// The app's icons (glyph-apps/assets/icons/ui), stroke 2.
+pub const ICON_CHEVRON: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6.5L13.44 10.44Q15 12 13.44 13.56L9.5 17.5"/></svg>"#;
+pub const ICON_EXTERNAL: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 12.5L18.17 5.83"/><path fill="currentColor" d="M20.95 4.3L20.84 7.15Q20.79 8.44 19.87 7.53L16.47 4.13Q15.56 3.21 16.85 3.16L19.7 3.05Q21 3 20.95 4.3Z"/><path d="M18 14v3a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4v-7a4 4 0 0 1 4-4h3"/></svg>"#;
+
+/// The version list in the window's nav: month labels, then one page entry
+/// per release, newest first.
 pub fn render_index(releases: &[Release]) -> String {
-    releases
+    let mut html = String::new();
+    let mut month = None;
+    for r in releases {
+        let m = month_label(&r.date);
+        if month.as_ref() != Some(&m) {
+            if month.is_some() {
+                html.push_str("</div>");
+            }
+            html.push_str(&format!("<div class=\"mon\"><div class=\"gl\">{}</div>", escape(&m)));
+            month = Some(m);
+        }
+        html.push_str(&format!(
+            "<a class=\"pg\" href=\"#{id}\" data-repo=\"{repo}\"><span class=\"nm mono\">{ver}</span><span class=\"kc\">{name}</span></a>",
+            id = anchor(r),
+            repo = escape(r.repo),
+            ver = escape(&r.version),
+            name = escape(label(r.repo)),
+        ));
+    }
+    if month.is_some() {
+        html.push_str("</div>");
+    }
+    html
+}
+
+/// One row per repository with its newest release.
+pub fn render_latest(releases: &[Release]) -> String {
+    SOURCES
         .iter()
+        .filter_map(|(repo, _, _)| releases.iter().find(|r| r.repo == *repo))
         .map(|r| {
             format!(
-                "<a href=\"#{id}\" data-repo=\"{repo}\"><span class=\"v\">{ver}</span><span class=\"r {repo}\">{repo}</span></a>",
+                "<a class=\"srow\" href=\"#{id}\" data-repo=\"{repo}\"><span class=\"l\"><span class=\"lab\">{name}</span><span class=\"st\">{date}</span></span><span class=\"c\"><span class=\"ver mono\">{ver}</span>{ICON_CHEVRON}</span></a>",
                 id = anchor(r),
                 repo = escape(r.repo),
+                name = escape(long_label(r.repo)),
                 ver = escape(&r.version),
+                date = escape(&nice_date(&r.date)),
             )
         })
         .collect()
@@ -148,19 +229,25 @@ pub fn render(releases: &[Release]) -> String {
             .sections
             .iter()
             .map(|(title, items)| {
-                let items: String = items.iter().map(|i| format!("<li>{}</li>", inline(i))).collect();
+                let list: String = items.iter().map(|i| format!("<li>{}</li>", inline(i))).collect();
                 let kind = title.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-                let head = if title.is_empty() { String::new() } else { format!("<h3 class=\"kind {}\">{}</h3>", escape(&kind), escape(title)) };
-                format!("{head}<ul>{items}</ul>")
+                let head = if title.is_empty() {
+                    String::new()
+                } else {
+                    format!("<h3 class=\"sl {}\">{} <span class=\"n mono\">{}</span></h3>", escape(&kind), escape(title), items.len())
+                };
+                format!("{head}<ul>{list}</ul>")
             })
             .collect();
         html.push_str(&format!(
-            "<article class=\"rel\" data-repo=\"{repo}\" id=\"{id}\"><header><span class=\"tag {repo}\">{repo}</span><a class=\"ver\" href=\"{url}/releases/tag/v{ver}\">{ver}</a><a class=\"date\" href=\"#{id}\">{date}</a></header>{summary}{sections}</article>\n",
+            "<article class=\"rel\" data-repo=\"{repo}\" id=\"{id}\"><header class=\"rh\"><a class=\"rv mono\" href=\"#{id}\">{ver}</a><span class=\"kc\">{name}</span><time class=\"st\" datetime=\"{date}\">{nice}</time><a class=\"tbtn gh\" href=\"{url}/releases/tag/v{ver}\">GitHub</a></header><div class=\"prose\">{summary}{sections}</div></article>\n",
             repo = escape(r.repo),
+            name = escape(label(r.repo)),
             id = anchor(r),
             url = r.url,
             ver = escape(&r.version),
             date = escape(&r.date),
+            nice = escape(&nice_date(&r.date)),
         ));
     }
     html
@@ -186,10 +273,16 @@ mod tests {
         assert_eq!(r[1].sections, vec![(String::new(), vec!["Older.".to_string()])]);
         let html = render(&r);
         assert!(html.contains("<code>x</code> &lt;b&gt;") && !html.contains("secret"));
-        assert!(html.contains("<h3 class=\"kind fixed\">Fixed</h3>") && html.contains("<strong>Bug</strong>"));
+        assert!(html.contains("<h3 class=\"sl fixed\">Fixed <span class=\"n mono\">1</span></h3>") && html.contains("<strong>Bug</strong>"));
+        assert!(html.contains("<time class=\"st\" datetime=\"2026-10-19\">19 Oct 2026</time>"));
         assert!(html.contains("<p class=\"sum\">A <strong>big</strong> one.</p>"));
         assert!(html.contains("id=\"server-0.3.0\"") && html.contains("/releases/tag/v0.3.0"));
-        assert!(render_index(&r).contains("href=\"#server-0.2.3\""));
+        let index = render_index(&r);
+        assert!(index.contains("href=\"#server-0.2.3\"") && index.contains("<div class=\"gl\">October 2026</div>") && index.matches("class=\"mon\"").count() == 1);
+        assert!(render_latest(&r).contains("href=\"#server-0.3.0\""));
+        assert_eq!(nice_date("2026-01-05"), "5 Jan 2026");
+        assert_eq!(nice_date("soon"), "soon");
+        assert_eq!(month_label(""), "Undated");
     }
 
     #[test]

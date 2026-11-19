@@ -34,6 +34,28 @@ pub struct ArtistResponse {
     pub similar: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<ArtistLink>,
+    /// The artist's popular songs (Deezer top), so an artist page has songs
+    /// without every app searching on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top: Vec<glyph_protocol::Track>,
+    /// The discography, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub releases: Vec<ArtistRelease>,
+}
+
+/// One release of the artist (Deezer album id).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtistRelease {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
+    /// `YYYY-MM-DD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<String>,
+    /// `album`, `ep`, `single`, `compile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,6 +90,8 @@ struct DzSearchResp {
 
 #[derive(Deserialize)]
 struct DzArtistItem {
+    #[serde(default, deserialize_with = "crate::providers::de_u64_lenient")]
+    id: Option<u64>,
     #[serde(default)]
     name: String,
     link: Option<String>,
@@ -78,7 +102,14 @@ struct DzArtistItem {
     nb_fan: Option<u64>,
 }
 
-async fn lookup_deezer(svc: &Services, name: &str) -> Option<(Option<String>, Option<u64>, Option<String>)> {
+struct DzFound {
+    photo: Option<String>,
+    fans: Option<u64>,
+    link: Option<String>,
+    id: Option<u64>,
+}
+
+async fn lookup_deezer(svc: &Services, name: &str) -> Option<DzFound> {
     let url = build_url("https://api.deezer.com/search/artist", &[("q", name), ("limit", "10")]);
     let resp: DzSearchResp = fetch_json(svc, HttpRequest::get(url)).await.ok()?;
     let want = crate::merge::plain_words(name);
@@ -88,7 +119,72 @@ async fn lookup_deezer(svc: &Services, name: &str) -> Option<(Option<String>, Op
         .filter(|a| crate::merge::plain_words(&a.name) == want)
         .max_by_key(|a| a.nb_fan.unwrap_or(0))?;
     let photo = best.picture_xl.or(best.picture_big).or(best.picture_medium).or(best.picture);
-    Some((photo, best.nb_fan, best.link))
+    Some(DzFound { photo, fans: best.nb_fan, link: best.link, id: best.id })
+}
+
+#[derive(Deserialize)]
+struct DzList<T> {
+    #[serde(default = "Vec::new")]
+    data: Vec<T>,
+}
+
+#[derive(Deserialize)]
+struct DzRelease {
+    #[serde(default, deserialize_with = "crate::providers::de_u64_lenient")]
+    id: Option<u64>,
+    #[serde(default)]
+    title: String,
+    cover_xl: Option<String>,
+    cover_big: Option<String>,
+    release_date: Option<String>,
+    record_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DzName {
+    #[serde(default)]
+    name: String,
+}
+
+/// Top songs, related artists and the discography of a Deezer artist, side by side.
+async fn deezer_extras(svc: &Services, id: u64) -> (Vec<glyph_protocol::Track>, Vec<String>, Vec<ArtistRelease>) {
+    let base = format!("https://api.deezer.com/artist/{id}");
+    let top_url = build_url(&format!("{base}/top"), &[("limit", "25")]);
+    let rel_url = build_url(&format!("{base}/related"), &[("limit", "20")]);
+    let alb_url = build_url(&format!("{base}/albums"), &[("limit", "100")]);
+    let (top, related, albums) = futures::join!(
+        fetch_json::<DzList<crate::providers::deezer::DzTrack>>(svc, HttpRequest::get(top_url)),
+        fetch_json::<DzList<DzName>>(svc, HttpRequest::get(rel_url)),
+        fetch_json::<DzList<DzRelease>>(svc, HttpRequest::get(alb_url)),
+    );
+    let top: Vec<glyph_protocol::Track> = top
+        .map(|l| l.data.into_iter().map(|t| crate::providers::deezer::to_candidate(t).track).collect())
+        .unwrap_or_default();
+    let similar: Vec<String> = related
+        .map(|l| l.data.into_iter().map(|a| a.name).filter(|n| !n.trim().is_empty()).collect())
+        .unwrap_or_default();
+    let mut releases: Vec<ArtistRelease> = albums
+        .map(|l| {
+            l.data
+                .into_iter()
+                .filter_map(|r| {
+                    let id = r.id?.to_string();
+                    let title = r.title.trim().to_string();
+                    (!title.is_empty()).then(|| ArtistRelease {
+                        id,
+                        title,
+                        cover_url: r.cover_xl.or(r.cover_big),
+                        released: r.release_date.filter(|d| d.len() == 10 && !d.starts_with("0000")),
+                        record_type: r.record_type,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    releases.sort_by(|a, b| b.released.cmp(&a.released));
+    let mut seen = std::collections::HashSet::new();
+    releases.retain(|r| seen.insert(r.title.to_lowercase()));
+    (top, similar, releases)
 }
 
 struct WikiArtist {
@@ -167,17 +263,26 @@ pub async fn lookup(svc: &Arc<Services>, name: &str, lang: &str) -> Result<Artis
     if name.is_empty() {
         return Err(crate::ApiErr::bad_request("name is required"));
     }
-    let key = format!("artist:v1:{}:{}", lang.to_ascii_lowercase(), crate::merge::plain_words(name));
+    let key = format!("artist:v2:{}:{}", lang.to_ascii_lowercase(), crate::merge::plain_words(name));
     if let Some(hit) = cache::get_json::<ArtistResponse>(&*svc.cache, &key).await {
         return Ok(hit);
     }
 
-    let deezer_fut = lookup_deezer(svc, name);
+    // Deezer (profile, then its songs, related artists and albums) runs
+    // beside the Wikipedia lookup.
+    let deezer_fut = async {
+        let dz = lookup_deezer(svc, name).await;
+        let extras = match dz.as_ref().and_then(|f| f.id) {
+            Some(id) => deezer_extras(svc, id).await,
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        (dz, extras)
+    };
     let wiki_fut = lookup_wikipedia(svc, name, lang);
-    let (dz, wiki) = futures::join!(deezer_fut, wiki_fut);
+    let ((dz, (top, similar, releases)), wiki) = futures::join!(deezer_fut, wiki_fut);
 
     let (dz_photo, fans, dz_link) = match dz {
-        Some((p, f, l)) => (p, f, l),
+        Some(f) => (f.photo, f.fans, f.link),
         None => (None, None, None),
     };
 
@@ -223,8 +328,10 @@ pub async fn lookup(svc: &Arc<Services>, name: &str, lang: &str) -> Result<Artis
         fans,
         verified,
         tags: Vec::new(),
-        similar: Vec::new(),
+        similar,
         links,
+        top,
+        releases,
     };
 
     cache::put_json(&*svc.cache, &key, &resp, ttl).await;
