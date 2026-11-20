@@ -59,6 +59,12 @@ pub struct FileConfig {
     /// told to update. Unset = every version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_app_version: Option<String>,
+    /// App release offered on the Stable update channel. Unset = GitHub decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_app_version: Option<String>,
+    /// App release offered on the Latest update channel. Unset = newest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_app_version: Option<String>,
     /// Folder with the built web player (glyph-apps/glyph-ui, `npm run
     /// build:web` -> `dist-web`), served at `/web`. Relative to this file.
     /// Unset = no web player.
@@ -188,6 +194,9 @@ pub struct Settings {
     pub update_repo: String,
     /// Oldest app version that still works (`min_app_version`, `GLYPH_MIN_APP_VERSION`).
     pub min_app_version: Option<String>,
+    /// Release channels for the app's updater (`stable_app_version`, `latest_app_version`).
+    pub stable_app_version: Option<String>,
+    pub latest_app_version: Option<String>,
     /// Built web player served at `/web` (`web_dir`, `GLYPH_WEB_DIR`).
     pub web_dir: Option<PathBuf>,
     pub admin_password_hash: Option<String>,
@@ -371,6 +380,8 @@ impl Settings {
             youtube_per_day: file.youtube_per_day.unwrap_or(0).min(100_000),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
             min_app_version: env("GLYPH_MIN_APP_VERSION").or(file.min_app_version).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+            stable_app_version: file.stable_app_version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+            latest_app_version: file.latest_app_version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
             web_dir: env("GLYPH_WEB_DIR").map(PathBuf::from).or(file.web_dir).map(|d| if d.is_relative() { base.join(d) } else { d }),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,

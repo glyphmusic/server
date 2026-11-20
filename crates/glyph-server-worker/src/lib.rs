@@ -12,6 +12,7 @@ mod abuse;
 mod audio_cache;
 mod jam_room;
 mod storage;
+mod history;
 mod variants;
 mod media;
 
@@ -245,6 +246,8 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
         config.youtube_per_day = l.youtube_per_day;
         config.youtube_require_account = l.youtube_require_account;
         config.min_app_version = l.min_app_version.clone();
+        config.stable_app_version = l.stable_app_version.clone();
+        config.latest_app_version = l.latest_app_version.clone();
     }
     config.bans = bans;
     let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), CompanionCreds::from_env(env, Role::Service)) {
@@ -595,6 +598,17 @@ impl AdminHost for WorkerHost {
         Ok(())
     }
 
+    async fn storage(&self) -> Option<glyph_server_core::admin::types::StorageUsage> {
+        Some(history::usage(self.db.as_ref()?).await)
+    }
+
+    async fn history(&self) -> Vec<glyph_server_core::admin::types::DayStats> {
+        match &self.db {
+            Some(db) => history::read(db).await,
+            None => Vec::new(),
+        }
+    }
+
     async fn persist_limits(&self, l: &Limits) -> std::result::Result<(), HostError> {
         let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
         let value = serde_json::to_string(l).map_err(|_| HostError::Failed("could not encode limits".into()))?;
@@ -625,6 +639,7 @@ impl AdminHost for WorkerHost {
 #[event(scheduled)]
 async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
     let Ok(db) = env.d1("GLYPH_DB") else { return; };
+    history::record(&db, worker::Date::now().as_millis()).await;
     if storage::maintain(&db).await.is_err() {
         worker::console_error!("D1 storage cleanup/measurement failed");
     }

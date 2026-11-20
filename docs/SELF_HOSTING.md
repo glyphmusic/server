@@ -192,6 +192,7 @@ fails with a CPU error there, it needs the Workers Paid plan.
 | `glyph remote accounts limit alice 10` | give `@alice` her own limit |
 | `glyph remote accounts limit alice default` | back to the default |
 | `glyph remote accounts show alice` | limit in force, whether it is her own, her devices |
+| `glyph remote accounts admin alice` | `@alice` gets the Server dashboard in the app (`--off` takes it away; stored in D1 `settings`, key `admins`) |
 
 Until you set one, the default is 5. It is stored in the D1 table `settings`,
 per-account limits in `users.device_limit` (0 = default), so changes apply at

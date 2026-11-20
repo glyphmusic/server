@@ -59,6 +59,8 @@ const OPTS: &[Opt] = &[
     opt("youtube_per_day", Kind::Int, None, "0 (no limit)", "YouTube songs per account or address and day"),
     opt("update_repo", Kind::Text, Some("GLYPH_SERVER_REPO"), "glyphmusic/server", "GitHub repository used for updates"),
     opt("min_app_version", Kind::Text, Some("GLYPH_MIN_APP_VERSION"), "- (every version)", "oldest Glyph app version that still works; older apps are told to update"),
+    opt("stable_app_version", Kind::Text, None, "- (GitHub decides)", "app release the Stable update channel offers"),
+    opt("latest_app_version", Kind::Text, None, "- (newest)", "app release the Latest update channel offers"),
     opt("web_dir", Kind::Text, Some("GLYPH_WEB_DIR"), "- (disabled)", "folder with the built web player served at /web"),
     opt("tls.domain", Kind::Text, Some("GLYPH_TLS_DOMAIN"), "-", "domain for automatic Let's Encrypt HTTPS"),
     opt("tls.email", Kind::Text, Some("GLYPH_TLS_EMAIL"), "-", "contact address for Let's Encrypt"),

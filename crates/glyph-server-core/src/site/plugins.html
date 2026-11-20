@@ -12,15 +12,21 @@
 <link rel="canonical" href="{{canonical}}">
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
-<style>/*SHARE*/
+<style>/*PANEL*/
 /* Plugin catalog: the app's Settings > Plugins page (glyph/src/ui/settings/plugins.rs)
-   inside the settings modal's page card (settings/modal.rs modal_inner). Rows
+   in the site's Settings window (panel.css), the sections in the nav. Rows
    from settings.rs row_full / controls.rs rows, section_label, link_button;
    buttons from widgets/buttons.rs button / primary_button; chips from
    widgets/indicators.rs kind_chip; (i) from widgets/tooltip.rs info_tip. */
-.pg { display: flex; justify-content: center; padding: 20px 16px 48px; }
-/* modal.rs: page card hsla(0 0 4.5%), 1 px white 8 %, radius 12, px 28 py 22 */
-.card { width: 100%; max-width: 760px; border-radius: 12px; background: #0b0b0b; border: 1px solid rgba(255, 255, 255, .08); padding: 22px 28px; }
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+#view { max-width: 760px; }
+.hd { max-width: 760px; }
+/* icon button and tooltip (share.css) */
+.ib { position: relative; flex: none; width: 29px; height: 29px; display: grid; place-items: center; border-radius: 8px; color: var(--dim); }
+.ib:hover { background: var(--hover); }
+.ib .ic { width: 15px; height: 15px; }
+.tip { position: fixed; z-index: 60; padding: 5px 9px; border-radius: 6px; background: rgba(31, 31, 31, .98); border: 1px solid rgba(255, 255, 255, .08); font-size: 12.5px; color: rgba(255, 255, 255, .92); pointer-events: none; white-space: nowrap; opacity: 0; transition: opacity .12s; }
+.tip.show { opacity: 1; }
 .hd { display: flex; flex-direction: column; gap: 4px; }
 .hd h1 { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 17px; font-weight: 600; min-width: 0; }
 .hd h1 .crumb { color: rgba(255, 255, 255, .5); cursor: pointer; }
@@ -39,7 +45,7 @@
 .val { font-size: 13px; color: rgba(255, 255, 255, .75); text-align: right; }
 .val.mono { font-size: 12px; }
 /* controls.rs section_label: pt 18 pb 2, 11.5 semibold white 45 %, upper case */
-.sec { display: flex; align-items: center; gap: 6px; }
+.sec { display: flex; align-items: center; gap: 6px; scroll-margin-top: 16px; }
 .sec .sl { padding: 18px 0 2px; font-size: 11.5px; font-weight: 600; color: rgba(255, 255, 255, .45); text-transform: uppercase; }
 .sec .ii { margin-top: 16px; }
 /* tooltip.rs info_tip: 18 px, radius 9, 13 px info icon white 42 % */
@@ -48,11 +54,11 @@
 .ii .ic { width: 13px; height: 13px; }
 /* plugins.rs plugin_row: py 14, gap 8; open area gap 14, px 8 py 4, radius 8, hover white 4 % */
 .prow { display: flex; align-items: center; gap: 8px; padding: 14px 0; }
-.open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; margin: 0 -8px; padding: 4px 8px; border-radius: 8px; cursor: pointer; }
-.open:hover { background: rgba(255, 255, 255, .04); }
-.open .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.open .nm { font-size: 14px; font-weight: 500; color: #fff; }
-.open .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
+.po { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; margin: 0 -8px; padding: 4px 8px; border-radius: 8px; cursor: pointer; }
+.po:hover { background: rgba(255, 255, 255, .04); }
+.po .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.po .nm { font-size: 14px; font-weight: 500; color: #fff; }
+.po .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 .prow .ctl { flex: none; display: flex; align-items: center; gap: 8px; }
 /* plugins.rs preview: glow ring, accent inside at 57 % (Appearance swatch) */
 .pv { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
@@ -80,10 +86,10 @@
 .empty-line { padding: 14px 0; font-size: 12.5px; color: rgba(255, 255, 255, .5); }
 /* settings/nav.rs search: h 34, px 10, radius 8, white 6 %, 14 px icon white 50 %, 13 px */
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 16px; }
-.search { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: rgba(255, 255, 255, .06); color: rgba(255, 255, 255, .5); }
-.search .ic { width: 14px; height: 14px; }
-.search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; font: 13px var(--font); color: #fff; }
-.search input::placeholder { color: rgba(255, 255, 255, .4); }
+.tools .search { flex: 1; min-width: 200px; margin: 0; cursor: text; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: rgba(255, 255, 255, .06); color: rgba(255, 255, 255, .5); }
+.tools .search .ic { width: 14px; height: 14px; }
+.tools .search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; font: 13px var(--font); color: #fff; }
+.tools .search input::placeholder { color: rgba(255, 255, 255, .4); }
 /* controls.rs segmented: p 3, gap 2, radius 9, white 5 %; items h 28, px 12, radius 7, 13 px */
 .seg { display: flex; padding: 3px; gap: 2px; border-radius: 9px; background: rgba(255, 255, 255, .05); }
 .seg button { height: 28px; padding: 0 12px; border-radius: 7px; font-size: 13px; color: rgba(255, 255, 255, .6); white-space: nowrap; }
@@ -122,7 +128,6 @@
 .state-mini b { font-size: 14px; font-weight: 500; color: #fff; }
 .state-mini span { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 @media (max-width: 640px) {
-  .card { padding: 18px 16px; }
   .srow { flex-wrap: wrap; gap: 10px; }
   .prow { flex-wrap: wrap; }
   .prow .ctl { margin-left: 42px; }
@@ -130,15 +135,31 @@
 }
 </style>
 </head>
-<body class="page">
+<body>
 <canvas class="bgfx" id="glow" aria-hidden="true"></canvas><canvas class="bgfx" id="ascii" aria-hidden="true"></canvas>
-<header class="titlebar"><a class="logo" href="/">glyph</a><a class="backpill" href="/download">{{icon_download}}{{download}}</a></header>
-<main class="pg"><section class="card">
-  <div class="hd"><h1 id="hd-title">{{title}}</h1><p id="hd-sub">{{sub}}</p></div>
+<!--TITLEBAR-->
+<div class="win">
+<aside class="nav" id="menu" aria-label="{{title}}">
+  <div class="mhead"><!--MBACK--><h2>{{title}}</h2><span class="sp"></span></div>
+  <div class="list">
+    <div class="gl">{{title}}</div>
+    <a class="pg" href="/plugins" data-go="all"><span class="nm">{{all}}</span></a>
+    <a class="pg" href="/plugins#listed" data-go="listed"><span class="nm">{{checked}}</span></a>
+    <a class="pg" href="/plugins#community" data-go="community"><span class="nm">{{community}}</span></a>
+    <div class="gl">{{more}}</div>
+    <a class="pg" href="https://github.com/glyphmusic/plugins#readme"><span class="nm">{{publish}}</span></a>
+    <a class="pg" href="https://github.com/topics/glyph-plugin"><span class="nm">GitHub</span></a>
+  </div>
+  <!--MSITE-->
+</aside>
+<main class="content">
+  <div class="hd"><h1 class="title" id="hd-title">{{title}}</h1><p class="subt" id="hd-sub">{{sub}}</p></div>
   <div id="view"></div>
-</section></main>
+</main>
+</div>
 <div class="tip" id="tip" role="tooltip"></div>
 <script>/*GLOW*/
+/*MENU*/
 const S = /*STRINGS*/;
 const ICONS = /*ICONS*/;
 (() => {
@@ -372,7 +393,7 @@ const ICONS = /*ICONS*/;
   // ---- list ----
   let catalog = null, loading = false, error = null;
   function prow(l) {
-    const r = el("div", "prow"), open = el("a", "open"), tx = el("div", "tx");
+    const r = el("div", "prow"), open = el("a", "po"), tx = el("div", "tx");
     open.href = "/plugins/" + l.manifest.id;
     open.onclick = (e) => { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); go(open.getAttribute("href")); };
     tx.append(el("div", "nm trunc", l.manifest.name), el("div", "st trunc", meta(l.manifest, l)));
@@ -414,13 +435,13 @@ const ICONS = /*ICONS*/;
         results.append(el("div", "empty-line", fmt(S.no_match, "q", query.trim())), guide());
         return;
       }
-      const block = (title, info, items, none) => {
-        results.append(section(title, info));
+      const block = (id, title, info, items, none) => {
+        const sec = section(title, info); sec.id = id; results.append(sec);
         if (!items.length) { results.append(el("div", "empty-line", query.trim() ? S.none_match : none)); return; }
         const rows = el("div", "rows"); items.forEach((l) => rows.append(prow(l))); results.append(rows);
       };
-      block(S.checked, S.checked_desc, checkedHits, S.none);
-      block(S.community, S.community_desc, communityHits, S.none_community);
+      block("listed", S.checked, S.checked_desc, checkedHits, S.none);
+      block("community", S.community, S.community_desc, communityHits, S.none_community);
       results.append(guide());
     }
     drawResults();
@@ -499,19 +520,42 @@ const ICONS = /*ICONS*/;
   function render() {
     const id = location.pathname.replace(/\/+$/, "").split("/plugins/")[1];
     if (id) detail(decodeURIComponent(id).toLowerCase()); else { document.title = S.page_title; list(); }
+    markNav();
     view.style.animation = "none"; void view.offsetWidth; view.style.animation = "";
   }
   function go(path) {
     if (path !== location.pathname) history.pushState(null, "", path);
-    scrollTo(0, 0);
+    scrollTo(0, 0); document.querySelector(".content").scrollTo(0, 0);
     render();
   }
   addEventListener("popstate", render);
+
+  // ---- nav: All, Listed and Community open the list at that section ----
+  const navLinks = [...document.querySelectorAll(".nav [data-go]")];
+  let section_ = "all";
+  function markNav() {
+    const onList = !/\/plugins\/./.test(location.pathname);
+    for (const a of navLinks) a.classList.toggle("on", onList && a.dataset.go === section_);
+  }
+  const jump = () => {
+    const t = section_ !== "all" && document.getElementById(section_);
+    if (t) t.scrollIntoView({ block: "start" }); else { scrollTo(0, 0); document.querySelector(".content").scrollTo(0, 0); }
+  };
+  for (const a of navLinks) a.addEventListener("click", (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    e.preventDefault();
+    section_ = a.dataset.go;
+    if (location.pathname.replace(/\/+$/, "") !== "/plugins") go("/plugins");
+    markNav();
+    requestAnimationFrame(jump);
+  });
+  if (location.hash === "#listed" || location.hash === "#community") section_ = location.hash.slice(1);
   async function refreshCatalog(force) {
     if (loading) return;
     loading = true; error = null; render();
     try { catalog = await load(force); } catch (e) { error = e.message || String(e); }
     loading = false; render();
+    if (section_ !== "all") requestAnimationFrame(jump);
   }
   refreshCatalog(false);
 

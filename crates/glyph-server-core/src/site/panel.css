@@ -121,21 +121,55 @@ a.srow:hover { background: rgba(255, 255, 255, .04); }
 .prose li::marker { color: rgba(255, 255, 255, .35); }
 .prose code { font: 12.5px var(--mono); font-variant-ligatures: none; padding: 1px 5px; border-radius: 4px; background: rgba(255, 255, 255, .08); color: rgba(255, 255, 255, .9); }
 
-footer.foot { max-width: 1240px; margin: 0 auto; padding: 16px 20px 32px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; font-size: 12px; color: rgba(255, 255, 255, .45); }
+/* Like the Settings window, the window never runs past the screen: it fills
+   the space under the titlebar, the page scrolls inside it and the nav
+   on its own. The footer is the end of the page. */
+@media (min-width: 861px) {
+  body { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
+  .titlebar { flex: none; }
+  .win { flex: 1; min-height: 0; width: calc(100% - 32px); margin: 6px auto 16px; align-items: stretch; }
+  .nav { position: static; max-height: none; }
+  .content, .nav .list, .otp { scroll-behavior: smooth; }
+  .content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .14) transparent; }
+}
+footer.foot { margin: 40px 0 0; padding: 16px 0 0; border-top: 1px solid rgba(255, 255, 255, .06); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; font-size: 12px; color: rgba(255, 255, 255, .45); }
 footer.foot a { color: rgba(255, 255, 255, .55); transition: color .12s; }
 footer.foot a:hover { color: #fff; }
+
+/* Phone menu (compact/SettingsScreen.svelte): the nav becomes a full screen
+   that slides in from the side, hsl(0 0% 7%); head 60 px with the back arrow
+   (44 round) and the title centred 17 bold; rows 44 px 15 px; the site's
+   pages at the end. Opened by the menu button in the titlebar (panel.js). */
+.menubtn { display: none; flex: none; width: 34px; height: 34px; margin-left: 2px; border-radius: 8px; place-items: center; color: var(--dim); transition: background-color .12s ease-out, color .12s ease-out; }
+.menubtn:hover { background: var(--hover); color: var(--text); }
+.menubtn .ic { width: 18px; height: 18px; }
+.mhead, .msite { display: none; }
+.mhead .bk, .mhead .sp { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+.mhead .bk:hover, .mhead .bk:active { background: rgba(255, 255, 255, .08); }
+.mhead .bk .ic { width: 22px; height: 22px; }
+.mhead h2 { flex: 1; min-width: 0; margin: 0; text-align: center; font-size: 17px; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media (max-width: 860px) {
   .win { flex-direction: column; align-items: stretch; margin: 4px 6px 0; padding: 6px; border-radius: 14px; }
-  .nav { position: static; width: auto; max-height: none; }
-  .content { min-height: 0; padding: 18px 16px 24px; }
+  .content { min-height: calc(100vh - 56px); padding: 18px 16px 24px; }
   .search kbd { display: none; }
+  .menubtn { display: grid; }
+  .tnav a:not(.dl) { display: none; }
+  .nav { position: fixed; inset: 0; z-index: 50; width: auto; max-height: none; overflow-y: auto; overscroll-behavior: contain; padding: env(safe-area-inset-top) 0 calc(24px + env(safe-area-inset-bottom)); background: hsl(0 0% 7%); opacity: 0; visibility: hidden; transform: translateX(24px); transition: opacity .2s var(--ease), transform .2s var(--ease), visibility 0s linear .2s; }
+  .nav.open { opacity: 1; visibility: visible; transform: none; transition: opacity .2s var(--ease), transform .2s var(--ease); }
+  .mhead { display: flex; flex: none; align-items: center; height: 60px; padding: 0 6px; }
+  .nav .search { margin: 0 16px 8px; height: 40px; font-size: 15px; }
+  .nav .search input { font-size: 15px; }
+  .nav .list { flex: none; display: flex; overflow: visible; padding: 0 10px; }
+  .nav .gl { padding: 14px 10px 6px; font-size: 13px; }
+  .nav .pg { height: 44px; font-size: 15px; }
+  .nav .sub { min-height: 40px; font-size: 14.5px; }
+  .msite { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 0; }
+  body.menu-open { overflow: hidden; }
 }
 @media (max-width: 560px) {
   .titlebar { padding: 0 6px 0 14px; gap: 6px; }
-  .tnav a { padding: 0 7px; }
-  .tnav a.plugins { display: none; }
   .tnav a.dl { margin-left: 2px; padding: 0 9px; }
   .tnav a.dl span { display: none; }
 }

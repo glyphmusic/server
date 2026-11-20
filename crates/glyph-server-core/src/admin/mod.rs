@@ -58,6 +58,39 @@ enum R {
     BansAdd,
     BansRemove,
     Stats,
+    Me,
+    History,
+    AccountRole,
+    AppReleases,
+}
+
+impl R {
+    /// Only the server owner (admin password) may call these; an admin
+    /// account from the app may not.
+    fn owner_only(self) -> bool {
+        matches!(
+            self,
+            R::KeysGet
+                | R::KeysPut
+                | R::KeysTest
+                | R::Logs
+                | R::UpdateCheck
+                | R::UpdateApply
+                | R::CompanionCheck
+                | R::CompanionApply
+                | R::RdlpCheck
+                | R::RdlpApply
+                | R::AccountRole
+        )
+    }
+}
+
+/// Who called the admin API.
+enum Caller {
+    /// Admin password session.
+    Owner { sid: String },
+    /// An account with the admin role, signed in from the app.
+    Account(crate::accounts::store::User),
 }
 
 fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
@@ -88,7 +121,11 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "bans" => (R::BansGet, Get),
         "bans/remove" => (R::BansRemove, Post),
         "stats" => (R::Stats, Get),
+        "me" => (R::Me, Get),
+        "history" => (R::History, Get),
+        "app-releases" => (R::AppReleases, Get),
         "accounts" => (R::AccountsList, Get),
+        s if s.strip_prefix("accounts/").is_some_and(|h| h.ends_with("/admin")) => (R::AccountRole, Post),
         s if s.starts_with("accounts/") && s.ends_with("/revoke") => (R::AccountRevoke, Post),
         s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
         s if s.starts_with("accounts/") => (R::AccountGet, Get),
@@ -131,6 +168,8 @@ fn limits_of(svc: &Services) -> Limits {
         youtube_per_day: svc.config.youtube_per_day,
         youtube_require_account: svc.config.youtube_require_account,
         min_app_version: svc.config.min_app_version.clone(),
+        stable_app_version: svc.config.stable_app_version.clone(),
+        latest_app_version: svc.config.latest_app_version.clone(),
     }
 }
 
@@ -195,22 +234,57 @@ impl Server {
             .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
             .map(str::trim)
             .ok_or_else(|| ApiErr::new(401, "unauthorized", "missing bearer token; log in first"))?;
-        let claims = auth::verify_token(&key, token, 'a', now).map_err(|e| {
-            let msg = match e {
-                auth::TokenError::Expired => "access token expired",
-                _ => "invalid access token",
-            };
-            ApiErr::new(401, "unauthorized", msg)
-        })?;
-        if is_revoked(svc, &claims.sid).await {
-            return Err(ApiErr::new(401, "unauthorized", "this session was logged out"));
+        let caller = match auth::verify_token(&key, token, 'a', now) {
+            Ok(claims) => {
+                if is_revoked(svc, &claims.sid).await {
+                    return Err(ApiErr::new(401, "unauthorized", "this session was logged out"));
+                }
+                Caller::Owner { sid: claims.sid }
+            }
+            Err(e) => {
+                let msg = match e {
+                    auth::TokenError::Expired => "access token expired",
+                    _ => "invalid access token",
+                };
+                // Not an admin token: maybe an app sign-in of an admin account.
+                let Some(acc) = &self.accounts else {
+                    return Err(ApiErr::new(401, "unauthorized", msg));
+                };
+                match acc.admin_session(svc, token).await {
+                    Ok(user) => Caller::Account(user),
+                    Err(err) if err.status == 401 && err.body.code == "unauthorized" => {
+                        return Err(ApiErr::new(401, "unauthorized", msg));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        };
+        if matches!(caller, Caller::Account(_)) && route.owner_only() {
+            return Err(ApiErr::new(403, "owner_only", "only the server owner (admin password) can do this"));
         }
 
         match route {
             R::Logout => {
-                cache::put_json(&*svc.cache, &format!("admin:revoked:{}", claims.sid), &true, REFRESH_TTL_S).await;
+                if let Caller::Owner { sid } = &caller {
+                    cache::put_json(&*svc.cache, &format!("admin:revoked:{sid}"), &true, REFRESH_TTL_S).await;
+                }
                 Ok(Response::json(200, &serde_json::json!({"ok": true})))
             }
+            R::Me => {
+                let owner = matches!(caller, Caller::Owner { .. });
+                Ok(Response::json(200, &AdminMe {
+                    owner,
+                    handle: match &caller {
+                        Caller::Account(u) => Some(u.handle.clone()),
+                        Caller::Owner { .. } => None,
+                    },
+                    keys: owner,
+                    updates: owner,
+                    roles: owner && self.accounts.is_some(),
+                }))
+            }
+            R::History => Ok(Response::json(200, &HistoryResponse { days: self.host.history().await })),
+            R::AppReleases => Ok(Response::json(200, &app_releases(svc).await?)),
             R::Status => Ok(Response::json(200, &self.status(svc).await)),
             R::KeysGet => {
                 let keys = KEY_NAMES
@@ -298,6 +372,22 @@ impl Server {
                         return Err(ApiErr::bad_request("min_app_version must look like a version, e.g. 0.13.0"));
                     }
                 }
+                // Release channels: absent keeps them, "" or null clears them.
+                for (key, field, old) in [
+                    ("stable_app_version", &mut l.stable_app_version, &svc.config.stable_app_version),
+                    ("latest_app_version", &mut l.latest_app_version, &svc.config.latest_app_version),
+                ] {
+                    if body.get(key).is_none() {
+                        *field = old.clone();
+                    } else {
+                        *field = field.take().map(|v| v.trim().trim_start_matches(['v', 'V']).to_string()).filter(|v| !v.is_empty());
+                    }
+                    if let Some(v) = field.as_deref() {
+                        if !valid_min_app_version(v) {
+                            return Err(ApiErr::bad_request(format!("{key} must look like a version, e.g. 0.12.10")));
+                        }
+                    }
+                }
                 if l.require_account && self.accounts.is_none() {
                     return Err(ApiErr::bad_request("require_account needs an enabled account backend"));
                 }
@@ -351,6 +441,8 @@ impl Server {
                     c.youtube_per_day = l.youtube_per_day;
                     c.youtube_require_account = l.youtube_require_account;
                     c.min_app_version = l.min_app_version.clone();
+                    c.stable_app_version = l.stable_app_version.clone();
+                    c.latest_app_version = l.latest_app_version.clone();
                 });
                 Ok(Response::json(200, &l))
             }
@@ -364,10 +456,18 @@ impl Server {
                 &self.host.companion_update(matches!(route,R::RdlpCheck|R::RdlpApply), matches!(route,R::CompanionApply|R::RdlpApply)).await.map_err(host_err)?)),
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
-            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountsList | R::AccountGet | R::AccountPut | R::AccountRevoke => {
+            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountsList | R::AccountGet | R::AccountPut | R::AccountRevoke | R::AccountRole => {
                 let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
                 let handle = sub.strip_prefix("accounts/").unwrap_or("");
+                let target = handle.strip_suffix("/revoke").or_else(|| handle.strip_suffix("/admin")).unwrap_or(handle);
+                if matches!(route, R::AccountPut | R::AccountRevoke) {
+                    self.guard_target(&caller, target, svc, now).await?;
+                }
                 match route {
+                    R::AccountRole => {
+                        let b: AdminRoleRequest = parse_body(&req)?;
+                        Ok(Response::json(200, &acc.admin_set_role(target, b.admin, &svc.config.bans, now).await?))
+                    }
                     R::AccountDefaultsGet => Ok(Response::json(200, &acc.admin_defaults().await?)),
                     R::AccountDefaultsPut => Ok(Response::json(200, &acc.admin_set_defaults(&parse_body::<AccountDefaults>(&req)?).await?)),
                     R::AccountsList => {
@@ -389,12 +489,24 @@ impl Server {
                 let bans = svc.config.bans.bans.iter().filter(|b| b.live(now)).cloned().collect();
                 Ok(Response::json(200, &BansResponse { bans, changed: Vec::new(), dry_run: false }))
             }
-            R::BansAdd => self.ban(svc, parse_body(&req)?).await,
+            R::BansAdd => {
+                let b: BanRequest = parse_body(&req)?;
+                if matches!(b.target, BanTarget::Account | BanTarget::Device) {
+                    self.guard_target(&caller, b.value.trim(), svc, now).await?;
+                }
+                self.ban(svc, b).await
+            }
             R::BansRemove => self.unban(svc, parse_body(&req)?).await,
             R::Stats => {
                 let now = svc.rt.now_ms();
+                let storage = self.host.storage().await.map(|mut s| {
+                    s.audio_cap_bytes = u64::from(svc.config.audio_cache_max_gb) * 1_000_000_000;
+                    s.db_cap_bytes = u64::from(svc.config.d1_max_mb) * 1_000_000;
+                    s
+                });
                 Ok(Response::json(200, &StatsResponse {
                     uptime_s: self.host.uptime_s(),
+                    storage,
                     accounts: match &self.accounts { Some(a) => a.admin_stats(now).await, None => None },
                     max_accounts: svc.config.max_accounts,
                     bans: svc.config.bans.bans.iter().filter(|b| b.live(now)).count(),
@@ -447,6 +559,18 @@ impl Server {
         cache::put_json(&*svc.cache, &fail_key, &0u64, 60).await;
         let sid = auth::session_id(key, now, &who);
         Ok(Response::json(200, &pair(key, &sid, now)))
+    }
+
+    /// An admin account may not sign out, limit or ban another admin account;
+    /// only the owner can (the owner hands out the role, too).
+    async fn guard_target(&self, caller: &Caller, handle: &str, svc: &Arc<Services>, now: u64) -> Result<(), ApiErr> {
+        let Caller::Account(me) = caller else { return Ok(()) };
+        let Some(acc) = &self.accounts else { return Ok(()) };
+        let Ok(target) = acc.admin_account(handle, &svc.config.bans, now).await else { return Ok(()) };
+        if target.admin && target.id != me.id {
+            return Err(ApiErr::new(403, "owner_only", "only the server owner can change another admin"));
+        }
+        Ok(())
     }
 
     async fn ban(&self, svc: &Arc<Services>, b: BanRequest) -> Result<Response, ApiErr> {
@@ -586,6 +710,45 @@ fn pair(key: &[u8], sid: &str, now: u64) -> TokenPair {
         refresh_token: auth::issue(key, 'r', sid, now, REFRESH_TTL_S),
         refresh_expires_in_s: REFRESH_TTL_S,
     }
+}
+
+/// Where the Glyph apps are released (the update channels pick from these).
+pub const APPS_REPO: &str = "glyphmusic/apps";
+
+/// The app's GitHub releases for the version picker, newest first (cached
+/// 10 minutes so the dashboard does not use up GitHub's rate limit).
+async fn app_releases(svc: &Services) -> Result<AppReleasesResponse, ApiErr> {
+    const KEY: &str = "admin:app_releases";
+    if let Some(r) = cache::get_json::<AppReleasesResponse>(&*svc.cache, KEY).await {
+        return Ok(r);
+    }
+    #[derive(serde::Deserialize)]
+    struct Gh {
+        tag_name: String,
+        #[serde(default)]
+        prerelease: bool,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        published_at: Option<String>,
+    }
+    let mut req = crate::traits::HttpRequest::get(format!("https://api.github.com/repos/{APPS_REPO}/releases?per_page=20"));
+    req.headers.push(("accept".into(), "application/vnd.github+json".into()));
+    req.headers.push(("user-agent".into(), "glyph-server".into()));
+    let resp = svc.http.send(req).await.map_err(|_| ApiErr::unavailable("GitHub did not answer; try again later"))?;
+    if resp.status != 200 {
+        return Err(ApiErr::unavailable("GitHub did not answer; try again later"));
+    }
+    let list: Vec<Gh> = serde_json::from_slice(&resp.body).map_err(|_| ApiErr::unavailable("GitHub sent something unexpected"))?;
+    let releases = list
+        .into_iter()
+        .filter(|r| !r.draft)
+        .map(|r| AppRelease { version: r.tag_name.trim_start_matches(['v', 'V']).to_string(), prerelease: r.prerelease, published_at: r.published_at })
+        .filter(|r| valid_min_app_version(&r.version))
+        .collect();
+    let out = AppReleasesResponse { releases };
+    cache::put_json(&*svc.cache, KEY, &out, 600).await;
+    Ok(out)
 }
 
 async fn is_revoked(svc: &Services, sid: &str) -> bool {

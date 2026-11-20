@@ -789,8 +789,8 @@ fn llms_full(pages: &[(String, String)], origin: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn fill(site: &str, base: &str, title: &str, description: &str, canonical: &str, markdown: &str, nav: &str, body: &str, onpage: &str) -> String {
-    include_str!("docs.html")
-        .replace("/*PANEL*/", crate::site::PANEL_CSS)
+    let docs = escape(if base.is_empty() { "/" } else { base });
+    crate::site::panel_page(include_str!("docs.html"), "docs", &escape(site), &docs)
         .replace("/*GLOW*/", crate::share::GLOW_JS)
         .replace("{{TITLE}}", &escape(title))
         .replace("{{DESC}}", &escape(description))

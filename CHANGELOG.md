@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.7 - 2026-11-20
+
+### Added
+
+- **In-app server admin dashboard & account admin role**: server owners can grant accounts the admin role (`glyph remote accounts admin <handle> [--off]`, cleared on ban) so they can open the **Server** dashboard in the Glyph app to view accounts, storage usage, 30-day daily history snapshots, device limits, bans, server limits and cache stats (keys, updates, logs and granting admin remain owner-only; admins cannot modify other admins).
+- **Server-pinned app versions (`stable_app_version`, `latest_app_version`)**: pin which release the app's Stable and Latest update channels offer via `glyph remote limits --stable-version <ver|none> --latest-version <ver|none>`, `server.toml`, environment variables or the in-app dashboard, exposed in `/v1/health`.
+
+### Changed
+
+- **Unified glyph.my site design**: refreshed the landing page (`/`), `/download`, `/plugins`, `/changelog` and docs pages under the shared app-panel stylesheet, titlebar and mobile menu.
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.12.13` and refreshed embedded desktop (`0.12.13`) and server (`0.11.7`) changelogs.
+
 ## 0.11.6 - 2026-11-20
 
 ### Added

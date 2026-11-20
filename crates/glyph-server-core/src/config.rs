@@ -166,6 +166,10 @@ pub struct Config {
     /// update (`/v1/health`) and their other API calls get 426. `None` =
     /// every version.
     pub min_app_version: Option<String>,
+    /// App release the Stable update channel offers (`None` = GitHub's choice).
+    pub stable_app_version: Option<String>,
+    /// App release the Latest update channel offers (`None` = newest).
+    pub latest_app_version: Option<String>,
 }
 
 impl Config {
@@ -196,6 +200,8 @@ impl Config {
             admin_password_hash: None,
             share_origin: None,
             min_app_version: None,
+            stable_app_version: None,
+            latest_app_version: None,
         }
     }
 

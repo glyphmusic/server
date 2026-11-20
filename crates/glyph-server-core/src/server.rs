@@ -657,6 +657,8 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                     accounts,
                     covers,
                     min_app_version: svc.config.min_app_version.clone(),
+                    stable_app_version: svc.config.stable_app_version.clone(),
+                    latest_app_version: svc.config.latest_app_version.clone(),
                 },
             )),
             Route::Search => {

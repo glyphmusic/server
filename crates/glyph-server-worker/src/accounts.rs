@@ -302,6 +302,25 @@ impl AccountStore for D1Store {
         .map(|_| ())
     }
 
+    async fn admins(&self) -> StoreResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct V {
+            value: String,
+        }
+        let row = self.first::<V>("SELECT value FROM settings WHERE key = 'admins'", &[]).await?;
+        Ok(row.and_then(|r| serde_json::from_str(&r.value).ok()).unwrap_or_default())
+    }
+
+    async fn set_admins(&self, ids: &[String]) -> StoreResult<()> {
+        let value = serde_json::to_string(ids).map_err(|e| StoreError(e.to_string()))?;
+        self.run(
+            "INSERT INTO settings (key, value) VALUES ('admins', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            &[s(&value)],
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn set_recovery(&self, user_id: &str, hash: &str) -> StoreResult<()> {
         self.run("UPDATE users SET recovery_hash = ?1 WHERE id = ?2", &[s(hash), s(user_id)]).await.map(|_| ())
     }

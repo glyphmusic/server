@@ -190,6 +190,14 @@ pub trait AccountStore: MaybeSendSync {
     /// Server-wide default for accounts without their own limit.
     async fn default_device_limit(&self) -> StoreResult<u8>;
     async fn set_default_device_limit(&self, limit: u8) -> StoreResult<()>;
+    /// Ids of the accounts that may use the admin dashboard (granted only by
+    /// the server owner with the admin password).
+    async fn admins(&self) -> StoreResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+    async fn set_admins(&self, _ids: &[String]) -> StoreResult<()> {
+        Err(StoreError("admin roles are not supported by this store".into()))
+    }
     async fn set_recovery(&self, user_id: &str, hash: &str) -> StoreResult<()>;
     /// Removes the user and everything it owns; holds the handle until `hold_until`.
     async fn delete_user(&self, user_id: &str, hold_until: u64) -> StoreResult<()>;
@@ -294,6 +302,7 @@ struct Mem {
     shares: BTreeMap<String, Share>,
     profiles: BTreeMap<String, Profile>,
     default_limit: Option<u8>,
+    admins: Vec<String>,
     mailbox: BTreeMap<(String, String), (String, u64)>,
 }
 
@@ -370,6 +379,13 @@ impl AccountStore for MemStore {
     }
     async fn set_default_device_limit(&self, limit: u8) -> StoreResult<()> {
         self.m.lock().unwrap().default_limit = Some(limit);
+        Ok(())
+    }
+    async fn admins(&self) -> StoreResult<Vec<String>> {
+        Ok(self.m.lock().unwrap().admins.clone())
+    }
+    async fn set_admins(&self, ids: &[String]) -> StoreResult<()> {
+        self.m.lock().unwrap().admins = ids.to_vec();
         Ok(())
     }
     async fn set_recovery(&self, user_id: &str, hash: &str) -> StoreResult<()> {

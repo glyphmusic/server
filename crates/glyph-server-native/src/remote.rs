@@ -113,6 +113,12 @@ pub enum RemoteCmd {
         /// Oldest Glyph app version still accepted (e.g. 0.13.0), or `none` for every version
         #[arg(long)]
         min_app_version: Option<String>,
+        /// App release the Stable update channel offers (e.g. 0.12.10), or `none` to let GitHub decide
+        #[arg(long)]
+        stable_version: Option<String>,
+        /// App release the Latest update channel offers, or `none` for the newest
+        #[arg(long)]
+        latest_version: Option<String>,
     },
     /// Same as `glyph companion on|off|status --server <url>` (kept for scripts)
     #[command(hide = true)]
@@ -212,6 +218,13 @@ pub enum AccountsCmd {
         handle: String,
         /// Device id; leave out to sign out every device
         device: Option<String>,
+    },
+    /// Let an account use the admin dashboard in the app (`--off` takes it away)
+    Admin {
+        handle: String,
+        /// Take the admin role away instead
+        #[arg(long)]
+        off: bool,
     },
 }
 
@@ -677,7 +690,7 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, youtube_require_account, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb, account_max_mb, max_accounts, min_app_version } => {
+        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, youtube_require_account, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb, account_max_mb, max_accounts, min_app_version, stable_version, latest_version } => {
             let c = Client::connect(a.server).await?;
             let old: Limits = c.get("limits").await?;
             let mut l = old.clone();
@@ -694,6 +707,8 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             if let Some(v) = account_max_mb { l.account_max_mb = v; }
             if let Some(v) = max_accounts { l.max_accounts = v; }
             if let Some(v) = min_app_version { l.min_app_version = parse_min_app_version(&v); }
+            if let Some(v) = stable_version { l.stable_app_version = parse_min_app_version(&v); }
+            if let Some(v) = latest_version { l.latest_app_version = parse_min_app_version(&v); }
             let l = save_limits(&c, o, &old, l).await?;
             emit(o, &l, || print_limits(&l));
             Ok(())
@@ -772,6 +787,17 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
                     };
                     if !confirm(o, &what, " They can sign in again unless banned.")? { return Ok(()); }
                     let acc: AdminAccount = c.post(&format!("accounts/{}/revoke", handle_path(&handle)), &RevokeRequest { device }).await?;
+                    emit(o, &acc, || print_account(&acc, None));
+                }
+                AccountsCmd::Admin { handle, off } => {
+                    let what = if off {
+                        format!("take the admin role away from @{}", handle_path(&handle))
+                    } else {
+                        format!("make @{} an admin", handle_path(&handle))
+                    };
+                    let note = if off { "" } else { " They can see all accounts, change limits and ban people from the app (not keys or updates)." };
+                    if !confirm(o, &what, note)? { return Ok(()); }
+                    let acc: AdminAccount = c.post(&format!("accounts/{}/admin", handle_path(&handle)), &AdminRoleRequest { admin: !off }).await?;
                     emit(o, &acc, || print_account(&acc, None));
                 }
             }
@@ -994,6 +1020,8 @@ fn print_limits(l: &Limits) {
     println!("Space per account (MB)          {}", l.account_max_mb);
     println!("Pages per playlist import       {}", l.import_max_pages);
     println!("Min app version                 {}", l.min_app_version.as_deref().unwrap_or("every version"));
+    println!("Stable app version              {}", l.stable_app_version.as_deref().unwrap_or("GitHub decides"));
+    println!("Latest app version              {}", l.latest_app_version.as_deref().unwrap_or("newest"));
     println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
     println!("AI assistants (MCP relay)       {}", if l.mcp_relay { "on" } else { "off" });
     println!("Companion audio in R2 (days)    {}", l.audio_cache_days);
@@ -1085,7 +1113,11 @@ fn print_accounts_list(r: &AdminAccountsResponse) {
         let sync = format_bytes(a.sync_bytes);
         let seen = a.last_seen.map(date).unwrap_or_else(|| "-".into());
         let created = date(a.created_at);
-        let status = if a.banned { "banned" } else { "active" };
+        let status = match (a.banned, a.admin) {
+            (true, _) => "banned",
+            (false, true) => "admin",
+            (false, false) => "active",
+        };
         println!("  {handle:<w$}  {devs:<9} {sync:<9} {seen:<10} {created:<10} {status}");
     }
     let start = u64::from(r.offset) + 1;
@@ -1104,6 +1136,9 @@ fn print_account(a: &AdminAccount, cap_mb: Option<u32>) {
     println!("@{}  ({})", a.handle, a.id);
     if a.banned {
         println!("Status        banned");
+    }
+    if a.admin {
+        println!("Role          admin (dashboard in the app)");
     }
     println!("Created       {}", date(a.created_at));
     match cap_mb {

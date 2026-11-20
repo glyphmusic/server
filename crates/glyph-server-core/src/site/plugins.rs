@@ -102,6 +102,7 @@ const STRINGS: &[(&str, &str, &str)] = &[
     ("stars", "GitHub stars", "GitHub-Sterne"),
     ("stars_desc", "Stars of the plugin's GitHub repository.", "Sterne des GitHub-Repos des Plugins."),
     ("updated", "Last updated", "Zuletzt aktualisiert"),
+    ("more", "More", "Mehr"),
 ];
 
 /// The app's own Glyph icons the page draws (same files as `glyph-apps/assets/icons/ui`).
@@ -136,15 +137,14 @@ pub fn handle(req: &Request) -> Response {
     let pick = |en: &'static str, de: &'static str| if l == Lang::De { de } else { en };
     let strings: serde_json::Map<String, serde_json::Value> = STRINGS.iter().map(|(k, en, de)| (k.to_string(), pick(en, de).into())).collect();
     let icons: serde_json::Map<String, serde_json::Value> = ICONS.iter().map(|(k, body)| (k.to_string(), svg(body).into())).collect();
-    let mut html = HTML
-        .replace("/*SHARE*/", crate::share::SHARE_CSS)
+    let mut html = crate::site::panel_page(HTML, "plugins", "", crate::site::DOCS_URL)
         .replace("/*GLOW*/", crate::share::GLOW_JS)
         .replace("/*STRINGS*/", &script_json(&serde_json::Value::Object(strings)))
         .replace("/*ICONS*/", &script_json(&serde_json::Value::Object(icons)))
         .replace("{{lang}}", l.code())
         .replace("{{canonical}}", &esc(&format!("https://glyph.my{}", req.path.trim_end_matches('/'))))
-        .replace("{{icon_download}}", &svg(ICONS.iter().find(|i| i.0 == "download").map_or("", |i| i.1)));
-    for key in ["page_title", "page_desc", "title", "sub", "download"] {
+        .replace("{{all}}", &esc(pick("All plugins", "Alle Plugins")));
+    for key in ["page_title", "page_desc", "title", "sub", "checked", "community", "more", "publish"] {
         let (_, en, de) = STRINGS.iter().find(|s| s.0 == key).expect("string");
         html = html.replace(&format!("{{{{{key}}}}}"), &esc(pick(en, de)));
     }
@@ -169,7 +169,7 @@ mod tests {
             assert_eq!(r.status, 200, "{path}");
             let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
             assert!(html.contains("glyph://plugin/") && html.contains("function glyphGlow") && html.contains("Install in Glyph"));
-            assert!(!html.contains("/*SHARE*/") && !html.contains("/*STRINGS*/") && !html.contains("{{"));
+            assert!(!html.contains("/*PANEL*/") && !html.contains("/*STRINGS*/") && !html.contains("{{") && !html.contains("<!--TITLEBAR-->"));
             let csp = r.headers.iter().find(|(k, _)| k == "content-security-policy").map(|(_, v)| v.clone()).unwrap();
             assert!(csp.contains("https://raw.githubusercontent.com") && csp.contains("https://api.github.com"));
         }

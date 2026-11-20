@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "minisign-verify",
  "serde",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-core"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-native"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-server-worker"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "async-trait",
  "console_error_panic_hook",

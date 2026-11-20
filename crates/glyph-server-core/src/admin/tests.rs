@@ -543,3 +543,143 @@ fn status_logs_and_routing() {
     assert_eq!(v["supported"], false);
     let _ = MemoryCache::new(t.h.rt.clone(), 1);
 }
+
+#[test]
+fn admin_accounts_use_the_dashboard_but_not_owner_routes() {
+    use crate::accounts::store::{AccountStore, Device, MemStore, User};
+    use sha2::{Digest, Sha256};
+    let mut t = setup(true, TestHost::default());
+    let store = Arc::new(MemStore::default());
+    struct Entropy;
+    impl crate::accounts::Entropy for Entropy {
+        fn fill(&self, bytes: &mut [u8]) { bytes.fill(7); }
+    }
+    t.server = t.server.with_accounts(crate::accounts::Accounts {
+        store: store.clone(),
+        blobs: None,
+        cache_blobs: None,
+        entropy: Arc::new(Entropy),
+        origin: "https://glyph.example".into(),
+        extra_origins: vec![],
+        rp_id: None,
+        push: None,
+    });
+    t.server.update_config(|c| c.bans = Arc::new(crate::bans::BanList { salt: "s".into(), bans: vec![] }));
+    let user = |id: &str, handle: &str| User {
+        id: id.into(),
+        handle: handle.into(),
+        created_at: 1,
+        device_limit: 5,
+        device_limit_set: 0,
+        rev: 0,
+        purged_rev: 0,
+        recovery_hash: "r".into(),
+        handle_changed_at: 0,
+        pw_salt: None,
+        pw_hash: None,
+    };
+    let hex = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let device = |id: &str, user_id: &str, token: &str| Device {
+        approximate_location: None,
+        id: id.into(),
+        user_id: user_id.into(),
+        name: "Phone".into(),
+        platform: "android".into(),
+        created_at: 1,
+        last_seen: 1,
+        access_hash: hex(token),
+        access_exp: u64::MAX / 2,
+        refresh_hash: format!("r{id}"),
+        refresh_exp: u64::MAX / 2,
+        ip_hash: None,
+        hw_hash: None,
+    };
+    for (id, handle) in [("u_1", "alice"), ("u_2", "bob"), ("u_3", "carol")] {
+        assert!(block_on(store.create_user(&user(id, handle), None, 1)).unwrap());
+    }
+    block_on(store.put_device(&device("d_1", "u_1", "gat_alice"))).unwrap();
+    block_on(store.put_device(&device("d_2", "u_2", "gat_bob"))).unwrap();
+    block_on(store.put_device(&device("d_3", "u_3", "gat_carol"))).unwrap();
+    let alice = Some("gat_alice");
+
+    // Without the role an app sign-in is no admin sign-in (403, so the app
+    // stays signed in); an unknown token is 401.
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/me", "", alice)).1["code"], "not_admin");
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/me", "", Some("gat_nobody"))).0, 401);
+
+    // Only the owner hands out the role.
+    let pair = login(&t);
+    let owner = Some(pair.access_token.as_str());
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/me", "", owner));
+    assert_eq!((s, v["owner"].as_bool(), v["roles"].as_bool()), (200, Some(true), Some(true)));
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/accounts/alice/admin", r#"{"admin":true}"#, owner));
+    assert_eq!((s, v["admin"].as_bool()), (200, Some(true)), "{v}");
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/bob/admin", r#"{"admin":true}"#, owner)).0, 200);
+
+    // Now alice gets in, with what an admin account may do.
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/me", "", alice));
+    assert_eq!((s, v["owner"].as_bool(), v["handle"].as_str(), v["keys"].as_bool()), (200, Some(false), Some("alice"), Some(false)));
+    for path in ["/admin/v1/stats", "/admin/v1/history", "/admin/v1/accounts", "/admin/v1/limits", "/admin/v1/status"] {
+        assert_eq!(call(&t, req(Method::Get, path, "", alice)).0, 200, "{path}");
+    }
+    let (_, v, _) = call(&t, req(Method::Get, "/admin/v1/accounts", "", alice));
+    assert_eq!(v["accounts"].as_array().unwrap().iter().filter(|a| a["admin"] == true).count(), 2);
+    // Owner-only routes stay closed.
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/keys", "", alice)).1["code"], "owner_only");
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/update/apply", "{}", alice)).0, 403);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/carol/admin", r#"{"admin":true}"#, alice)).0, 403);
+    // Another admin is off limits; a normal account is not.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/bob/revoke", "{}", alice)).0, 403);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans", r#"{"target":"account","value":"bob"}"#, alice)).0, 403);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/carol/revoke", "{}", alice)).0, 200);
+    // Logout of an account caller is a no-op that does not break the owner.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/logout", "{}", alice)).0, 200);
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/me", "", owner)).0, 200);
+
+    // A ban or taking the role away closes the door again.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/bob/admin", r#"{"admin":false}"#, owner)).0, 200);
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/me", "", Some("gat_bob"))).0, 403);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans", r#"{"target":"account","value":"alice"}"#, owner)).0, 200);
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/me", "", alice)).0, 403);
+    // A handle named "admin" is still a normal account path.
+    assert_eq!(route("accounts/admin", Method::Get).unwrap(), R::AccountGet);
+}
+
+#[test]
+fn history_keeps_one_entry_per_day_and_ninety_days() {
+    assert_eq!(day_of(0), "1970-01-01");
+    assert_eq!(day_of(1_763_596_800_000), "2025-11-20");
+    assert_eq!(day_of(951_782_400_000), "2000-02-29");
+    let mut days = Vec::new();
+    for d in 0..100u64 {
+        assert!(push_day(&mut days, DayStats { day: day_of(d * 86_400_000), accounts: d, ..Default::default() }));
+        assert!(!push_day(&mut days, DayStats { day: day_of(d * 86_400_000 + 1000), ..Default::default() }));
+    }
+    assert_eq!(days.len(), HISTORY_DAYS);
+    assert_eq!(days.first().unwrap().accounts, 10);
+    assert_eq!(days.last().unwrap().accounts, 99);
+}
+
+#[test]
+fn release_channels_are_set_with_limits_and_shown_in_health() {
+    let t = setup(true, TestHost::default());
+    let pair = login(&t);
+    let tok = Some(pair.access_token.as_str());
+    let (_, mut l, _) = call(&t, req(Method::Get, "/admin/v1/limits", "", tok));
+    assert!(l["stable_app_version"].is_null());
+    l["stable_app_version"] = "v0.12.10".into();
+    l["latest_app_version"] = "0.12.12".into();
+    let (s, v, _) = call(&t, req(Method::Put, "/admin/v1/limits", &l.to_string(), tok));
+    assert_eq!((s, v["stable_app_version"].as_str()), (200, Some("0.12.10")), "{v}");
+    let (_, h, _) = call(&t, req(Method::Get, "/v1/health", "", None));
+    assert_eq!((h["stable_app_version"].as_str(), h["latest_app_version"].as_str()), (Some("0.12.10"), Some("0.12.12")));
+    // Left out: kept. Empty: cleared. Not a version: refused.
+    let mut older = v.clone();
+    older.as_object_mut().unwrap().remove("stable_app_version");
+    older["latest_app_version"] = "".into();
+    let (_, v, _) = call(&t, req(Method::Put, "/admin/v1/limits", &older.to_string(), tok));
+    assert_eq!((v["stable_app_version"].as_str(), v["latest_app_version"].is_null()), (Some("0.12.10"), true));
+    let mut bad = v.clone();
+    bad["stable_app_version"] = "soon".into();
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &bad.to_string(), tok)).0, 400);
+}

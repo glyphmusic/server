@@ -54,6 +54,14 @@ pub trait AdminHost: MaybeSendSync {
     async fn companion_update(&self, _rdlp: bool, _apply: bool) -> Result<MaintenanceResponse, HostError> {
         Err(HostError::Unsupported("no companion management configured".into()))
     }
+    /// Bytes the server's storage uses; caps are filled in by the caller.
+    async fn storage(&self) -> Option<StorageUsage> {
+        None
+    }
+    /// One snapshot a day for the dashboard's charts, oldest first.
+    async fn history(&self) -> Vec<DayStats> {
+        Vec::new()
+    }
 }
 
 /// Used when no host is configured (tests, embedding).

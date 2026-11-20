@@ -15,26 +15,58 @@ use crate::error::ApiErr;
 use crate::server::{Body, Request, Response};
 use crate::traits::Method;
 
-/// Stylesheet shared by every page of the site.
-pub const BASE_CSS: &str = include_str!("site/base.css");
-/// The reading pages (/changelog, docs): the app's Settings window look.
+/// Every page of the site (/, /download, /plugins, /changelog, docs): the
+/// app's Settings window look.
 pub const PANEL_CSS: &str = include_str!("site/panel.css");
+/// The phone menu of the panel pages.
+pub const MENU_JS: &str = include_str!("site/panel.js");
+
+/// The app's icons the site's titlebar and menu draw (glyph-apps/assets/icons/ui).
+const IC_DOWNLOAD: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3L12 11.3"/><path fill="currentColor" d="M11.13 14.54L9.07 12.26Q8.2 11.3 9.5 11.3L14.5 11.3Q15.8 11.3 14.93 12.26L12.87 14.54Q12 15.5 11.13 14.54Z"/><path d="M3.5 15.5V17a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-1.5"/></svg>"#;
+const IC_MENU: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 7h15"/><path d="M4.5 12h15"/><path d="M4.5 17h15"/></svg>"#;
+const IC_BACK: &str = r#"<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 5.5L6.13 10.87Q5 12 6.13 13.13L11.5 18.5"/><path d="M5.7 12H18.5"/></svg>"#;
+
+/// Where the docs live, linked from the main site's pages.
+pub const DOCS_URL: &str = "https://docs.glyph.my";
+
+/// The site's pages: (key, label, path under the site or `None` for the docs).
+const PAGES: &[(&str, &str, Option<&str>)] = &[
+    ("home", "Home", Some("/")),
+    ("download", "Download", Some("/download")),
+    ("plugins", "Plugins", Some("/plugins")),
+    ("changelog", "Changelog", Some("/changelog")),
+    ("docs", "Docs", None),
+];
+
+/// Fills the shared parts of a panel page: `/*PANEL*/` (the stylesheet),
+/// `/*MENU*/` (phone menu script), `<!--TITLEBAR-->`, `<!--MSITE-->` (the
+/// site's pages at the end of the phone menu) and `<!--MBACK-->` (the menu's
+/// back arrow). `cur` is the page's key in [`PAGES`]; `site` the origin of
+/// the main site ("" on it), `docs` the docs' address. Both must be escaped.
+pub fn panel_page(html: &str, cur: &str, site: &str, docs: &str) -> String {
+    let href = |path: Option<&str>| path.map_or_else(|| docs.to_string(), |p| format!("{site}{p}"));
+    let current = |key: &str| if key == cur { r#" aria-current="page""# } else { "" };
+    let mut bar = format!(r#"<header class="titlebar"><a class="logo" href="{site}/">glyph</a><nav class="tnav" aria-label="Site">"#);
+    for (key, label, path) in PAGES.iter().filter(|p| !matches!(p.0, "home" | "download")) {
+        bar += &format!(r#"<a class="{key}" href="{}"{}>{label}</a>"#, href(*path), current(key));
+    }
+    bar += &format!(
+        r#"<a class="dl" href="{site}/download"{}>{IC_DOWNLOAD}<span>Download</span></a><button type="button" class="menubtn" aria-label="Menu" aria-controls="menu" aria-expanded="false">{IC_MENU}</button></nav></header>"#,
+        current("download")
+    );
+    let mut menu = String::from(r#"<div class="msite"><div class="gl">Glyph</div>"#);
+    for (key, label, path) in PAGES {
+        menu += &format!(r#"<a class="pg" href="{}"{}><span class="nm">{label}</span></a>"#, href(*path), current(key));
+    }
+    menu += r#"<a class="pg" href="https://github.com/glyphmusic/apps"><span class="nm">GitHub</span></a></div>"#;
+    html.replace("/*PANEL*/", PANEL_CSS)
+        .replace("/*MENU*/", MENU_JS)
+        .replace("<!--TITLEBAR-->", &bar)
+        .replace("<!--MSITE-->", &menu)
+        .replace("<!--MBACK-->", &format!(r#"<button type="button" class="bk" aria-label="Close menu">{IC_BACK}</button>"#))
+}
 /// `glyphNote(canvas, rowH)`: the app's splash animation.
 pub const NOTE_JS: &str = include_str!("site/note.js");
-/// The app icon, shown next to the brand name.
-const ICON_PNG: &[u8] = include_bytes!("site/icon-64.png");
-
-/// `url(data:...)` of the app icon for CSS.
-pub fn icon_css_url() -> String {
-    use base64::Engine;
-    format!("url(data:image/png;base64,{})", base64::engine::general_purpose::STANDARD.encode(ICON_PNG))
-}
-
-/// CSS for the brand link: the app icon before the name.
-pub fn brand_icon_css(sel: &str) -> String {
-    format!("{sel}::before{{content:\"\";display:inline-block;width:1.6em;height:1.6em;margin-right:.5em;vertical-align:-.45em;border-radius:.25em;background:{} center/contain no-repeat}}", icon_css_url())
-}
-
 /// CSP for the site's HTML pages: inline script and style, the web font.
 pub const PAGE_CSP: &str = "default-src 'none'; img-src 'self' data:; manifest-src 'self'; script-src 'unsafe-inline'; connect-src https://api.github.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -136,8 +168,7 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
     }
     if req.path.trim_end_matches('/') == "/changelog" {
         let releases = changelog::releases();
-        let html = include_str!("site/changelog.html")
-            .replace("/*PANEL*/", PANEL_CSS)
+        let html = panel_page(include_str!("site/changelog.html"), "changelog", "", DOCS_URL)
             .replace("/*GLOW*/", crate::share::GLOW_JS)
             .replace("<!--COUNT-->", &format!("{} releases.", releases.len()))
             .replace("<!--LATEST-->", &changelog::render_latest(&releases))
@@ -149,10 +180,10 @@ pub fn handle(req: &Request) -> Result<Response, ApiErr> {
         return Ok(plugins::handle(req));
     }
     if req.path.trim_end_matches('/') == "/download" {
-        let html = include_str!("site/download.html").replace("/*BASE*/", BASE_CSS).replace("/*BRAND*/", &brand_icon_css("nav .brand"));
+        let html = panel_page(include_str!("site/download.html"), "download", "", DOCS_URL).replace("/*GLOW*/", crate::share::GLOW_JS);
         return Ok(html_response(200, html, "public, max-age=300"));
     }
-    let html = include_str!("site/index.html").replace("/*BASE*/", BASE_CSS).replace("/*NOTE*/", NOTE_JS).replace("/*BRAND*/", &brand_icon_css("nav .brand"));
+    let html = panel_page(include_str!("site/index.html"), "home", "", DOCS_URL).replace("/*GLOW*/", crate::share::GLOW_JS).replace("/*NOTE*/", NOTE_JS);
     Ok(html_response(200, html, "public, max-age=300"))
 }
 
@@ -216,7 +247,7 @@ mod tests {
         let r = block_on(s.handle(get("/")));
         let html = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert_eq!(r.status, 200);
-        assert!(html.contains("function glyphNote") && html.contains("--pink") && !html.contains("/*NOTE*/"));
+        assert!(html.contains("function glyphNote") && html.contains("--pink") && !html.contains("/*NOTE*/") && !html.contains("<!--MSITE-->") && html.contains("id=\"menu\""));
         assert!(html.contains(r#"href="/web/#settings/account""#));
         assert!(html.contains("glyph.web.account") && html.contains(r#"location.replace("/web/")"#));
         assert_eq!(block_on(s.handle(get("/shots/home.webp"))).status, 404);
@@ -229,7 +260,7 @@ mod tests {
         let dl = block_on(s.handle(get("/download")));
         let dl_html = String::from_utf8_lossy(dl.bytes().unwrap()).to_string();
         assert_eq!(dl.status, 200);
-        assert!(dl_html.contains("releases/latest") && !dl_html.contains("/*BASE*/"));
+        assert!(dl_html.contains("releases/latest") && dl_html.contains("data-ch=\"latest\"") && !dl_html.contains("/*PANEL*/") && !dl_html.contains("<!--TITLEBAR-->") && dl_html.contains("class=\"menubtn\""));
         assert!(shot.bytes().unwrap().starts_with(&[0xff, 0xd8]));
     }
 

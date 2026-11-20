@@ -580,6 +580,9 @@ fn page() -> Response {
 /// Highest device limit an operator can set.
 pub const MAX_DEVICE_LIMIT: u8 = 100;
 
+/// Most accounts that can hold the admin role at once.
+pub const MAX_ADMINS: usize = 20;
+
 /// Operator side (admin API): device limits live only on the server.
 impl Accounts {
     fn check_limit(limit: u8) -> Result<u8, ApiErr> {
@@ -624,10 +627,12 @@ impl Accounts {
         use crate::admin::types::{AdminAccountSummary, AdminAccountsResponse};
         use crate::bans::BanKind;
         let (rows, total) = self.store.list_users(limit, offset, query).await.map_err(store_err)?;
+        let admins = self.store.admins().await.map_err(store_err)?;
         let accounts = rows
             .into_iter()
             .map(|u| {
                 let banned = bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == u.id && b.live(now));
+                let admin = admins.contains(&u.id);
                 AdminAccountSummary {
                     id: u.id,
                     handle: u.handle,
@@ -638,6 +643,7 @@ impl Accounts {
                     last_seen: u.last_seen,
                     sync_bytes: u.sync_bytes,
                     banned,
+                    admin,
                 }
             })
             .collect();
@@ -657,6 +663,7 @@ impl Accounts {
         let devices = self.store.devices(&u.id).await.map_err(store_err)?;
         let used_bytes = self.used_bytes(&u.id).await?;
         let banned = bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == u.id && b.live(now));
+        let admin = self.store.admins().await.map_err(store_err)?.contains(&u.id);
         Ok(AdminAccount {
             id: u.id,
             handle: u.handle,
@@ -666,6 +673,7 @@ impl Accounts {
             devices: devices.into_iter().map(|d| AdminDevice { id: d.id, name: d.name, platform: d.platform, last_seen: d.last_seen, hardware: d.hw_hash, ip_known: d.ip_hash.is_some() }).collect(),
             used_bytes,
             banned,
+            admin,
         })
     }
 
@@ -695,6 +703,56 @@ impl Accounts {
             return Err(ApiErr::not_found("no such device on this account (see glyph remote accounts show)"));
         }
         self.admin_account(handle, bans, now).await
+    }
+
+    /// Gives or takes the admin role (server owner only, checked by the caller).
+    pub async fn admin_set_role(
+        &self,
+        handle: &str,
+        admin: bool,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+        let id = self.admin_account(handle, bans, now).await?.id;
+        let mut ids = self.store.admins().await.map_err(store_err)?;
+        ids.retain(|x| x != &id);
+        if admin {
+            if ids.len() >= MAX_ADMINS {
+                return Err(ApiErr::bad_request(format!("at most {MAX_ADMINS} admins")));
+            }
+            ids.push(id);
+        }
+        self.store.set_admins(&ids).await.map_err(store_err)?;
+        self.admin_account(handle, bans, now).await
+    }
+
+    /// The account behind an app access token, when it holds the admin role
+    /// and is not banned. A live sign-in without the role gets 403 (not 401,
+    /// which would sign the app out); an expired one gets `token_expired`.
+    pub async fn admin_session(&self, svc: &Services, token: &str) -> Result<User, ApiErr> {
+        use crate::bans::BanKind;
+        let token = token.trim();
+        if token.is_empty() || token.len() > 128 {
+            return Err(unauthorized());
+        }
+        let now = svc.rt.now_ms();
+        let device = self.store.device_by_access(&hash(token)).await.map_err(store_err)?.ok_or_else(unauthorized)?;
+        if device.access_exp <= now {
+            return Err(ApiErr::new(401, "token_expired", "refresh the access token"));
+        }
+        let user = self.store.user(&device.user_id).await.map_err(store_err)?.ok_or_else(unauthorized)?;
+        let not_admin = || ApiErr::new(403, "not_admin", "this account is not an admin on this server");
+        if !self.store.admins().await.map_err(store_err)?.contains(&user.id) {
+            return Err(not_admin());
+        }
+        let bans = &svc.config.bans;
+        if bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == user.id && b.live(now)) {
+            return Err(not_admin());
+        }
+        if now.saturating_sub(device.last_seen) > TOUCH_EVERY {
+            let _ = self.store.touch_device(&device.id, now, None).await;
+        }
+        Ok(user)
     }
 
     pub async fn admin_stats(&self, now: u64) -> Option<store::AccountStats> {

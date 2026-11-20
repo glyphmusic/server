@@ -21,7 +21,7 @@
 <meta name="twitter:description" content="A fast desktop music player for Windows, macOS and Linux.">
 <meta name="twitter:image" content="https://glyph.my/og.png">
 <link rel="canonical" href="https://glyph.my/">
-<meta name="theme-color" content="#0a0a09">
+<meta name="theme-color" content="#000000">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/icon.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -30,180 +30,1158 @@
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Glyph free?","acceptedAnswer":{"@type":"Answer","text":"Yes. The app, the server and every other part are free and open source (MIT / Apache-2.0). There are no ads, no subscriptions and no tracking."}},{"@type":"Question","name":"Where does the music come from?","acceptedAnswer":{"@type":"Answer","text":"Only from legal, free sources: full songs from open platforms such as Audius, Jamendo and the Internet Archive, official 30-second previews elsewhere, and YouTube or SoundCloud through their own players or your own yt-dlp. Glyph searches them all at once and merges the results into one list."}},{"@type":"Question","name":"Do I need an account?","acceptedAnswer":{"@type":"Answer","text":"No. Everything works without one and your library stays on your computer. An optional @handle account syncs likes, playlists, settings and listening stats between your devices."}},{"@type":"Question","name":"Which systems does it run on?","acceptedAnswer":{"@type":"Answer","text":"Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64). Glyph is a native app written in Rust, not a website in a window, so it starts fast and uses little memory."}},{"@type":"Question","name":"Can I listen offline?","acceptedAnswer":{"@type":"Answer","text":"Yes. Songs from sources that allow it can be downloaded, single songs or whole playlists, and play without internet afterwards."}},{"@type":"Question","name":"Does Glyph collect data about me?","acceptedAnswer":{"@type":"Answer","text":"No telemetry. Listening statistics are off by default; when you turn them on they are only visible to you and are deleted when you turn them off again."}},{"@type":"Question","name":"Can I run my own server?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Glyph server runs on your own computer or VPS, in Docker, or on your own Cloudflare account. The glyph CLI sets it up, checks it and lets you change every option; the app just needs its address."}},{"@type":"Question","name":"Can AI assistants control Glyph?","acceptedAnswer":{"@type":"Answer","text":"Yes, if you want. Glyph includes an MCP server, so assistants such as Claude can play songs, manage the queue and edit playlists. It runs only on your computer, or through the server after you confirm the connection in the app."}},{"@type":"Question","name":"How do I report a bug or ask for a feature?","acceptedAnswer":{"@type":"Answer","text":"Open an issue on GitHub, or use Settings, Support in the app, which can copy diagnostic info without keys or personal data."}}]}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
 <style>
-/*BASE*/
-.wrap { max-width: 1120px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-left, 0px)); }
-nav { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; padding: 22px 0; }
-nav .brand { font-weight: 700; text-decoration: none; }
-/*BRAND*/
-nav .links { display: flex; gap: 3ch; align-items: baseline; }
-nav .links a { color: var(--dim); text-decoration: none; }
-nav .links a:hover { color: var(--fg); }
-nav .links a.login { color: var(--fg); border: 1px solid var(--line); padding: 3px 1.2ch; }
-nav .links a.login:hover, nav .links a.login:focus-visible { border-color: var(--fg); background: var(--fg); color: var(--bg); outline: none; }
+/*PANEL*/
+/* Landing page: pure black canvas, floating pill navbar, subtle hero grid,
+   frameless top-right ASCII note, uncropped sticky tilt-to-flat showcase,
+   hairline source strip & interactive 2x2 bento, compact 2-column FAQ,
+   and a soft bottom pink gradient behind the final CTA and footer card. */
+:root {
+  --bg: #000000;
+  --pink: #ff5fd2;
+  --accent-rgb: 255, 95, 210;
+  --accent-rgb-2: 196, 62, 186;
+}
+html { background: var(--bg); scroll-behavior: smooth; }
+body {
+  height: auto !important;
+  overflow: visible !important;
+  overflow-x: clip !important;
+  display: block !important;
+  background: var(--bg);
+}
+#menu .list .gl:first-child { padding-top: 0; }
+@media (min-width: 861px) { #menu { display: none; } }
 
-.hero { position: relative; text-align: center; padding: 8px 0 56px; }
-.hero canvas { display: block; width: 100%; height: clamp(300px, 46vw, 420px); }
-.hero h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.15; margin: 8px 0 14px; font-weight: 700; letter-spacing: -0.02em; }
-.hero p.lead { max-width: 56ch; margin: 0 auto 28px; color: var(--dim); }
-.cta { display: flex; gap: 2ch; justify-content: center; flex-wrap: wrap; }
-.hero .meta { margin-top: 18px; color: var(--dim); font-size: 12px; }
+/* Clean full-width sticky titlebar (no floating pill) */
+.titlebar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: 52px;
+  max-width: none;
+  margin: 0;
+  padding: 0 max(24px, calc((100% - 980px) / 2));
+  background: rgba(0, 0, 0, .72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid rgba(255, 255, 255, .06);
+}
+.titlebar .tnav { gap: 4px; }
+.titlebar .tnav a { border-radius: 8px; padding: 0 11px; font-size: 13px; color: rgba(255, 255, 255, .62); }
+.titlebar .tnav a:hover { color: #fff; background: rgba(255, 255, 255, .06); }
+.titlebar .tnav a.dl {
+  margin-left: 8px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .10);
+  color: #fff;
+  font-weight: 500;
+}
+.titlebar .tnav a.dl:hover { background: rgba(255, 255, 255, .16); }
 
-section { padding: 40px 0; }
-.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px 4ch; }
-.features h3 { font: inherit; margin: 0 0 6px; }
-.features p { margin: 0; color: var(--dim); }
+/* Minimal accent-color picker injected right next to logo in sticky titlebar */
+.accent-ctl { position: relative; display: inline-flex; align-items: center; margin-left: 10px; }
+.accent-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--pink);
+  border: 2px solid rgba(255, 255, 255, .28);
+  transition: transform .15s var(--ease), border-color .15s;
+}
+.accent-dot:hover { transform: scale(1.16); border-color: #fff; }
+.accent-pop {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  z-index: 60;
+  padding: 7px 9px;
+  border-radius: 999px;
+  background: rgba(14, 14, 18, .95);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 18px 44px -12px rgba(0, 0, 0, .92);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.accent-pop[hidden] { display: none; }
+.accent-pop .sw-c {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  transition: transform .14s var(--ease), border-color .14s;
+}
+.accent-pop .sw-c:hover { transform: scale(1.18); }
+.accent-pop .sw-c.on { border-color: #fff; }
+.accent-pop .custom-c {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: conic-gradient(#ff5fd2, #fb923c, #4ade80, #60a5fa, #a78bfa, #ff5fd2);
+  border: 1.5px solid rgba(255, 255, 255, .35);
+  overflow: hidden;
+  cursor: pointer;
+  flex: none;
+}
+.accent-pop .custom-c input {
+  position: absolute;
+  inset: -6px;
+  width: 30px;
+  height: 30px;
+  opacity: 0;
+  cursor: pointer;
+}
 
-.dl { text-align: center; padding: 64px 0 40px; }
-.dl h2 { font-size: clamp(22px, 3.4vw, 32px); margin: 0 0 10px; }
-.dl p { color: var(--dim); margin: 0 0 24px; }
-.plat { display: flex; gap: 3ch; justify-content: center; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin-top: 20px; }
-footer { border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--dim); font-size: 12px; display: flex; justify-content: space-between; gap: 2ch; flex-wrap: wrap; }
-footer a { color: var(--dim); }
+.page {
+  background: none;
+  border-radius: 0;
+  min-height: 0;
+  overflow: visible !important;
+  padding: 0;
+}
+.wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
 
-.shots { display: flex; flex-direction: column; gap: 28px; }
-.shots figure { margin: 0; }
-.shots img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; }
-.shots img { cursor: zoom-in; transition: border-color .15s; }
-.shots img:hover { border-color: var(--dim); }
-.lightbox { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 3vh 3vw; background: rgba(10, 10, 9, .92); cursor: zoom-out; opacity: 0; transition: opacity .18s; }
-.lightbox.open { opacity: 1; }
-.lightbox img { max-width: 100%; max-height: calc(100% - 36px); width: auto; height: auto; border: 1px solid var(--line); border-radius: 10px; }
-.lightbox span { color: var(--dim); font-size: 12px; }
-.shots figcaption { margin-top: 10px; color: var(--dim); font-size: 12px; }
-.faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 4ch; margin-top: 18px; }
-.faq details { border-bottom: 1px solid var(--line); padding: 12px 0; }
-.faq summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 2ch; }
+/* Hero + faint hairline grid fading radially (z-index above sticky stage so dropdown never clips) */
+.hero-band {
+  position: relative;
+  z-index: 25;
+}
+.hero-grid {
+  position: absolute;
+  inset: -60px 0 0;
+  overflow: hidden;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, .045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, .045) 1px, transparent 1px);
+  background-size: 52px 52px;
+  -webkit-mask-image: radial-gradient(ellipse 76% 72% at 50% 34%, #000 28%, transparent 100%);
+  mask-image: radial-gradient(ellipse 76% 72% at 50% 34%, #000 28%, transparent 100%);
+}
+.hero {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(260px, 410px);
+  align-items: center;
+  gap: 20px;
+  padding: clamp(34px, 6vh, 66px) 0 clamp(22px, 4vh, 38px);
+}
+.hero h1 {
+  margin: 0;
+  font-size: clamp(36px, 5vw, 56px);
+  line-height: 1.05;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  color: #fff;
+}
+.hero .lead {
+  max-width: 38ch;
+  margin: 14px 0 24px;
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, .56);
+}
+.cta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; position: relative; }
+
+/* Split OS Download button + frosted platform dropdown */
+.split {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 12px;
+  background: var(--pink);
+  color: var(--on-accent, #000);
+  box-shadow: 0 12px 30px -10px rgba(var(--accent-rgb), .35);
+}
+.split a, .split button {
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--on-accent, #000);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: opacity .12s, background-color .12s;
+}
+.split a { gap: 8px; padding: 0 14px 0 16px; border-radius: 12px 0 0 12px; }
+.split a:hover { opacity: .86; }
+.split button { padding: 0 11px; border-left: 1px solid rgba(0, 0, 0, .16); border-radius: 0 12px 12px 0; }
+.split button:hover { background: rgba(0, 0, 0, .10); }
+.split .ic, .cta .lb .ic { width: 15px; height: 15px; }
+
+.os-menu {
+  position: absolute;
+  top: 48px;
+  left: 0;
+  z-index: 60;
+  width: 244px;
+  padding: 6px;
+  border-radius: 12px;
+  background: rgba(16, 16, 20, .96);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, .92);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.os-menu[hidden] { display: none; }
+.os-menu a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, .88);
+  transition: background-color .12s;
+}
+.os-menu a:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+.os-menu a span:last-child { font: 11px var(--mono); color: rgba(255, 255, 255, .42); }
+
+.cta .lb {
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .10);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.cta .lb:hover { background: rgba(255, 255, 255, .11); }
+.cta .login {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, .50);
+  transition: color .14s;
+}
+.cta .login:hover { color: #fff; }
+.hero .meta { margin-top: 14px; font-size: 12px; color: rgba(255, 255, 255, .36); }
+
+/* Top-right ASCII note: frameless, oversized canvas with soft radial fade (no glow behind it) */
+.hero .art {
+  position: relative;
+  height: clamp(240px, 27vw, 330px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  will-change: transform;
+}
+.hero .note-wrap {
+  position: relative;
+  width: 132%;
+  height: 132%;
+  margin: -16%;
+  -webkit-mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
+  mask-image: radial-gradient(ellipse 52% 52% at 50% 50%, #000 58%, transparent 100%);
+}
+.hero canvas { display: block; width: 100%; height: 100%; }
+
+/* Sticky Tilt-to-Flat Showcase: uncropped 1586:993 frame + accent ambient window glow */
+.showcase {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 8px 24px 28px;
+}
+.stage-pin {
+  position: sticky;
+  top: 58px;
+  z-index: 15;
+  padding: 8px 0 18px;
+  background: linear-gradient(180deg, #000000 0%, rgba(0, 0, 0, .94) 84%, transparent 100%);
+  perspective: 1200px;
+}
+.stage-box {
+  position: relative;
+  width: min(100%, calc(56vh * 1586 / 993));
+  margin: 0 auto;
+}
+.window-glow {
+  position: absolute;
+  inset: -12% -7%;
+  pointer-events: none;
+  background: radial-gradient(ellipse 68% 58% at 50% 48%, rgba(var(--accent-rgb), .24) 0%, rgba(var(--accent-rgb-2), .12) 46%, transparent 74%);
+  filter: blur(44px);
+}
+.stage-frame {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .12);
+  background: #060608;
+  box-shadow: 0 32px 90px -22px rgba(0, 0, 0, .95);
+  transform-origin: center top;
+  will-change: transform;
+}
+.stage-screen {
+  position: relative;
+  aspect-ratio: 1586 / 993;
+  width: 100%;
+  background: #060608;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.stage-screen img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transform: scale(.985) translateY(5px);
+  transition: opacity .4s var(--ease), transform .4s var(--ease);
+  pointer-events: none;
+}
+.stage-screen img.on {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* Quiet clickable dots below the floating window */
+.dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  margin-top: 14px;
+}
+.dots button {
+  width: 7px;
+  height: 5px;
+  padding: 0;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, .20);
+  transition: width .24s var(--ease), background-color .24s ease;
+}
+.dots button:hover { background: rgba(255, 255, 255, .45); }
+.dots button.on { width: 24px; background: var(--pink); }
+
+/* Single-line Lyrics Scroll Track */
+.lyrics-track {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 36px 0 60px;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(54px, 11vh, 92px);
+}
+.step {
+  text-align: center;
+  opacity: .22;
+  transform: scale(.96);
+  transition: opacity .3s ease, transform .35s var(--ease);
+  cursor: pointer;
+}
+.step.on { opacity: 1; transform: scale(1); }
+.step .tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pink);
+  margin-bottom: 6px;
+}
+.step h2 {
+  margin: 0;
+  font-size: clamp(22px, 3vw, 29px);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: #fff;
+}
+
+/* 4-column hairline source strip (t3.codes motif) */
+.sources {
+  border-top: 1px solid rgba(255, 255, 255, .10);
+  border-bottom: 1px solid rgba(255, 255, 255, .10);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 12px 0 44px;
+}
+.sources > div {
+  padding: 22px 14px;
+  text-align: center;
+}
+.sources > div + div { border-left: 1px solid rgba(255, 255, 255, .10); }
+.sources .sn { font-size: 14px; font-weight: 600; color: #fff; }
+.sources .sd { margin-top: 4px; font: 11.5px var(--mono); color: rgba(255, 255, 255, .40); }
+
+/* Monospace pill section eyebrow (/features, /faq) */
+.pill-tag {
+  display: inline-block;
+  font: 11.5px var(--mono);
+  color: rgba(255, 255, 255, .62);
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .12);
+}
+
+/* 2x2 Interior-Hairline Bento with interactive mini-widgets */
+.bento-sec { padding: 12px 0 56px; scroll-margin-top: 76px; }
+.bento-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.bento {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid rgba(255, 255, 255, .10);
+  border-radius: 18px;
+  overflow: hidden;
+  background: #060608;
+}
+.tile {
+  padding: 26px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 20px;
+}
+.tile:nth-child(1) { border-right: 1px solid rgba(255, 255, 255, .10); border-bottom: 1px solid rgba(255, 255, 255, .10); }
+.tile:nth-child(2) { border-bottom: 1px solid rgba(255, 255, 255, .10); }
+.tile:nth-child(3) { border-right: 1px solid rgba(255, 255, 255, .10); }
+.tile h3 { margin: 0; font-size: 15px; font-weight: 600; color: #fff; }
+.tile .sub { margin: 4px 0 0; font-size: 12.5px; color: rgba(255, 255, 255, .46); }
+
+/* Interactive switches */
+.sw-box {
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(255, 255, 255, .07);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.sw-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: rgba(255, 255, 255, .82); }
+.sw {
+  width: 34px;
+  height: 19px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, .14);
+  position: relative;
+  transition: background-color .2s ease;
+}
+.sw::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .2s var(--ease);
+}
+.sw.on { background: var(--pink); }
+.sw.on::after { transform: translateX(15px); background: #000; }
+
+/* Share link pill */
+.share-demo { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 0; }
+.link-pill {
+  width: 100%;
+  max-width: 310px;
+  transform: rotate(-1.2deg);
+  transition: transform .2s var(--ease);
+  border-radius: 999px;
+  background: #101014;
+  border: 1px solid rgba(255, 255, 255, .12);
+  padding: 5px 5px 5px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-shadow: 0 18px 40px -16px rgba(0, 0, 0, .9);
+}
+.link-pill:hover { transform: rotate(0deg); }
+.link-pill span { font: 12px var(--mono); color: rgba(255, 255, 255, .82); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-pill button {
+  flex: none;
+  height: 28px;
+  padding: 0 13px;
+  border-radius: 999px;
+  background: #fff;
+  color: #000;
+  font-size: 11.5px;
+  font-weight: 600;
+  transition: opacity .12s;
+}
+.link-pill button:hover { opacity: .88; }
+.share-meta { margin-top: 10px; font-size: 11.5px; color: rgba(var(--accent-rgb), .82); }
+
+/* Mini terminal card (t3.codes motif) */
+.term {
+  border-radius: 12px;
+  background: #09090c;
+  border: 1px solid rgba(255, 255, 255, .10);
+  overflow: hidden;
+}
+.term-hd {
+  height: 26px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .06);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.term-hd i { width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, .16); }
+.term-hd span { margin-left: 6px; font: 10.5px var(--mono); color: rgba(255, 255, 255, .34); }
+.term-bd { padding: 12px 14px; font: 11.5px/1.65 var(--mono); color: rgba(255, 255, 255, .78); }
+.term-bd .p { color: var(--pink); }
+.term-bd .ok { color: #4ade80; }
+.term-bd .cur { display: inline-block; width: 6px; height: 12px; background: rgba(255, 255, 255, .75); vertical-align: -2px; margin-left: 3px; }
+
+/* Plugin chips */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips a, .chips span {
+  padding: 7px 12px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid rgba(255, 255, 255, .09);
+  font-size: 12px;
+  color: rgba(255, 255, 255, .78);
+  transition: background-color .14s, border-color .14s, color .14s;
+}
+.chips a:hover { background: rgba(255, 255, 255, .08); color: #fff; border-color: rgba(255, 255, 255, .18); }
+.chips .hi {
+  background: rgba(var(--accent-rgb), .14);
+  border-color: rgba(var(--accent-rgb), .34);
+  color: var(--pink);
+  font-weight: 500;
+}
+
+/* Compact 2-column FAQ */
+.faq-sec {
+  padding: 16px 0 44px;
+  scroll-margin-top: 76px;
+}
+.faq-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.faq-side h2 { margin: 12px 0 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; color: #fff; }
+.faq details { padding: 12px 0; }
+.faq details.extra[hidden] { display: none; }
+.faq summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, .88);
+}
 .faq summary::-webkit-details-marker { display: none; }
-.faq summary::after { content: "+"; color: var(--dim); }
-.faq details[open] summary::after { content: "-"; }
-.faq summary:hover, .faq summary:focus-visible { color: var(--pink); outline: none; }
-.faq p { margin: 10px 0 2px; color: var(--dim); }
-.shots .row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3ch; }
+.faq details[open] summary .chev { transform: rotate(90deg); color: var(--pink); }
+.faq p {
+  margin: 7px 0 0;
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 20px;
+  color: rgba(255, 255, 255, .54);
+}
+.faq-more {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, .48);
+  padding: 6px 0;
+  transition: color .14s;
+}
+.faq-more:hover { color: var(--pink); }
+
+/* Seamless animated bottom pink gradient (masked at top so zero seam ever) */
+.bottom-band {
+  position: relative;
+  overflow: hidden;
+  padding: 120px 0 36px;
+  background: #000000;
+}
+.bottom-band > .wrap { position: relative; z-index: 2; }
+.bottom-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, .4) 30%, #000 62%);
+  mask-image: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, .4) 30%, #000 62%);
+}
+.bottom-glow i {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(64px);
+  will-change: transform, opacity;
+}
+.bottom-glow .g1 {
+  width: 72%;
+  height: 360px;
+  left: -12%;
+  bottom: -170px;
+  background: radial-gradient(circle, rgba(var(--accent-rgb), .36) 0%, rgba(var(--accent-rgb-2), .18) 48%, transparent 74%);
+  animation: glowDriftA 14s ease-in-out infinite alternate;
+}
+.bottom-glow .g2 {
+  width: 68%;
+  height: 340px;
+  right: -14%;
+  bottom: -165px;
+  background: radial-gradient(circle, rgba(var(--accent-rgb-2), .34) 0%, rgba(var(--accent-rgb), .14) 48%, transparent 74%);
+  animation: glowDriftB 18s ease-in-out infinite alternate;
+}
+.bottom-glow .g3 {
+  width: 54%;
+  height: 280px;
+  left: 23%;
+  bottom: -140px;
+  background: radial-gradient(circle, rgba(var(--accent-rgb), .28) 0%, rgba(var(--accent-rgb-2), .12) 45%, transparent 74%);
+  animation: glowPulse 11s ease-in-out infinite alternate;
+}
+@keyframes glowDriftA {
+  0%   { transform: translate3d(-4%, 14px, 0) scale(1); opacity: .78; }
+  50%  { transform: translate3d(14%, -18px, 0) scale(1.12); opacity: 1; }
+  100% { transform: translate3d(24%, 6px, 0) scale(.96); opacity: .85; }
+}
+@keyframes glowDriftB {
+  0%   { transform: translate3d(6%, -10px, 0) scale(1.06); opacity: .82; }
+  50%  { transform: translate3d(-16%, 12px, 0) scale(.94); opacity: 1; }
+  100% { transform: translate3d(-24%, -16px, 0) scale(1.14); opacity: .76; }
+}
+@keyframes glowPulse {
+  0%   { transform: translate3d(-6%, 8px, 0) scale(.92); opacity: .65; }
+  100% { transform: translate3d(8%, -14px, 0) scale(1.16); opacity: 1; }
+}
+.endcap {
+  text-align: center;
+  padding: 0 0 56px;
+}
+.endcap h2 {
+  margin: 0 0 18px;
+  font-size: clamp(26px, 3.6vw, 36px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: #fff;
+}
+.endcap .cta { justify-content: center; }
+.endcap .btn {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 12px;
+  background: var(--pink);
+  color: var(--on-accent, #000);
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 12px 30px -10px rgba(var(--accent-rgb), .40);
+  transition: opacity .14s;
+}
+.endcap .btn:hover { opacity: .9; }
+
+/* Clean flat footer (no pill box) */
+.foot-card {
+  border-top: 1px solid rgba(255, 255, 255, .10);
+  padding: 20px 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 18px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, .48);
+}
+.foot-card .brand { font: 700 13.5px var(--mono); color: var(--pink); }
+.foot-card .brand span { font-weight: 400; color: rgba(255, 255, 255, .42); margin-left: 6px; font-family: var(--font); font-size: 12px; }
+.foot-card .flinks { display: flex; flex-wrap: wrap; gap: 16px; }
+.foot-card .flinks a { color: rgba(255, 255, 255, .56); transition: color .14s; }
+.foot-card .flinks a:hover { color: #fff; }
+
+/* Lightbox */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 3vh 3vw;
+  background: rgba(0, 0, 0, .92);
+  cursor: zoom-out;
+  opacity: 0;
+  transition: opacity .18s;
+}
+.lightbox.open { opacity: 1; }
+.lightbox img { max-width: 100%; max-height: calc(100% - 36px); width: auto; height: auto; border-radius: 10px; border: 1px solid rgba(255, 255, 255, .10); }
+.lightbox span { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 
 @media (max-width: 860px) {
-  .features { grid-template-columns: 1fr 1fr; }
-  .shots .row3 { grid-template-columns: 1fr; }
-  .faq { grid-template-columns: 1fr; }
+  .titlebar { padding: 0 12px 0 16px; }
+  .wrap, .showcase { padding-left: 16px; padding-right: 16px; }
+  .hero { grid-template-columns: 1fr; padding: 18px 0 20px; gap: 4px; }
+  .hero .art { order: -1; height: 210px; }
+  .hero .note-wrap { width: 118%; height: 118%; margin: -9%; }
+  .stage-pin { top: 52px; padding: 6px 0 14px; }
+  .stage-box { width: min(100%, calc(40vh * 1586 / 993)); }
+  .lyrics-track { padding: 24px 0 44px; gap: 50px; }
+  .sources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sources > div:nth-child(3) { border-left: 0; border-top: 1px solid rgba(255, 255, 255, .10); }
+  .sources > div:nth-child(4) { border-top: 1px solid rgba(255, 255, 255, .10); }
+  .bento { grid-template-columns: 1fr; }
+  .tile:nth-child(1), .tile:nth-child(3) { border-right: 0; }
+  .tile:nth-child(3) { border-bottom: 1px solid rgba(255, 255, 255, .10); }
+  .faq-grid { grid-template-columns: 1fr; gap: 16px; }
 }
-@media (max-width: 560px) {
-  nav .links { gap: 2ch; }
-  nav .links a.opt { display: none; }
-  .features { grid-template-columns: 1fr; }
+@media (prefers-reduced-motion: reduce) {
+  .step { opacity: 1 !important; transform: none !important; }
+  .stage-frame { transform: none !important; }
 }
 </style>
 </head>
 <body>
-<div class="wrap">
-<nav>
-  <a class="brand" href="/">glyph</a>
-  <div class="links">
-    <a class="opt" href="#features">features</a>
-    <a class="opt" href="#faq">faq</a>
-    <a class="opt" href="/plugins">plugins</a>
-    <a class="opt" href="/changelog">changelog</a>
-    <a href="/download">download</a>
-    <a href="https://github.com/glyphmusic/apps">github</a>
-    <a class="login" href="/web/#settings/account">login</a>
+<!--TITLEBAR-->
+
+<aside class="nav" id="menu" aria-label="On this page">
+  <div class="mhead"><!--MBACK--><h2>Glyph</h2><span class="sp"></span></div>
+  <div class="list">
+    <div class="gl">On this page</div>
+    <a class="pg" href="#top"><span class="nm">Overview</span></a>
+    <a class="pg" href="#tour"><span class="nm">Tour</span></a>
+    <a class="pg" href="#features"><span class="nm">Features</span></a>
+    <a class="pg" href="#faq"><span class="nm">Questions</span></a>
+    <div class="gl">Account</div>
+    <a class="pg" href="/web/#settings/account"><span class="nm">Log in</span></a>
+    <a class="pg" href="/web/"><span class="nm">Web player</span></a>
   </div>
-</nav>
+  <!--MSITE-->
+</aside>
 
-<header class="hero">
-  <canvas id="note" aria-label="The Glyph note, drawn in ASCII characters" role="img"></canvas>
-  <h1>every song, one quiet player.</h1>
-  <p class="lead">Glyph searches many legal music sources at once and keeps your library, playlists, lyrics and downloads in one flat, fast app.</p>
-  <div class="cta">
-    <a class="act" id="dl-main" href="/download">download glyph</a>
-    <a class="act alt" href="#features">see what it does</a>
+<main class="page">
+<div class="hero-band">
+  <div class="hero-grid" aria-hidden="true"></div>
+  <div class="wrap">
+    <header class="hero" id="top">
+      <div>
+        <h1>Every song,<br>one quiet player.</h1>
+        <p class="lead">Open-source music player in Rust. Search legal sources at once.</p>
+        <div class="cta">
+          <div class="split">
+            <a id="dl-main" href="/download"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3L12 11.3"/><path fill="currentColor" d="M11.13 14.54L9.07 12.26Q8.2 11.3 9.5 11.3L14.5 11.3Q15.8 11.3 14.93 12.26L12.87 14.54Q12 15.5 11.13 14.54Z"/><path d="M3.5 15.5V17a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-1.5"/></svg><span>Download Glyph</span></a>
+            <button type="button" id="os-btn" aria-label="Choose platform" aria-expanded="false" aria-controls="os-menu"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 9.5L12 15l5.5-5.5"/></svg></button>
+          </div>
+          <div class="os-menu" id="os-menu" hidden>
+            <a href="/download"><span>Windows x64</span><span>.exe</span></a>
+            <a href="/download"><span>macOS Apple silicon &amp; Intel</span><span>.dmg</span></a>
+            <a href="/download"><span>Linux x64 &amp; arm64</span><span>.AppImage</span></a>
+            <a href="/download"><span>Android</span><span>.apk</span></a>
+          </div>
+          <a class="lb" href="/web/"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><ellipse cx="12" cy="12" rx="4" ry="9.5"/><path d="M2.5 12h19"/></svg>Web player</a>
+          <a class="login" href="/web/#settings/account">Log in</a>
+        </div>
+        <div class="meta">Free · MIT / Apache-2.0 · No account needed</div>
+      </div>
+      <div class="art" id="note-wrap">
+        <div class="note-wrap"><canvas id="note" aria-label="The Glyph note, drawn in ASCII characters" role="img"></canvas></div>
+      </div>
+    </header>
   </div>
-  <div class="meta">free · open source · windows, macos, linux</div>
-</header>
-
-<section class="shots" aria-label="Screenshots">
-  <figure><img src="/shots/home.jpg?v=0.12.1" width="1586" height="993" alt="Glyph home: recently played and popular songs, with the player bar" loading="lazy"><figcaption>[ home ] what you played, what is popular</figcaption></figure>
-  <div class="row3">
-    <figure><img src="/shots/lyrics.jpg?v=0.12.1" width="1586" height="993" alt="Now playing with synced lyrics" loading="lazy"><figcaption>[ now playing ] synced lyrics</figcaption></figure>
-    <figure><img src="/shots/search.jpg?v=0.12.1" width="1586" height="993" alt="Search results from several sources" loading="lazy"><figcaption>[ search ] every source, one list</figcaption></figure>
-    <figure><img src="/shots/list.jpg?v=0.12.1" width="1586" height="993" alt="Liked songs list" loading="lazy"><figcaption>[ library ] liked songs and playlists</figcaption></figure>
-  </div>
-</section>
-
-<section id="features">
-  <pre class="rule" data-rule="features"></pre>
-  <div class="features" style="margin-top:24px">
-    <div><h3>search everywhere</h3><p>Audius, Internet Archive, Deezer, Jamendo and more, merged into one list and ranked by your taste.</p></div>
-    <div><h3>synced lyrics</h3><p>Lyrics that follow the song and scroll smoothly as it plays.</p></div>
-    <div><h3>ascii covers</h3><p>Optional ASCII-art covers, drawn from real characters like everything else here.</p></div>
-    <div><h3>sound you control</h3><p>Crossfade, loudness normalisation, a 10-band equaliser and output device choice.</p></div>
-    <div><h3>your library, everywhere</h3><p>An optional @handle account syncs likes, playlists and settings across your devices.</p></div>
-    <div><h3>share in one link</h3><p>Send a playlist as a short glyph.my link; friends paste it into Glyph to add it.</p></div>
-  </div>
-</section>
-
-<section id="faq">
-  <pre class="rule" data-rule="questions"></pre>
-  <div class="faq">
-    <details><summary>Is Glyph free?</summary><p>Yes. The app, the server and every other part are free and open source (MIT / Apache-2.0). There are no ads, no subscriptions and no tracking.</p></details>
-    <details><summary>Where does the music come from?</summary><p>Only from legal, free sources: full songs from open platforms such as Audius, Jamendo and the Internet Archive, official 30-second previews elsewhere, and YouTube or SoundCloud through their own players or your own yt-dlp. Glyph searches them all at once and merges the results into one list.</p></details>
-    <details><summary>Do I need an account?</summary><p>No. Everything works without one and your library stays on your computer. An optional @handle account syncs likes, playlists, settings and listening stats between your devices.</p></details>
-    <details><summary>Which systems does it run on?</summary><p>Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64). Glyph is a native app written in Rust, not a website in a window, so it starts fast and uses little memory.</p></details>
-    <details><summary>Can I listen offline?</summary><p>Yes. Songs from sources that allow it can be downloaded, single songs or whole playlists, and play without internet afterwards.</p></details>
-    <details><summary>Does Glyph collect data about me?</summary><p>No telemetry. Listening statistics are off by default; when you turn them on they are only visible to you and are deleted when you turn them off again.</p></details>
-    <details><summary>Can I run my own server?</summary><p>Yes. The Glyph server runs on your own computer or VPS, in Docker, or on your own Cloudflare account. The glyph CLI sets it up, checks it and lets you change every option; the app just needs its address.</p></details>
-    <details><summary>Can AI assistants control Glyph?</summary><p>Yes, if you want. Glyph includes an MCP server, so assistants such as Claude can play songs, manage the queue and edit playlists. It runs only on your computer, or through the server after you confirm the connection in the app.</p></details>
-    <details><summary>How do I report a bug or ask for a feature?</summary><p>Open an issue on GitHub, or use Settings, Support in the app, which can copy diagnostic info without keys or personal data.</p></details>
-  </div>
-</section>
-
-<section class="dl" id="download">
-  <h2>get glyph</h2>
-  <p>Free and open source. No account needed.</p>
-  <a class="act" id="dl-bottom" href="/download">download glyph</a>
-  <div class="plat"><span>windows x64</span><span>macos apple silicon · intel</span><span>linux x64 · arm64</span></div>
-</section>
-
-<footer>
-  <span>glyph · mit / apache-2.0</span>
-  <span><a href="/changelog">what's new</a> · <a href="https://docs.glyph.my">docs</a> · <a href="https://github.com/glyphmusic/apps">desktop</a> · <a href="https://github.com/glyphmusic/server">server</a></span>
-</footer>
 </div>
 
-<script>
+<section class="showcase" id="tour" aria-label="App tour">
+  <div class="stage-pin">
+    <div class="stage-box">
+      <div class="window-glow" aria-hidden="true"></div>
+      <div class="stage-frame" id="stage-frame">
+        <div class="stage-screen" id="stage-screen" title="Click to enlarge">
+          <img class="on" src="/shots/home.jpg?v=0.12.1" width="1586" height="993" alt="Glyph home: recently played and popular songs, with the player bar" data-label="Home">
+          <img src="/shots/search.jpg?v=0.12.1" width="1586" height="993" alt="Search results from several sources" loading="lazy" data-label="Search">
+          <img src="/shots/lyrics.jpg?v=0.12.1" width="1586" height="993" alt="Now playing with synced lyrics" loading="lazy" data-label="Synced lyrics">
+          <img src="/shots/list.jpg?v=0.12.1" width="1586" height="993" alt="Liked songs list" loading="lazy" data-label="Library">
+        </div>
+      </div>
+    </div>
+    <div class="dots" role="tablist" aria-label="Screenshots">
+      <button type="button" class="on" role="tab" aria-selected="true" aria-label="Home" data-tab="0"></button>
+      <button type="button" role="tab" aria-selected="false" aria-label="Search" data-tab="1"></button>
+      <button type="button" role="tab" aria-selected="false" aria-label="Synced lyrics" data-tab="2"></button>
+      <button type="button" role="tab" aria-selected="false" aria-label="Library" data-tab="3"></button>
+    </div>
+  </div>
+
+  <div class="lyrics-track">
+    <article class="step on" data-step="0">
+      <div class="tag">Home</div>
+      <h2>Your music, nothing else.</h2>
+    </article>
+    <article class="step" data-step="1">
+      <div class="tag">Search</div>
+      <h2>Every source in one list.</h2>
+    </article>
+    <article class="step" data-step="2">
+      <div class="tag">Lyrics</div>
+      <h2>Synced lyrics &amp; ASCII covers.</h2>
+    </article>
+    <article class="step" data-step="3">
+      <div class="tag">Library</div>
+      <h2>Offline, @handle sync &amp; plugins.</h2>
+    </article>
+  </div>
+</section>
+
+<div class="wrap">
+  <section class="sources" aria-label="Music sources">
+    <div><div class="sn">Audius</div><div class="sd">full streams</div></div>
+    <div><div class="sn">Internet Archive</div><div class="sd">open catalog</div></div>
+    <div><div class="sn">Deezer &amp; Jamendo</div><div class="sd">instant merge</div></div>
+    <div><div class="sn">Local &amp; yt-dlp</div><div class="sd">your own files</div></div>
+  </section>
+
+  <section class="bento-sec" id="features" aria-label="Features">
+    <div class="bento-head">
+      <span class="pill-tag">/features</span>
+    </div>
+    <div class="bento">
+      <div class="tile">
+        <div>
+          <h3>Sound you control</h3>
+          <p class="sub">10-band EQ, crossfade &amp; normalisation.</p>
+        </div>
+        <div class="sw-box">
+          <div class="sw-row"><span>Loudness normalisation</span><button type="button" class="sw on" aria-pressed="true" aria-label="Toggle loudness normalisation"></button></div>
+          <div class="sw-row"><span>Crossfade (4 s)</span><button type="button" class="sw on" aria-pressed="true" aria-label="Toggle crossfade"></button></div>
+          <div class="sw-row"><span>ASCII cover art</span><button type="button" class="sw" aria-pressed="false" aria-label="Toggle ASCII cover art"></button></div>
+        </div>
+      </div>
+
+      <div class="tile">
+        <div>
+          <h3>Share in one link</h3>
+          <p class="sub">Friends open it in Glyph or the browser.</p>
+        </div>
+        <div class="share-demo">
+          <div class="link-pill">
+            <span>glyph.my/p/late-night</span>
+            <button type="button" id="copy-demo">Copy</button>
+          </div>
+          <span class="share-meta">Public playlist · instant import</span>
+        </div>
+      </div>
+
+      <div class="tile">
+        <div>
+          <h3>Run your own server</h3>
+          <p class="sub">Self-host on Docker, VPS or Cloudflare.</p>
+        </div>
+        <div class="term" aria-label="Glyph server CLI commands">
+          <div class="term-hd"><i></i><i></i><i></i><span>~/glyph</span></div>
+          <div class="term-bd">
+            <div><span class="p">$</span> npx glyph-server setup</div>
+            <div class="ok">✓ server ready on :8787</div>
+            <div><span class="p">$</span> glyph serve<span class="cur" aria-hidden="true"></span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tile">
+        <div>
+          <h3>Themes, plugins &amp; MCP</h3>
+          <p class="sub">One-click GitHub plugins, optional AI control.</p>
+        </div>
+        <div class="chips">
+          <a class="hi" href="/plugins">Browse plugins</a>
+          <span>Custom themes</span>
+          <span>Last.fm</span>
+          <span>Discord RPC</span>
+          <a href="https://docs.glyph.my">MCP Server</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="faq-sec" id="faq">
+    <div class="faq-grid">
+      <div class="faq-side">
+        <span class="pill-tag">/faq</span>
+        <h2>Questions</h2>
+      </div>
+      <div>
+        <div class="rows faq">
+          <details><summary>Is Glyph free?</summary><p>Yes. The app, the server and every other part are free and open source (MIT / Apache-2.0). There are no ads, no subscriptions and no tracking.</p></details>
+          <details><summary>Where does the music come from?</summary><p>Only from legal, free sources: full songs from open platforms such as Audius, Jamendo and the Internet Archive, official 30-second previews elsewhere, and YouTube or SoundCloud through their own players or your own yt-dlp. Glyph searches them all at once and merges the results into one list.</p></details>
+          <details><summary>Do I need an account?</summary><p>No. Everything works without one and your library stays on your computer. An optional @handle account syncs likes, playlists, settings and listening stats between your devices.</p></details>
+          <details><summary>Can I listen offline?</summary><p>Yes. Songs from sources that allow it can be downloaded, single songs or whole playlists, and play without internet afterwards.</p></details>
+          <details class="extra" hidden><summary>Which systems does it run on?</summary><p>Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64). Glyph is a native app written in Rust, not a website in a window, so it starts fast and uses little memory.</p></details>
+          <details class="extra" hidden><summary>Does Glyph collect data about me?</summary><p>No telemetry. Listening statistics are off by default; when you turn them on they are only visible to you and are deleted when you turn them off again.</p></details>
+          <details class="extra" hidden><summary>Can I run my own server?</summary><p>Yes. The Glyph server runs on your own computer or VPS, in Docker, or on your own Cloudflare account. The glyph CLI sets it up, checks it and lets you change every option; the app just needs its address.</p></details>
+          <details class="extra" hidden><summary>Can AI assistants control Glyph?</summary><p>Yes, if you want. Glyph includes an MCP server, so assistants such as Claude can play songs, manage the queue and edit playlists. It runs only on your computer, or through the server after you confirm the connection in the app.</p></details>
+          <details class="extra" hidden><summary>How do I report a bug or ask for a feature?</summary><p>Open an issue on GitHub, or use Settings, Support in the app, which can copy diagnostic info without keys or personal data.</p></details>
+        </div>
+        <button type="button" class="faq-more" id="faq-more">Show 5 more questions</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="bottom-band">
+  <div class="bottom-glow" aria-hidden="true"><i class="g1"></i><i class="g2"></i><i class="g3"></i></div>
+  <div class="wrap">
+    <section class="endcap">
+      <h2>Get Glyph.</h2>
+      <div class="cta">
+        <a class="btn" id="dl-bottom" href="/download"><span>Download Glyph</span></a>
+        <a class="lb" href="/web/">Web player</a>
+      </div>
+    </section>
+
+    <footer class="foot-card">
+      <div class="brand">glyph<span>MIT / Apache-2.0</span></div>
+      <div class="flinks">
+        <a href="/plugins">Plugins</a>
+        <a href="/changelog">What's new</a>
+        <a href="https://docs.glyph.my">Docs</a>
+        <a href="https://github.com/glyphmusic/apps">App</a>
+        <a href="https://github.com/glyphmusic/server">Server</a>
+      </div>
+    </footer>
+  </div>
+</div>
+</main>
+
+<script>/*MENU*/
 /*NOTE*/
-glyphNote(document.getElementById("note"), Math.min(11, Math.max(7, innerWidth / 110)));
-
-// "-- label ------" filling the column.
-document.querySelectorAll("[data-rule]").forEach(el => {
-  const b = document.createElement("b");
-  b.textContent = el.dataset.rule;
-  el.append("-- ", b, " " + "-".repeat(200));
-});
-
-// Screenshots open almost fullscreen; click or Esc closes.
 (() => {
+  const noteApi = glyphNote(document.getElementById("note"), Math.min(11.5, Math.max(8, innerWidth / 115)));
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Live accent-color switcher (presets + custom color picker, persisted)
+  const PRESETS = [
+    ["Pink", "#ff5fd2"],
+    ["Blue", "#60a5fa"],
+    ["Mint", "#4ade80"],
+    ["Violet", "#a78bfa"],
+    ["Amber", "#fb923c"],
+    ["Mono", "#f2f2f2"],
+  ];
+  const hexToRgb = h => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(h.trim());
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const shiftRgb = ([r, g, b]) => [
+    Math.round(r * 0.72 + b * 0.14),
+    Math.round(g * 0.62 + r * 0.10),
+    Math.round(b * 0.85 + r * 0.12),
+  ];
+  const applyAccent = (hex, save = true) => {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return;
+    const root = document.documentElement.style;
+    root.setProperty("--pink", hex);
+    root.setProperty("--accent-rgb", rgb.join(", "));
+    root.setProperty("--accent-rgb-2", shiftRgb(rgb).join(", "));
+    const luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+    root.setProperty("--on-accent", luma < 128 ? "#fff" : "#000");
+    noteApi.setAccent(hex);
+    document.querySelectorAll(".accent-pop .sw-c").forEach(b => b.classList.toggle("on", b.dataset.c.toLowerCase() === hex.toLowerCase()));
+    const inp = document.getElementById("accent-custom");
+    if (inp) inp.value = hex;
+    if (save) try { localStorage.setItem("glyph.site.accent", hex); } catch {}
+  };
+  const logo = document.querySelector(".titlebar .logo");
+  if (logo) {
+    const wrap = document.createElement("span");
+    wrap.className = "accent-ctl";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "accent-dot";
+    btn.title = "Change accent color";
+    btn.setAttribute("aria-label", "Change accent color");
+    btn.setAttribute("aria-expanded", "false");
+    const pop = document.createElement("div");
+    pop.className = "accent-pop";
+    pop.hidden = true;
+    PRESETS.forEach(([name, c]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "sw-c";
+      b.dataset.c = c;
+      b.style.background = c;
+      b.title = name;
+      b.setAttribute("aria-label", name);
+      b.addEventListener("click", () => applyAccent(c));
+      pop.append(b);
+    });
+    const customWrap = document.createElement("label");
+    customWrap.className = "custom-c";
+    customWrap.title = "Custom color";
+    const inp = document.createElement("input");
+    inp.type = "color";
+    inp.id = "accent-custom";
+    inp.value = "#ff5fd2";
+    inp.setAttribute("aria-label", "Custom accent color");
+    inp.addEventListener("input", () => applyAccent(inp.value));
+    customWrap.append(inp);
+    pop.append(customWrap);
+    const setPop = open => { pop.hidden = !open; btn.setAttribute("aria-expanded", String(open)); };
+    btn.addEventListener("click", e => { e.stopPropagation(); setPop(pop.hidden); });
+    pop.addEventListener("click", e => e.stopPropagation());
+    document.addEventListener("click", () => { if (!pop.hidden) setPop(false); });
+    addEventListener("keydown", e => { if (e.key === "Escape") setPop(false); });
+    wrap.append(btn, pop);
+    const leftGroup = document.createElement("div");
+    leftGroup.style.display = "inline-flex";
+    leftGroup.style.alignItems = "center";
+    logo.before(leftGroup);
+    leftGroup.append(logo, wrap);
+  }
+  try {
+    const saved = localStorage.getItem("glyph.site.accent");
+    applyAccent(saved || "#ff5fd2", false);
+  } catch { applyAccent("#ff5fd2", false); }
+
+  // Split OS dropdown
+  const osBtn = document.getElementById("os-btn");
+  const osMenu = document.getElementById("os-menu");
+  const setOsOpen = open => {
+    osMenu.hidden = !open;
+    osBtn.setAttribute("aria-expanded", String(open));
+  };
+  osBtn.addEventListener("click", e => { e.stopPropagation(); setOsOpen(osMenu.hidden); });
+  document.addEventListener("click", () => { if (!osMenu.hidden) setOsOpen(false); });
+  addEventListener("keydown", e => { if (e.key === "Escape") setOsOpen(false); });
+
+  // Interactive bento toggles & demo copy button
+  document.querySelectorAll(".sw").forEach(btn => btn.addEventListener("click", () => {
+    const on = btn.classList.toggle("on");
+    btn.setAttribute("aria-pressed", String(on));
+  }));
+  const copyBtn = document.getElementById("copy-demo");
+  copyBtn.addEventListener("click", () => {
+    if (navigator.clipboard) navigator.clipboard.writeText("https://glyph.my/p/late-night").catch(() => {});
+    copyBtn.textContent = "Copied";
+    setTimeout(() => { copyBtn.textContent = "Copy"; }, 1400);
+  });
+
+  // Compact FAQ: show more / chevrons
+  const chev = '<span class="chev"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6.5L13.44 10.44Q15 12 13.44 13.56L9.5 17.5"/></svg></span>';
+  document.querySelectorAll(".faq summary").forEach(s => s.insertAdjacentHTML("beforeend", chev));
+  const moreBtn = document.getElementById("faq-more");
+  const extras = [...document.querySelectorAll(".faq details.extra")];
+  moreBtn.addEventListener("click", () => {
+    const show = extras[0].hidden;
+    extras.forEach(d => { d.hidden = !show; });
+    moreBtn.textContent = show ? "Show fewer questions" : "Show 5 more questions";
+  });
+
+  // Sticky Tilt-to-Flat stage + Synced-Lyrics scroll focus
+  const frame = document.getElementById("stage-frame");
+  const screen = document.getElementById("stage-screen");
+  const imgs = [...screen.querySelectorAll("img")];
+  const tabs = [...document.querySelectorAll("[data-tab]")];
+  const steps = [...document.querySelectorAll("[data-step]")];
+  const noteWrap = document.getElementById("note-wrap");
+  const tour = document.getElementById("tour");
+  let active = 0;
+
+  const setActive = idx => {
+    if (idx === active) return;
+    active = idx;
+    imgs.forEach((im, i) => im.classList.toggle("on", i === idx));
+    tabs.forEach((tb, i) => {
+      tb.classList.toggle("on", i === idx);
+      tb.setAttribute("aria-selected", String(i === idx));
+    });
+  };
+
+  const scrollToStep = idx => {
+    setActive(idx);
+    const el = steps[idx];
+    if (!el) return;
+    const target = el.getBoundingClientRect().top + scrollY - innerHeight * 0.78;
+    scrollTo({ top: Math.max(0, target), behavior: reduce ? "auto" : "smooth" });
+  };
+  tabs.forEach((tb, i) => tb.addEventListener("click", () => scrollToStep(i)));
+  steps.forEach((st, i) => st.addEventListener("click", () => scrollToStep(i)));
+
+  let raf = 0;
+  const update = () => {
+    raf = 0;
+    const y = scrollY;
+    const vh = innerHeight || 800;
+
+    const heroProg = Math.min(1, Math.max(0, y / Math.max(260, vh * 0.58)));
+    noteApi.setScroll(heroProg);
+    if (!reduce) {
+      noteWrap.style.transform = `translateY(${(-heroProg * 24).toFixed(1)}px)`;
+      const tr = tour.getBoundingClientRect();
+      const tiltP = Math.min(1, Math.max(0, (vh * 0.62 - tr.top) / (vh * 0.42)));
+      const rx = (1 - tiltP) * 11;
+      const sc = 0.94 + tiltP * 0.06;
+      frame.style.transform = `rotateX(${rx.toFixed(2)}deg) scale(${sc.toFixed(4)})`;
+    }
+
+    const focusY = vh * 0.79;
+    let best = 0, bestDist = Infinity;
+    steps.forEach((el, i) => {
+      const r = el.getBoundingClientRect();
+      const mid = (r.top + r.bottom) / 2;
+      const d = Math.abs(mid - focusY);
+      if (d < bestDist) { bestDist = d; best = i; }
+      if (!reduce) {
+        const focus = Math.max(0, 1 - d / (vh * 0.28));
+        el.style.opacity = (0.20 + focus * 0.80).toFixed(3);
+        el.style.transform = `scale(${(0.955 + focus * 0.045).toFixed(4)})`;
+      }
+      el.classList.toggle("on", i === best);
+    });
+    setActive(best);
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(update); };
+  addEventListener("scroll", schedule, { passive: true });
+  addEventListener("resize", schedule, { passive: true });
+  update();
+
+  // Clicking the active screenshot opens the fullscreen lightbox.
   let box = null;
   const close = () => { if (!box) return; const b = box; box = null; b.classList.remove("open"); setTimeout(() => b.remove(), 180); };
-  document.querySelectorAll(".shots img").forEach(img => img.addEventListener("click", () => {
+  screen.addEventListener("click", () => {
+    const img = imgs[active];
+    if (!img) return;
     box = document.createElement("div");
     box.className = "lightbox";
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-label", img.alt);
     const big = Object.assign(document.createElement("img"), { src: img.src, alt: img.alt });
-    const cap = Object.assign(document.createElement("span"), { textContent: (img.nextElementSibling?.textContent || "") + "  ·  esc to close" });
+    const cap = Object.assign(document.createElement("span"), { textContent: (img.dataset.label || "") + "  ·  Esc to close" });
     box.append(big, cap);
     box.addEventListener("click", close);
     document.body.append(box);
     requestAnimationFrame(() => box && box.classList.add("open"));
-  }));
+  });
   addEventListener("keydown", e => { if (e.key === "Escape") close(); });
-})();
 
-// Name the platform on the download buttons.
-(() => {
+  // Name the platform on the download buttons.
   const ua = navigator.userAgent;
-  const os = /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? "linux" : "";
-  if (os) for (const id of ["dl-main", "dl-bottom"]) document.getElementById(id).textContent = "download for " + os;
+  const os = /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac OS X|Macintosh/.test(ua) ? "macOS" : /Linux|X11/.test(ua) ? "Linux" : "";
+  if (os) {
+    for (const id of ["dl-main", "dl-bottom"]) {
+      const sp = document.querySelector("#" + id + " span");
+      if (sp) sp.textContent = "Download for " + os;
+    }
+  }
 })();
 </script>
 </body>

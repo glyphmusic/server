@@ -152,6 +152,13 @@ pub struct Limits {
     /// Oldest Glyph app version still accepted (`None` = every version).
     #[serde(default)]
     pub min_app_version: Option<String>,
+    /// App release offered on the Stable update channel (`None` = GitHub's
+    /// normal releases decide).
+    #[serde(default)]
+    pub stable_app_version: Option<String>,
+    /// App release offered on the Latest update channel (`None` = newest).
+    #[serde(default)]
+    pub latest_app_version: Option<String>,
 }
 
 impl Default for Limits {
@@ -173,6 +180,8 @@ impl Default for Limits {
             youtube_per_day: config.youtube_per_day,
             youtube_require_account: config.youtube_require_account,
             min_app_version: config.min_app_version,
+            stable_app_version: config.stable_app_version,
+            latest_app_version: config.latest_app_version,
         }
     }
 }
@@ -237,6 +246,9 @@ pub struct AdminAccount {
     /// Whether this account currently has a live account ban.
     #[serde(default)]
     pub banned: bool,
+    /// May use the admin dashboard in the app.
+    #[serde(default)]
+    pub admin: bool,
 }
 
 /// One row of `GET /admin/v1/accounts`.
@@ -253,6 +265,9 @@ pub struct AdminAccountSummary {
     pub sync_bytes: u64,
     #[serde(default)]
     pub banned: bool,
+    /// May use the admin dashboard in the app.
+    #[serde(default)]
+    pub admin: bool,
 }
 
 /// `GET /admin/v1/accounts`.
@@ -387,6 +402,9 @@ pub struct RevokeRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatsResponse {
     pub uptime_s: Option<u64>,
+    /// Space the server uses (`None` when the host cannot measure it).
+    #[serde(default)]
+    pub storage: Option<StorageUsage>,
     /// `None` without an account backend.
     pub accounts: Option<crate::accounts::store::AccountStats>,
     /// Maximum total accounts allowed on this server; 0 = no limit.
@@ -396,4 +414,118 @@ pub struct StatsResponse {
     pub cache: Option<CacheStats>,
     pub companion_enabled: bool,
     pub youtube_per_day: u32,
+}
+
+/// `POST /admin/v1/accounts/<handle>/admin`: give or take the admin role.
+/// Only the server owner (admin password) may call it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminRoleRequest {
+    pub admin: bool,
+}
+
+/// `GET /admin/v1/me`: who is calling and what they may do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminMe {
+    /// Signed in with the admin password: everything is allowed.
+    pub owner: bool,
+    /// The account, when signed in with an admin account from the app.
+    #[serde(default)]
+    pub handle: Option<String>,
+    /// Account admins cannot see keys, run updates or hand out the role.
+    pub keys: bool,
+    pub updates: bool,
+    pub roles: bool,
+}
+
+/// Space the server uses, in bytes. Caps of 0 mean "no limit known".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StorageUsage {
+    /// Cached songs and covers.
+    #[serde(default)]
+    pub audio_bytes: Option<u64>,
+    #[serde(default)]
+    pub audio_files: Option<u64>,
+    #[serde(default)]
+    pub audio_cap_bytes: u64,
+    /// The database (accounts, synced data, settings).
+    #[serde(default)]
+    pub db_bytes: Option<u64>,
+    #[serde(default)]
+    pub db_cap_bytes: u64,
+    /// Synced data of all accounts together.
+    #[serde(default)]
+    pub sync_bytes: Option<u64>,
+}
+
+/// One day of the server's history (taken once a day).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DayStats {
+    /// `YYYY-MM-DD` (UTC).
+    pub day: String,
+    #[serde(default)]
+    pub accounts: u64,
+    #[serde(default)]
+    pub devices: u64,
+    #[serde(default)]
+    pub active_1d: u64,
+    #[serde(default)]
+    pub audio_bytes: u64,
+    #[serde(default)]
+    pub db_bytes: u64,
+    #[serde(default)]
+    pub sync_bytes: u64,
+}
+
+/// `GET /admin/v1/history`: oldest day first, at most [`HISTORY_DAYS`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HistoryResponse {
+    pub days: Vec<DayStats>,
+}
+
+/// Days of history the server keeps.
+pub const HISTORY_DAYS: usize = 90;
+
+/// `YYYY-MM-DD` (UTC) of a time in ms.
+pub fn day_of(ms: u64) -> String {
+    // Civil date from days since 1970 (Howard Hinnant's algorithm).
+    let z = (ms / 86_400_000) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Adds `today` to `days` unless that day is already there; keeps the last
+/// [`HISTORY_DAYS`]. `false` when nothing changed.
+pub fn push_day(days: &mut Vec<DayStats>, today: DayStats) -> bool {
+    if days.last().is_some_and(|d| d.day >= today.day) {
+        return false;
+    }
+    days.push(today);
+    if days.len() > HISTORY_DAYS {
+        let cut = days.len() - HISTORY_DAYS;
+        days.drain(..cut);
+    }
+    true
+}
+
+/// One app release on GitHub (`GET /admin/v1/app-releases`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppRelease {
+    /// Without the leading `v`.
+    pub version: String,
+    /// GitHub's own "pre-release" flag (what Latest gets without a pick).
+    pub prerelease: bool,
+    #[serde(default)]
+    pub published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppReleasesResponse {
+    pub releases: Vec<AppRelease>,
 }
