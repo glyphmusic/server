@@ -220,6 +220,14 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
     }
     config.require_account = secret(env, "REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
     config.youtube_require_account = secret(env, "YOUTUBE_REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false"));
+    if let Some(n) = secret(env, "ACCOUNT_MAX_MB").and_then(|v| v.parse::<u32>().ok()) {
+        config.account_max_mb = n.clamp(1, 10_000);
+    }
+    if let Some(n) = secret(env, "MAX_ACCOUNTS").and_then(|v| v.parse::<u32>().ok()) {
+        config.max_accounts = n.min(1_000_000);
+    }
+    // After a change that breaks older apps: they are asked to update (426).
+    config.min_app_version = secret(env, "MIN_APP_VERSION").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     // Limits saved with `glyph-server remote limits` win over wrangler.toml.
     if let Some(l) = &saved {
         config.require_account = l.require_account;
@@ -232,8 +240,11 @@ fn build_server(env: &Env, saved: Option<Limits>, bans: Arc<BanList>) -> Server 
         config.audio_cache_days = l.audio_cache_days;
         config.audio_cache_max_gb = l.audio_cache_max_gb;
         config.d1_max_mb = l.d1_max_mb;
+        config.account_max_mb = l.account_max_mb;
+        config.max_accounts = l.max_accounts;
         config.youtube_per_day = l.youtube_per_day;
         config.youtube_require_account = l.youtube_require_account;
+        config.min_app_version = l.min_app_version.clone();
     }
     config.bans = bans;
     let commands: Arc<dyn glyph_server_core::CommandRunner> = match (secret(env, "YTDLP_SERVICE_URL"), CompanionCreds::from_env(env, Role::Service)) {
@@ -469,6 +480,21 @@ async fn saved_limits(env: &Env) -> Option<Limits> {
                 }
                 if !object.contains_key("youtube_require_account") {
                     object.insert("youtube_require_account".into(),secret(env, "YOUTUBE_REQUIRE_ACCOUNT").is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")).into());
+                }
+                if !object.contains_key("account_max_mb") {
+                    if let Some(n) = secret(env, "ACCOUNT_MAX_MB").and_then(|v| v.parse::<u32>().ok()) {
+                        object.insert("account_max_mb".into(), n.clamp(1, 10_000).into());
+                    }
+                }
+                if !object.contains_key("max_accounts") {
+                    if let Some(n) = secret(env, "MAX_ACCOUNTS").and_then(|v| v.parse::<u32>().ok()) {
+                        object.insert("max_accounts".into(), n.min(1_000_000).into());
+                    }
+                }
+                if !object.contains_key("min_app_version") {
+                    if let Some(v) = secret(env, "MIN_APP_VERSION").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                        object.insert("min_app_version".into(), v.into());
+                    }
                 }
                 serde_json::from_value::<Limits>(value).ok()
             })();

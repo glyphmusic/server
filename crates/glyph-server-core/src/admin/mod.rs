@@ -50,6 +50,7 @@ enum R {
     RdlpApply,
     AccountDefaultsGet,
     AccountDefaultsPut,
+    AccountsList,
     AccountGet,
     AccountPut,
     AccountRevoke,
@@ -87,6 +88,7 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "bans" => (R::BansGet, Get),
         "bans/remove" => (R::BansRemove, Post),
         "stats" => (R::Stats, Get),
+        "accounts" => (R::AccountsList, Get),
         s if s.starts_with("accounts/") && s.ends_with("/revoke") => (R::AccountRevoke, Post),
         s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
         s if s.starts_with("accounts/") => (R::AccountGet, Get),
@@ -124,9 +126,21 @@ fn limits_of(svc: &Services) -> Limits {
         audio_cache_days: svc.config.audio_cache_days,
         audio_cache_max_gb: svc.config.audio_cache_max_gb,
         d1_max_mb: svc.config.d1_max_mb,
+        account_max_mb: svc.config.account_max_mb,
+        max_accounts: svc.config.max_accounts,
         youtube_per_day: svc.config.youtube_per_day,
         youtube_require_account: svc.config.youtube_require_account,
+        min_app_version: svc.config.min_app_version.clone(),
     }
+}
+
+fn valid_min_app_version(v: &str) -> bool {
+    if v.len() > 32 || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+') {
+        return false;
+    }
+    let core = v.trim_start_matches(['v', 'V']).split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<&str> = core.split('.').collect();
+    (1..=3).contains(&parts.len()) && parts.iter().all(|p| !p.is_empty() && p.parse::<u64>().is_ok())
 }
 
 fn valid_key_value(v: &str) -> bool {
@@ -271,7 +285,19 @@ impl Server {
                 let body: serde_json::Value = parse_body(&req)?;
                 if body.get("require_account").is_none() { l.require_account = svc.config.require_account; }
                 if body.get("playlist_max_tracks").is_none() { l.playlist_max_tracks = svc.config.playlist_max_tracks; }
+                if body.get("account_max_mb").is_none() { l.account_max_mb = svc.config.account_max_mb; }
+                if body.get("max_accounts").is_none() { l.max_accounts = svc.config.max_accounts; }
                 if body.get("youtube_require_account").is_none() { l.youtube_require_account = svc.config.youtube_require_account; }
+                if body.get("min_app_version").is_none() {
+                    l.min_app_version = svc.config.min_app_version.clone();
+                } else {
+                    l.min_app_version = l.min_app_version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+                }
+                if let Some(ref v) = l.min_app_version {
+                    if !valid_min_app_version(v) {
+                        return Err(ApiErr::bad_request("min_app_version must look like a version, e.g. 0.13.0"));
+                    }
+                }
                 if l.require_account && self.accounts.is_none() {
                     return Err(ApiErr::bad_request("require_account needs an enabled account backend"));
                 }
@@ -286,6 +312,12 @@ impl Server {
                 }
                 if !(1..=50_000).contains(&l.playlist_max_tracks) {
                     return Err(ApiErr::bad_request("playlist_max_tracks must be between 1 and 50000"));
+                }
+                if !(1..=10_000).contains(&l.account_max_mb) {
+                    return Err(ApiErr::bad_request("account_max_mb must be between 1 and 10000"));
+                }
+                if l.max_accounts > 1_000_000 {
+                    return Err(ApiErr::bad_request("max_accounts must be between 0 (no limit) and 1000000"));
                 }
                 if !(1..=50).contains(&l.import_max_pages) {
                     return Err(ApiErr::bad_request("import_max_pages must be between 1 and 50"));
@@ -314,8 +346,11 @@ impl Server {
                     c.audio_cache_days = l.audio_cache_days;
                     c.audio_cache_max_gb = l.audio_cache_max_gb;
                     c.d1_max_mb = l.d1_max_mb;
+                    c.account_max_mb = l.account_max_mb;
+                    c.max_accounts = l.max_accounts;
                     c.youtube_per_day = l.youtube_per_day;
                     c.youtube_require_account = l.youtube_require_account;
+                    c.min_app_version = l.min_app_version.clone();
                 });
                 Ok(Response::json(200, &l))
             }
@@ -329,18 +364,24 @@ impl Server {
                 &self.host.companion_update(matches!(route,R::RdlpCheck|R::RdlpApply), matches!(route,R::CompanionApply|R::RdlpApply)).await.map_err(host_err)?)),
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
-            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountGet | R::AccountPut | R::AccountRevoke => {
+            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountsList | R::AccountGet | R::AccountPut | R::AccountRevoke => {
                 let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
                 let handle = sub.strip_prefix("accounts/").unwrap_or("");
                 match route {
                     R::AccountDefaultsGet => Ok(Response::json(200, &acc.admin_defaults().await?)),
                     R::AccountDefaultsPut => Ok(Response::json(200, &acc.admin_set_defaults(&parse_body::<AccountDefaults>(&req)?).await?)),
-                    R::AccountGet => Ok(Response::json(200, &acc.admin_account(handle).await?)),
+                    R::AccountsList => {
+                        let limit = req.query.get("limit").and_then(|v| v.parse::<u32>().ok()).unwrap_or(100).clamp(1, 500);
+                        let offset = req.query.get("offset").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                        let q = req.query.get("q").map(|s| s.trim()).filter(|s| !s.is_empty());
+                        Ok(Response::json(200, &acc.admin_list(limit, offset, q, &svc.config.bans, now).await?))
+                    }
+                    R::AccountGet => Ok(Response::json(200, &acc.admin_account(handle, &svc.config.bans, now).await?)),
                     R::AccountRevoke => {
                         let handle = handle.strip_suffix("/revoke").unwrap_or(handle);
-                        Ok(Response::json(200, &acc.admin_revoke(handle, parse_body::<RevokeRequest>(&req)?.device.as_deref()).await?))
+                        Ok(Response::json(200, &acc.admin_revoke(handle, parse_body::<RevokeRequest>(&req)?.device.as_deref(), &svc.config.bans, now).await?))
                     }
-                    _ => Ok(Response::json(200, &acc.admin_set_limit(handle, parse_body::<AccountLimitRequest>(&req)?.device_limit).await?)),
+                    _ => Ok(Response::json(200, &acc.admin_set_limit(handle, parse_body::<AccountLimitRequest>(&req)?.device_limit, &svc.config.bans, now).await?)),
                 }
             }
             R::BansGet => {
@@ -355,6 +396,7 @@ impl Server {
                 Ok(Response::json(200, &StatsResponse {
                     uptime_s: self.host.uptime_s(),
                     accounts: match &self.accounts { Some(a) => a.admin_stats(now).await, None => None },
+                    max_accounts: svc.config.max_accounts,
                     bans: svc.config.bans.bans.iter().filter(|b| b.live(now)).count(),
                     cache: svc.cache.stats().await,
                     companion_enabled: svc.config.companion_enabled,

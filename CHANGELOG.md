@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.11.6 - 2026-11-20
+
+### Added
+
+- **Oldest working app version (`min_app_version`)**: after a change that breaks older apps, set `MIN_APP_VERSION` (Worker variable), `min_app_version` in `server.toml`, `GLYPH_MIN_APP_VERSION` (native server), or live via `glyph remote limits --min-app-version <ver|none>` / `glyph config set min_app_version <ver> --server <url>`. `/v1/health` names it, and API calls of older Glyph apps (by their `User-Agent`) get `426` with the code `app_outdated`, so apps from this version on show "Update Glyph". Health, pages and the web player stay open; browsers and other clients are not affected.
+- **Account storage limit (`account_max_mb`)**: each account has a total space cap for synced data and pictures (default 50 MB, configurable via admin limits / `--account-max-mb` / `glyph remote accounts storage-limit <mb>` / `ACCOUNT_MAX_MB`), with no separate playlist count cap. `GET /v1/account/storage` reports `{ used_bytes, limit_bytes }`; writes that would exceed the cap return `413` (`account_full`), while deletes always go through.
+- **List accounts and cap total accounts in the CLI**: `GET /admin/v1/accounts` and `glyph remote accounts [list]` (`--search`, `--limit`, `--offset`) list all accounts with device count, sync size, last seen, creation date and ban state; `glyph remote accounts show <handle>` now also reports storage used and ban state. Operators can cap total accounts with `max_accounts` (`glyph remote accounts max-accounts <n>`, `glyph remote limits --max-accounts <n>`, `MAX_ACCOUNTS` / `GLYPH_MAX_ACCOUNTS`, `0` = no limit; sign-ups past the cap get `403 account_limit_reached`). `glyph cloudflare` and `glyph config` now also support `MIN_APP_VERSION`, `ACCOUNT_MAX_MB`, `MAX_ACCOUNTS`, `rdlp_path` and `web_dir`.
+
+### Changed
+
+- **User pictures stored as WebP**: playlist covers and profile pictures saved on the server are stored as WebP (`to_webp`), keeping plain lossy WebP uploads as sent and converting other formats to WebP.
+- **Remote MCP plugin tools**: updated the server's protocol snapshot so AI assistants connected through the server relay can also use the new plugin management tools (`list_plugins`, `browse_plugins`, `install_plugin`, `uninstall_plugin`, `enable_plugin`).
+- **Share links open the web player**: a `/p/<id>` link opened by a person in a browser now goes on to the web player (`/web/p/<id>`) with the list ready to play. Link previews (bots) still get the page with its card, and a server without the web player keeps showing the page. The page no longer tries to open the app by itself; "Open in Glyph" stays as a button.
+- **Album names are remembered for everyone**: when an app asks for a song's album (`/v1/cover`), the server keeps the answer (60 days; "nothing found" 6 hours) and gives it to every app that asks for the same song, without asking Deezer or Spotify again. Album names show up faster, and the server makes far fewer lookups.
 
 ## 0.11.5 - 2026-11-19
 

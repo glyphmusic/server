@@ -151,12 +151,21 @@ pub struct Config {
     pub audio_cache_days: u32,
     pub audio_cache_max_gb: u32,
     pub d1_max_mb: u32,
+    /// Space one account may use on this server (synced data and pictures), in MB.
+    pub account_max_mb: u32,
+    /// Maximum total accounts allowed on this server; 0 = no limit.
+    pub max_accounts: u32,
     pub audius_app_name: String,
     /// Argon2id PHC hash of the admin password. `None` = admin API disabled.
     pub admin_password_hash: Option<String>,
     /// Origin of short playlist links (`https://glyph.my` -> `https://glyph.my/p/<id>`).
     /// `None` = links point at the host the request came in on.
     pub share_origin: Option<String>,
+    /// Oldest app version that still works with this server (`"0.13.0"`),
+    /// set after a change that breaks older apps. Those apps are told to
+    /// update (`/v1/health`) and their other API calls get 426. `None` =
+    /// every version.
+    pub min_app_version: Option<String>,
 }
 
 impl Config {
@@ -181,9 +190,12 @@ impl Config {
             audio_cache_days: 15,
             audio_cache_max_gb: 10,
             d1_max_mb: 500,
+            account_max_mb: 50,
+            max_accounts: 0,
             audius_app_name: "glyph".to_string(),
             admin_password_hash: None,
             share_origin: None,
+            min_app_version: None,
         }
     }
 

@@ -199,6 +199,7 @@ impl Accounts {
                 let (handle, user_id) = if login.link {
                     (login.pending_handle.clone().unwrap_or_default(), login.pending_user_id.clone().unwrap_or_default())
                 } else {
+                    self.check_account_cap(svc).await?;
                     let handle = normalize_handle(&r.handle).map_err(|why| ApiErr::new(400, &format!("handle_{why}"), "this handle cannot be used"))?;
                     if !self.store.handle_free(&handle, now).await.map_err(store_err)? {
                         return Err(ApiErr::new(409, "handle_taken", "this handle is taken"));
@@ -242,6 +243,7 @@ impl Accounts {
                     self.store.delete_login(&login.id).await.map_err(store_err)?;
                     return Ok(Response::json(200, &serde_json::json!({ "handle": handle, "linked": true })));
                 }
+                self.check_account_cap(svc).await?;
                 let recovery = self.recovery_code();
                 let user = self.blank_user(user_id, handle, &recovery, now).await?;
                 if !self.store.create_user(&user, Some(&pk), now).await.map_err(store_err)? {
@@ -384,6 +386,7 @@ impl Accounts {
                 let key = decode_exact(&r.key, glyph_protocol::password_kdf::KEY_LEN, "key")?;
                 if path.ends_with("password_register") {
                     self.limit(svc, &format!("acct-signup:{ip}"), 5, 3600).await?;
+                    self.check_account_cap(svc).await?;
                     let handle = normalize_handle(&r.handle).map_err(|why| ApiErr::new(400, &format!("handle_{why}"), "this handle cannot be used"))?;
                     let salt = decode_exact(r.salt.as_deref().unwrap_or_default(), glyph_protocol::password_kdf::SALT_LEN, "salt")?;
                     let recovery = self.recovery_code();
@@ -406,6 +409,7 @@ impl Accounts {
             }
             ("/v1/account/password/register", Method::Post) => {
                 self.limit(svc, &format!("acct-signup:{ip}"), 5, 3600).await?;
+                self.check_account_cap(svc).await?;
                 let r: PasswordRegisterRequest = json_body(req, 4096)?;
                 let handle = normalize_handle(&r.handle).map_err(|why| ApiErr::new(400, &format!("handle_{why}"), "this handle cannot be used"))?;
                 let salt = decode_exact(&r.salt, glyph_protocol::password_kdf::SALT_LEN, "salt")?;
@@ -489,6 +493,11 @@ impl Accounts {
                 let a = self.auth(svc, req).await?;
                 Ok(Response::json(200, &account_of(&a.user)))
             }
+            ("/v1/account/storage", Method::Get) => {
+                let a = self.auth(svc, req).await?;
+                let used = self.used_bytes(&a.user.id).await?;
+                Ok(Response::json(200, &serde_json::json!({ "used_bytes": used, "limit_bytes": account_limit(svc) })))
+            }
             ("/v1/account", Method::Patch) => {
                 let a = self.auth(svc, req).await?;
                 let p: AccountPatch = json_body(req, 4096)?;
@@ -568,6 +577,20 @@ impl Accounts {
                         deleted: i.deleted,
                         rev: i.rev,
                     });
+                }
+                // The whole account has a size limit (however many playlists): a push that
+                // grows it past the limit is refused, one that shrinks it always goes through.
+                let incoming: u64 = items.iter().map(|i| i.value.as_ref().map_or(0, |v| v.len() as u64)).sum();
+                if incoming > 0 {
+                    let keys: Vec<(String, String)> = items.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
+                    let replaced: u64 = self.store.items(&a.user.id, &keys).await.map_err(store_err)?
+                        .iter().filter(|i| !i.deleted).map(|i| i.value.as_ref().map_or(0, |v| v.len() as u64)).sum();
+                    if incoming > replaced {
+                        let used = self.used_bytes(&a.user.id).await?;
+                        if used.saturating_sub(replaced) + incoming > account_limit(svc) {
+                            return Err(account_full());
+                        }
+                    }
                 }
                 self.store.purge_tombstones(&a.user.id, now.saturating_sub(TOMBSTONE_TTL)).await.map_err(store_err)?;
                 let (accepted, rev) = self.store.push_items(&a.user.id, &items).await.map_err(store_err)?;
@@ -655,8 +678,15 @@ impl Accounts {
                 if hex(&Sha256::digest(&req.body)) != name {
                     return Err(ApiErr::bad_request("sha256 does not match"));
                 }
-                let ct = sniff_image(&req.body).ok_or_else(|| ApiErr::bad_request("JPEG, PNG, WebP or GIF only"))?;
-                blobs.put(&key, req.body.clone(), ct).await.map_err(store_err)?;
+                sniff_image(&req.body).ok_or_else(|| ApiErr::bad_request("JPEG, PNG, WebP or GIF only"))?;
+                // Stored as WebP under the name the app gave it (the hash of what it sent).
+                let webp = to_webp(&req.body, 512, 512, MAX_OWN_COVER)?;
+                if blobs.get(&key).await.map_err(store_err)?.is_none()
+                    && self.used_bytes(&a.user.id).await? + webp.len() as u64 > account_limit(svc)
+                {
+                    return Err(account_full());
+                }
+                blobs.put(&key, webp, "image/webp").await.map_err(store_err)?;
                 Ok(Response::json(200, &serde_json::json!({})))
             }
             Method::Get => {
@@ -667,6 +697,16 @@ impl Accounts {
         }
     }
 
+    /// Space the account uses: synced data plus its pictures on this server.
+    pub(super) async fn used_bytes(&self, user_id: &str) -> Result<u64, ApiErr> {
+        let items = self.store.item_bytes(user_id).await.map_err(store_err)?;
+        let pictures = match &self.blobs {
+            Some(b) => b.prefix_bytes(&format!("users/{user_id}/")).await.map_err(store_err)?,
+            None => 0,
+        };
+        Ok(items + pictures)
+    }
+
     /// Resolve a live, unexpired `link` session issued for browser security actions.
     async fn link_login(&self, svc: &Arc<Services>, login_id: &str) -> Result<(Login, User), ApiErr> {
         let login = self.pending(svc, login_id).await?;
@@ -674,4 +714,9 @@ impl Accounts {
         let user = self.store.user(user_id).await.map_err(store_err)?.ok_or_else(unauthorized)?;
         Ok((login, user))
     }
+}
+
+/// Space one account may use, in bytes (`account_max_mb`, decimal MB).
+pub(super) fn account_limit(svc: &Services) -> u64 {
+    u64::from(svc.config.account_max_mb) * 1_000_000
 }

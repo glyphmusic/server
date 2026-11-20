@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use glyph_server_core::accounts::store::{
     AccountStats, AccountStore, BlobStore, Device, Item, Login, Passkey, Profile, Share, StoreError, StoreResult, User,
+    UserSummary,
 };
 use glyph_server_core::accounts::Entropy;
 use serde::de::DeserializeOwned;
@@ -500,6 +501,96 @@ impl AccountStore for D1Store {
         Ok(row)
     }
 
+    async fn user_count(&self) -> StoreResult<u64> {
+        #[derive(Deserialize)]
+        struct C {
+            c: u64,
+        }
+        Ok(self.first::<C>("SELECT COUNT(*) AS c FROM users", &[]).await?.map_or(0, |r| r.c))
+    }
+
+    async fn list_users(&self, limit: u32, offset: u32, query: Option<&str>) -> StoreResult<(Vec<UserSummary>, u64)> {
+        #[derive(Deserialize)]
+        struct C {
+            c: u64,
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            handle: String,
+            created_at: u64,
+            device_limit: u8,
+            device_limit_set: u8,
+            devices: u64,
+            last_seen: Option<u64>,
+            sync_bytes: Option<f64>,
+        }
+        let q = query
+            .map(|v| v.trim().trim_start_matches('@').to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        let select_cols = "u.id, u.handle, u.created_at,
+            COALESCE(NULLIF(u.device_limit, 0), (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_device_limit'), 5) AS device_limit,
+            u.device_limit AS device_limit_set,
+            (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS devices,
+            (SELECT MAX(d.last_seen) FROM devices d WHERE d.user_id = u.id) AS last_seen,
+            (SELECT SUM(LENGTH(CAST(si.value AS BLOB))) FROM sync_items si WHERE si.user_id = u.id AND si.deleted = 0) AS sync_bytes";
+        let (count_stmt, list_stmt) = match q {
+            Some(needle) => {
+                let escaped = needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let pattern = format!("%{escaped}%");
+                (
+                    self.stmt("SELECT COUNT(*) AS c FROM users WHERE handle LIKE ?1 ESCAPE '\\'", &[s(&pattern)])?,
+                    self.stmt(
+                        &format!("SELECT {select_cols} FROM users u WHERE u.handle LIKE ?1 ESCAPE '\\' ORDER BY u.created_at DESC, u.id ASC LIMIT ?2 OFFSET ?3"),
+                        &[s(&pattern), n(limit as u64), n(offset as u64)],
+                    )?,
+                )
+            }
+            None => (
+                self.stmt("SELECT COUNT(*) AS c FROM users", &[])?,
+                self.stmt(
+                    &format!("SELECT {select_cols} FROM users u ORDER BY u.created_at DESC, u.id ASC LIMIT ?1 OFFSET ?2"),
+                    &[n(limit as u64), n(offset as u64)],
+                )?,
+            ),
+        };
+        let results = self.db.batch(vec![count_stmt, list_stmt]).await.map_err(err)?;
+        let total = results
+            .first()
+            .and_then(|r| r.results::<C>().ok())
+            .and_then(|mut v| v.pop())
+            .map_or(0, |r| r.c);
+        let rows: Vec<Row> = results
+            .get(1)
+            .map(|r| r.results::<Row>())
+            .transpose()
+            .map_err(err)?
+            .unwrap_or_default();
+        let out = rows
+            .into_iter()
+            .map(|r| UserSummary {
+                id: r.id,
+                handle: r.handle,
+                created_at: r.created_at,
+                device_limit: r.device_limit,
+                device_limit_set: r.device_limit_set,
+                devices: r.devices,
+                last_seen: r.last_seen,
+                sync_bytes: r.sync_bytes.unwrap_or(0.0) as u64,
+            })
+            .collect();
+        Ok((out, total))
+    }
+
+    async fn item_bytes(&self, user_id: &str) -> StoreResult<u64> {
+        #[derive(Deserialize)]
+        struct B {
+            b: Option<f64>,
+        }
+        let row = self.first::<B>("SELECT SUM(LENGTH(CAST(value AS BLOB))) AS b FROM sync_items WHERE user_id = ?1 AND deleted = 0", &[s(user_id)]).await?;
+        Ok(row.and_then(|r| r.b).unwrap_or(0.0) as u64)
+    }
+
     async fn push_items(&self, user_id: &str, items: &[Item]) -> StoreResult<(Vec<bool>, u64)> {
         let count = items.len() as u64;
         let payload: Vec<serde_json::Value> = items
@@ -774,6 +865,23 @@ impl BlobStore for R2Blobs {
             }
         }
     }
+
+    async fn prefix_bytes(&self, prefix: &str) -> StoreResult<u64> {
+        let mut total = 0u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut q = self.bucket.list().prefix(prefix).limit(1000);
+            if let Some(c) = cursor.take() {
+                q = q.cursor(c);
+            }
+            let list = q.execute().await.map_err(err)?;
+            total += list.objects().iter().map(|o| o.size() as u64).sum::<u64>();
+            match (list.truncated(), list.cursor()) {
+                (true, Some(c)) => cursor = Some(c),
+                _ => return Ok(total),
+            }
+        }
+    }
 }
 
 pub struct R2CacheBlobs {
@@ -814,6 +922,23 @@ impl BlobStore for R2CacheBlobs {
             }
             if !list.truncated() {
                 return Ok(());
+            }
+        }
+    }
+
+    async fn prefix_bytes(&self, prefix: &str) -> StoreResult<u64> {
+        let mut total = 0u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut q = self.bucket.list().prefix(prefix).limit(1000);
+            if let Some(c) = cursor.take() {
+                q = q.cursor(c);
+            }
+            let list = q.execute().await.map_err(err)?;
+            total += list.objects().iter().map(|o| o.size() as u64).sum::<u64>();
+            match (list.truncated(), list.cursor()) {
+                (true, Some(c)) => cursor = Some(c),
+                _ => return Ok(total),
             }
         }
     }

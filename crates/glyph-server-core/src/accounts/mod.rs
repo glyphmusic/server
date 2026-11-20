@@ -180,6 +180,59 @@ fn is_sha256_hex(s: &str) -> bool {
 }
 
 /// JPEG, PNG, WebP or GIF by magic bytes.
+/// Every picture an account stores is WebP. Apps send small lossy WebP; one
+/// in the plain format (a single VP8 frame: no metadata, animation or extra
+/// bytes) that fits is kept as sent. Anything else is decoded with bounded
+/// resources and written again as our own WebP, smaller until it fits.
+pub fn to_webp(bytes: &[u8], max_w: u32, max_h: u32, max_bytes: usize) -> Result<Vec<u8>, ApiErr> {
+    let invalid = || ApiErr::bad_request("invalid or oversized image");
+    let mut reader = ::image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|_| invalid())?;
+    let format = reader.format();
+    if !matches!(format, Some(::image::ImageFormat::Png | ::image::ImageFormat::Jpeg | ::image::ImageFormat::WebP | ::image::ImageFormat::Gif)) {
+        return Err(invalid());
+    }
+    let mut limits = ::image::Limits::default();
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| invalid())?;
+    if plain_webp(bytes) && decoded.width() <= max_w && decoded.height() <= max_h && bytes.len() <= max_bytes {
+        return Ok(bytes.to_vec());
+    }
+    let mut picture = decoded.thumbnail(max_w, max_h);
+    loop {
+        let rgba = picture.to_rgba8();
+        let mut output = Vec::new();
+        ::image::codecs::webp::WebPEncoder::new_lossless(&mut output)
+            .encode(&rgba, rgba.width(), rgba.height(), ::image::ExtendedColorType::Rgba8)
+            .map_err(|_| invalid())?;
+        if output.len() <= max_bytes {
+            return Ok(output);
+        }
+        if picture.width().max(picture.height()) <= 64 {
+            return Err(invalid());
+        }
+        picture = picture.thumbnail((picture.width() * 3 / 4).max(1), (picture.height() * 3 / 4).max(1));
+    }
+}
+
+/// `RIFF <size> WEBP VP8 ` with the RIFF size covering exactly the file: one
+/// lossy frame and nothing else (no EXIF/XMP, no animation, nothing appended).
+fn plain_webp(b: &[u8]) -> bool {
+    if b.len() <= 20 || &b[..4] != b"RIFF" || &b[8..16] != b"WEBPVP8 " {
+        return false;
+    }
+    let riff = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+    let frame = u32::from_le_bytes([b[16], b[17], b[18], b[19]]) as usize;
+    riff + 8 == b.len() && 20 + frame + (frame & 1) == b.len()
+}
+
+/// The account has used all the space the server gives it.
+pub fn account_full() -> ApiErr {
+    ApiErr::new(413, "account_full", "this account is full; delete playlists or pictures to make room")
+}
+
 pub fn sniff_image(b: &[u8]) -> Option<&'static str> {
     if b.starts_with(&[0xff, 0xd8, 0xff]) {
         Some("image/jpeg")
@@ -546,11 +599,64 @@ impl Accounts {
         self.admin_defaults().await
     }
 
-    pub async fn admin_account(&self, handle: &str) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+    pub(super) async fn check_account_cap(&self, svc: &Services) -> Result<(), ApiErr> {
+        if svc.config.max_accounts == 0 {
+            return Ok(());
+        }
+        if self.store.user_count().await.map_err(store_err)? >= u64::from(svc.config.max_accounts) {
+            return Err(ApiErr::new(
+                403,
+                "account_limit_reached",
+                "this server is not accepting new accounts right now",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn admin_list(
+        &self,
+        limit: u32,
+        offset: u32,
+        query: Option<&str>,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccountsResponse, ApiErr> {
+        use crate::admin::types::{AdminAccountSummary, AdminAccountsResponse};
+        use crate::bans::BanKind;
+        let (rows, total) = self.store.list_users(limit, offset, query).await.map_err(store_err)?;
+        let accounts = rows
+            .into_iter()
+            .map(|u| {
+                let banned = bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == u.id && b.live(now));
+                AdminAccountSummary {
+                    id: u.id,
+                    handle: u.handle,
+                    created_at: u.created_at,
+                    device_limit: u.device_limit,
+                    device_limit_set: (u.device_limit_set > 0).then_some(u.device_limit_set),
+                    devices: u.devices,
+                    last_seen: u.last_seen,
+                    sync_bytes: u.sync_bytes,
+                    banned,
+                }
+            })
+            .collect();
+        Ok(AdminAccountsResponse { accounts, total, limit, offset })
+    }
+
+    pub async fn admin_account(
+        &self,
+        handle: &str,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccount, ApiErr> {
         use crate::admin::types::{AdminAccount, AdminDevice};
+        use crate::bans::BanKind;
         let handle = normalize_handle(handle).map_err(|_| ApiErr::not_found("no such account"))?;
         let u = self.store.user_by_handle(&handle).await.map_err(store_err)?.ok_or_else(|| ApiErr::not_found("no such account"))?;
         let devices = self.store.devices(&u.id).await.map_err(store_err)?;
+        let used_bytes = self.used_bytes(&u.id).await?;
+        let banned = bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == u.id && b.live(now));
         Ok(AdminAccount {
             id: u.id,
             handle: u.handle,
@@ -558,6 +664,8 @@ impl Accounts {
             device_limit: u.device_limit,
             device_limit_set: (u.device_limit_set > 0).then_some(u.device_limit_set),
             devices: devices.into_iter().map(|d| AdminDevice { id: d.id, name: d.name, platform: d.platform, last_seen: d.last_seen, hardware: d.hw_hash, ip_known: d.ip_hash.is_some() }).collect(),
+            used_bytes,
+            banned,
         })
     }
 
@@ -571,7 +679,13 @@ impl Accounts {
 
     /// Signs out one device (or all with `None`); they can sign in again
     /// unless banned.
-    pub async fn admin_revoke(&self, handle: &str, device: Option<&str>) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+    pub async fn admin_revoke(
+        &self,
+        handle: &str,
+        device: Option<&str>,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccount, ApiErr> {
         let (u, devices) = self.admin_devices(handle).await?;
         let mut removed = 0;
         for d in devices.iter().filter(|d| device.is_none_or(|id| id == d.id)) {
@@ -580,7 +694,7 @@ impl Accounts {
         if removed == 0 && device.is_some() {
             return Err(ApiErr::not_found("no such device on this account (see glyph remote accounts show)"));
         }
-        self.admin_account(handle).await
+        self.admin_account(handle, bans, now).await
     }
 
     pub async fn admin_stats(&self, now: u64) -> Option<store::AccountStats> {
@@ -588,13 +702,19 @@ impl Accounts {
     }
 
     /// Existing devices beyond a lowered limit stay signed in; no new ones until below it.
-    pub async fn admin_set_limit(&self, handle: &str, limit: Option<u8>) -> Result<crate::admin::types::AdminAccount, ApiErr> {
-        let id = self.admin_account(handle).await?.id;
+    pub async fn admin_set_limit(
+        &self,
+        handle: &str,
+        limit: Option<u8>,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+        let id = self.admin_account(handle, bans, now).await?.id;
         let raw = match limit {
             Some(l) => Self::check_limit(l)?,
             None => 0,
         };
         self.store.set_device_limit(&id, raw).await.map_err(store_err)?;
-        self.admin_account(handle).await
+        self.admin_account(handle, bans, now).await
     }
 }

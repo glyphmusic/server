@@ -35,12 +35,19 @@ test('cloudflare options edit wrangler.json vars, domains and secrets without le
   try {
     configure(file,'set','rate_limit_per_min','120',{run,log});
     configure(file,'set','REQUIRE_ACCOUNT','true',{run,log});
+    configure(file,'set','ACCOUNT_MAX_MB','100',{run,log});
+    configure(file,'set','MAX_ACCOUNTS','250',{run,log});
+    configure(file,'set','MIN_APP_VERSION','0.13.0',{run,log});
     assert.throws(()=>configure(file,'set','RATE_LIMIT_PER_MIN','fast',{run,log}),/invalid value/);
+    assert.throws(()=>configure(file,'set','ACCOUNT_MAX_MB','0',{run,log}),/invalid value/);
+    assert.throws(()=>configure(file,'set','MIN_APP_VERSION','not a version',{run,log}),/invalid value/);
     assert.throws(()=>configure(file,'set','LASTFM_API_KEY','x',{run,log}),/is a secret/);
     assert.throws(()=>configure(file,'set','PUBLIC_ORIGIN','http://insecure.example',{run,log}),/invalid value/);
     configure(file,'domain','Glyph.Example.com',{run,log});
     const config=JSON.parse(fs.readFileSync(file));
     assert.equal(config.vars.RATE_LIMIT_PER_MIN,'120');assert.equal(config.vars.REQUIRE_ACCOUNT,'true');
+    assert.equal(config.vars.ACCOUNT_MAX_MB,'100');assert.equal(config.vars.MAX_ACCOUNTS,'250');
+    assert.equal(config.vars.MIN_APP_VERSION,'0.13.0');
     assert.equal(config.vars.PUBLIC_ORIGIN,'https://glyph.example.com');
     assert.deepEqual(config.routes,[{pattern:'glyph.example.com',custom_domain:true}]);
     assert.throws(()=>configure(file,'domain','https://x.example/path',{run,log}));

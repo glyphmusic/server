@@ -380,7 +380,121 @@ fn limits_get_set_and_validate() {
     assert_eq!(t.server.services().config.playlist_max_tracks, 8000);
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", separate, tok)).0, 200);
     assert_eq!(t.server.services().config.playlist_max_tracks, 8000, "older admin clients must preserve the operator's cap");
+    // max_accounts and min_app_version live updates & preservation
+    let with_caps = separate.replace("\"import_max_pages\":3", "\"import_max_pages\":3,\"max_accounts\":250,\"min_app_version\":\"0.13.0\"");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &with_caps, tok)).0, 200);
+    assert_eq!(t.server.services().config.max_accounts, 250);
+    assert_eq!(t.server.services().config.min_app_version.as_deref(), Some("0.13.0"));
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", separate, tok)).0, 200);
+    assert_eq!(t.server.services().config.max_accounts, 250, "older clients preserve max_accounts");
+    assert_eq!(t.server.services().config.min_app_version.as_deref(), Some("0.13.0"), "older clients preserve min_app_version");
+    let bad_ver = separate.replace("\"import_max_pages\":3", "\"import_max_pages\":3,\"min_app_version\":\"not a version\"");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &bad_ver, tok)).0, 400);
+    let clear_ver = separate.replace("\"import_max_pages\":3", "\"import_max_pages\":3,\"min_app_version\":null");
+    assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &clear_ver, tok)).0, 200);
+    assert_eq!(t.server.services().config.min_app_version, None);
+}
 
+#[test]
+fn accounts_list_and_max_accounts_cap() {
+    use crate::accounts::store::{AccountStore, Device, Item, MemStore, User};
+    let mut t = setup(true, TestHost::default());
+    let store = Arc::new(MemStore::default());
+    struct Entropy;
+    impl crate::accounts::Entropy for Entropy {
+        fn fill(&self, bytes: &mut [u8]) { bytes.fill(7); }
+    }
+    t.server = t.server.with_accounts(crate::accounts::Accounts {
+        store: store.clone(),
+        blobs: None,
+        cache_blobs: None,
+        entropy: Arc::new(Entropy),
+        origin: "https://glyph.example".into(),
+        extra_origins: vec![],
+        rp_id: None,
+        push: None,
+    });
+    t.server.update_config(|c| c.bans = Arc::new(crate::bans::BanList { salt: "s".into(), bans: vec![] }));
+    let pair = login(&t);
+    let tok = Some(pair.access_token.as_str());
+
+    let mk_user = |id: &str, handle: &str, created_at: u64| User {
+        id: id.into(),
+        handle: handle.into(),
+        created_at,
+        device_limit: 5,
+        device_limit_set: 0,
+        rev: 0,
+        purged_rev: 0,
+        recovery_hash: "r".into(),
+        handle_changed_at: 0,
+        pw_salt: None,
+        pw_hash: None,
+    };
+    assert!(block_on(store.create_user(&mk_user("u_1", "alice", 1000), None, 1000)).unwrap());
+    assert!(block_on(store.create_user(&mk_user("u_2", "bob_music", 2000), None, 2000)).unwrap());
+    assert!(block_on(store.create_user(&mk_user("u_3", "charlie", 3000), None, 3000)).unwrap());
+    block_on(store.put_device(&Device {
+        approximate_location: None,
+        id: "d_1".into(),
+        user_id: "u_2".into(),
+        name: "Phone".into(),
+        platform: "android".into(),
+        created_at: 2000,
+        last_seen: 9000,
+        access_hash: "ah".into(),
+        access_exp: 99_999,
+        refresh_hash: "rh".into(),
+        refresh_exp: 99_999,
+        ip_hash: None,
+        hw_hash: None,
+    }))
+    .unwrap();
+    block_on(store.push_items("u_2", &[Item {
+        kind: "playlist".into(),
+        key: "p1".into(),
+        value: Some(r#"{"tracks":[]}"#.into()),
+        updated_at: 2500,
+        device_id: "d_1".into(),
+        deleted: false,
+        rev: 0,
+    }]))
+    .unwrap();
+
+    // Ban charlie to verify banned status surfaces in list and show.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/bans", r#"{"target":"account","value":"charlie","no_ip":true,"no_hardware":true}"#, tok)).0, 200);
+
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/accounts?limit=2&offset=0", "", tok));
+    assert_eq!(s, 200, "{v}");
+    let list: AdminAccountsResponse = serde_json::from_value(v).unwrap();
+    assert_eq!((list.total, list.accounts.len()), (3, 2));
+    assert_eq!(list.accounts[0].handle, "charlie");
+    assert!(list.accounts[0].banned);
+    assert_eq!(list.accounts[1].handle, "bob_music");
+    assert_eq!((list.accounts[1].devices, list.accounts[1].last_seen, list.accounts[1].sync_bytes), (1, Some(9000), 13));
+
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/accounts?q=bob", "", tok));
+    assert_eq!(s, 200);
+    let filtered: AdminAccountsResponse = serde_json::from_value(v).unwrap();
+    assert_eq!((filtered.total, filtered.accounts.len()), (1, 1));
+    assert_eq!(filtered.accounts[0].handle, "bob_music");
+
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/accounts/bob_music", "", tok));
+    assert_eq!(s, 200);
+    let show: AdminAccount = serde_json::from_value(v).unwrap();
+    assert_eq!((show.used_bytes, show.banned), (13, false));
+
+    // Cap at 3 accounts -> registration refused with 403 account_limit_reached.
+    t.server.update_config(|c| c.max_accounts = 3);
+    let salt = "AAAAAAAAAAAAAAAAAAAAAA";
+    let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let signup_body = format!(r#"{{"handle":"dave","salt":"{salt}","key":"{key}","device_name":"PC","platform":"windows"}}"#);
+    let (s, v, _) = call(&t, req(Method::Post, "/v1/account/password/register", &signup_body, None));
+    assert_eq!((s, v["code"].as_str()), (403, Some("account_limit_reached")));
+    // Raising the cap allows signup again.
+    t.server.update_config(|c| c.max_accounts = 4);
+    let (s, _, _) = call(&t, req(Method::Post, "/v1/account/password/register", &signup_body, None));
+    assert_eq!(s, 200);
 }
 
 #[test]

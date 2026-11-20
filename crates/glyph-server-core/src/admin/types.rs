@@ -137,12 +137,21 @@ pub struct Limits {
     /// Independent D1 database ceiling in decimal MB (Worker only).
     #[serde(default = "d1_mb")]
     pub d1_max_mb: u32,
+    /// Space one account may use (synced data and pictures), in MB.
+    #[serde(default = "account_mb")]
+    pub account_max_mb: u32,
+    /// Maximum total accounts allowed on this server; 0 = no limit.
+    #[serde(default)]
+    pub max_accounts: u32,
     /// YouTube songs per account or address and day; 0 = no limit.
     #[serde(default)]
     pub youtube_per_day: u32,
     /// YouTube audio and downloads only for signed-in accounts.
     #[serde(default)]
     pub youtube_require_account: bool,
+    /// Oldest Glyph app version still accepted (`None` = every version).
+    #[serde(default)]
+    pub min_app_version: Option<String>,
 }
 
 impl Default for Limits {
@@ -159,8 +168,11 @@ impl Default for Limits {
             audio_cache_days: config.audio_cache_days,
             audio_cache_max_gb: config.audio_cache_max_gb,
             d1_max_mb: config.d1_max_mb,
+            account_max_mb: config.account_max_mb,
+            max_accounts: config.max_accounts,
             youtube_per_day: config.youtube_per_day,
             youtube_require_account: config.youtube_require_account,
+            min_app_version: config.min_app_version,
         }
     }
 }
@@ -219,6 +231,37 @@ pub struct AdminAccount {
     /// Own limit; `None` = server default.
     pub device_limit_set: Option<u8>,
     pub devices: Vec<AdminDevice>,
+    /// Space used by this account (synced data and pictures), in bytes.
+    #[serde(default)]
+    pub used_bytes: u64,
+    /// Whether this account currently has a live account ban.
+    #[serde(default)]
+    pub banned: bool,
+}
+
+/// One row of `GET /admin/v1/accounts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminAccountSummary {
+    pub id: String,
+    pub handle: String,
+    pub created_at: u64,
+    pub device_limit: u8,
+    pub device_limit_set: Option<u8>,
+    pub devices: u64,
+    pub last_seen: Option<u64>,
+    /// Space used by live synced data, in bytes.
+    pub sync_bytes: u64,
+    #[serde(default)]
+    pub banned: bool,
+}
+
+/// `GET /admin/v1/accounts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminAccountsResponse {
+    pub accounts: Vec<AdminAccountSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -270,6 +313,7 @@ pub struct MaintenanceResponse {
 }
 
 fn playlist_tracks() -> usize { 5_000 }
+fn account_mb() -> u32 { 50 }
 
 /// What `POST /admin/v1/bans` bans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +389,9 @@ pub struct StatsResponse {
     pub uptime_s: Option<u64>,
     /// `None` without an account backend.
     pub accounts: Option<crate::accounts::store::AccountStats>,
+    /// Maximum total accounts allowed on this server; 0 = no limit.
+    #[serde(default)]
+    pub max_accounts: u32,
     pub bans: usize,
     pub cache: Option<CacheStats>,
     pub companion_enabled: bool,

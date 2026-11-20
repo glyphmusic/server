@@ -64,7 +64,10 @@ impl AdminHost for NativeHost {
         cfg.youtube_daily_budget_units = Some(l.youtube_daily_budget_units);
         cfg.import_max_pages = Some(l.import_max_pages);
         cfg.playlist_max_tracks = Some(l.playlist_max_tracks);
+        cfg.account_max_mb = Some(l.account_max_mb);
+        cfg.max_accounts = (l.max_accounts > 0).then_some(l.max_accounts);
         cfg.youtube_per_day = (l.youtube_per_day > 0).then_some(l.youtube_per_day);
+        cfg.min_app_version = l.min_app_version.clone();
         save(&self.config_path, &cfg).map_err(HostError::Failed)?;
         let switched = if l.companion_enabled {
             std::fs::remove_file(&self.companion_flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
@@ -118,11 +121,11 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("youtube_api_key".to_string(), Some("AIzaSECRET".to_string()));
         host.persist_keys(&m).await.unwrap();
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 5000, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, youtube_per_day: 0, youtube_require_account: false })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 5000, companion_enabled: false, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, account_max_mb: 50, max_accounts: 25, youtube_per_day: 0, youtube_require_account: false, min_app_version: Some("0.13.0".into()) })
             .await
             .unwrap();
         assert!(host.companion_flag.exists());
-        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 8000, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, youtube_per_day: 0, youtube_require_account: false })
+        host.persist_limits(&Limits { require_account: false, rate_limit_per_min: 7, youtube_daily_budget_units: 500, import_max_pages: 2, playlist_max_tracks: 8000, companion_enabled: true, mcp_relay: true, audio_cache_days: 15, audio_cache_max_gb: 10, d1_max_mb: 500, account_max_mb: 50, max_accounts: 25, youtube_per_day: 0, youtube_require_account: false, min_app_version: Some("0.13.0".into()) })
             .await
             .unwrap();
         assert!(!host.companion_flag.exists());
@@ -130,6 +133,8 @@ mod tests {
         assert_eq!(cfg.keys.youtube_api_key.as_deref(), Some("AIzaSECRET"));
         assert_eq!(cfg.rate_limit_per_min, Some(7));
         assert_eq!(cfg.playlist_max_tracks, Some(8000));
+        assert_eq!(cfg.max_accounts, Some(25));
+        assert_eq!(cfg.min_app_version.as_deref(), Some("0.13.0"));
         assert_eq!(cfg.require_account,Some(false));
         let mut bans = crate::settings::load_bans(&host.bans_path);
         assert_eq!(bans.salt.len(), 64, "a fresh list gets a salt and is saved");

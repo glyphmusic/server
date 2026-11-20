@@ -104,6 +104,15 @@ pub enum RemoteCmd {
         /// Independent D1 database ceiling in MB (Worker)
         #[arg(long)]
         d1_max_mb: Option<u32>,
+        /// Space one account may use in MB (synced data and pictures)
+        #[arg(long)]
+        account_max_mb: Option<u32>,
+        /// Maximum total accounts allowed on this server; 0 = no limit
+        #[arg(long)]
+        max_accounts: Option<u32>,
+        /// Oldest Glyph app version still accepted (e.g. 0.13.0), or `none` for every version
+        #[arg(long)]
+        min_app_version: Option<String>,
     },
     /// Same as `glyph companion on|off|status --server <url>` (kept for scripts)
     #[command(hide = true)]
@@ -116,10 +125,10 @@ pub enum RemoteCmd {
         #[command(subcommand)]
         cmd: Option<SwitchCmd>,
     },
-    /// Accounts: device limits and sign-outs are set here, never by the app
+    /// Accounts: list users, limits and sign-outs (no subcommand lists accounts)
     Accounts {
         #[command(subcommand)]
-        cmd: AccountsCmd,
+        cmd: Option<AccountsCmd>,
     },
     /// Ban an account, a device, an IP address or range, hardware or an install
     Ban {
@@ -163,12 +172,34 @@ pub enum KeysCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum AccountsCmd {
+    /// List accounts on the server (handle, devices, sync size, last seen, ban state)
+    List {
+        /// Only show handles containing this text
+        #[arg(long, short = 'q')]
+        search: Option<String>,
+        /// Maximum accounts to show (1-500)
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Skip this many accounts (for paging)
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
     /// Show or change the device limit for accounts without their own
     DefaultLimit {
         /// New default (1-100)
         limit: Option<u8>,
     },
-    /// Show an account: limit, devices, their ids and hardware hashes
+    /// Show or change the maximum total accounts allowed on this server (0 = no limit)
+    MaxAccounts {
+        /// New cap (0 = no limit, up to 1000000)
+        limit: Option<u32>,
+    },
+    /// Show or change the storage limit per account in MB (1-10000)
+    StorageLimit {
+        /// New storage limit per account in MB (1-10000)
+        mb: Option<u32>,
+    },
+    /// Show an account: limit, storage, devices, their ids and hardware hashes
     Show { handle: String },
     /// Give one account its own device limit, or `default` to drop it
     Limit {
@@ -646,7 +677,7 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             }
             Ok(())
         }
-        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, youtube_require_account, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb } => {
+        RemoteCmd::Limits { require_account, rate, youtube_budget, youtube_per_day, youtube_require_account, import_pages, playlist_max_tracks, audio_days, audio_max_gb, d1_max_mb, account_max_mb, max_accounts, min_app_version } => {
             let c = Client::connect(a.server).await?;
             let old: Limits = c.get("limits").await?;
             let mut l = old.clone();
@@ -660,6 +691,9 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
             if let Some(v) = audio_days { l.audio_cache_days = v; }
             if let Some(v) = audio_max_gb { l.audio_cache_max_gb = v; }
             if let Some(v) = d1_max_mb { l.d1_max_mb = v; }
+            if let Some(v) = account_max_mb { l.account_max_mb = v; }
+            if let Some(v) = max_accounts { l.max_accounts = v; }
+            if let Some(v) = min_app_version { l.min_app_version = parse_min_app_version(&v); }
             let l = save_limits(&c, o, &old, l).await?;
             emit(o, &l, || print_limits(&l));
             Ok(())
@@ -679,7 +713,17 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
         RemoteCmd::Companion { cmd } => companion(a.server, cmd, o).await,
         RemoteCmd::Accounts { cmd } => {
             let c = Client::connect(a.server).await?;
-            match cmd {
+            match cmd.unwrap_or(AccountsCmd::List { search: None, limit: 100, offset: 0 }) {
+                AccountsCmd::List { search, limit, offset } => {
+                    let limit = limit.clamp(1, 500);
+                    let mut path = format!("accounts?limit={limit}&offset={offset}");
+                    if let Some(q) = search.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+                        let enc: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+                        path.push_str(&format!("&q={enc}"));
+                    }
+                    let res: AdminAccountsResponse = c.get(&path).await?;
+                    emit(o, &res, || print_accounts_list(&res));
+                }
                 AccountsCmd::DefaultLimit { limit } => {
                     let d: AccountDefaults = match limit {
                         Some(n) => {
@@ -690,15 +734,36 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
                     };
                     emit(o, &d, || println!("Devices per account (default)  {}", d.device_limit));
                 }
+                AccountsCmd::MaxAccounts { limit } => {
+                    let old: Limits = c.get("limits").await?;
+                    let l = match limit {
+                        Some(n) => save_limits(&c, o, &old, Limits { max_accounts: n, ..old.clone() }).await?,
+                        None => old,
+                    };
+                    emit(o, &serde_json::json!({ "max_accounts": l.max_accounts }), || {
+                        println!("Max accounts  {}", if l.max_accounts == 0 { "no limit".to_string() } else { l.max_accounts.to_string() });
+                    });
+                }
+                AccountsCmd::StorageLimit { mb } => {
+                    let old: Limits = c.get("limits").await?;
+                    let l = match mb {
+                        Some(n) => save_limits(&c, o, &old, Limits { account_max_mb: n, ..old.clone() }).await?,
+                        None => old,
+                    };
+                    emit(o, &serde_json::json!({ "account_max_mb": l.account_max_mb }), || {
+                        println!("Space per account (MB)  {}", l.account_max_mb);
+                    });
+                }
                 AccountsCmd::Show { handle } => {
                     let acc: AdminAccount = c.get(&format!("accounts/{}", handle_path(&handle))).await?;
-                    emit(o, &acc, || print_account(&acc));
+                    let cap_mb = c.get::<Limits>("limits").await.ok().map(|l| l.account_max_mb);
+                    emit(o, &acc, || print_account(&acc, cap_mb));
                 }
                 AccountsCmd::Limit { handle, limit } => {
                     let device_limit = parse_limit(&limit)?;
                     if !confirm(o, &format!("set the device limit of @{} to {limit}", handle_path(&handle)), "")? { return Ok(()); }
                     let acc: AdminAccount = c.put(&format!("accounts/{}", handle_path(&handle)), &AccountLimitRequest { device_limit }).await?;
-                    emit(o, &acc, || print_account(&acc));
+                    emit(o, &acc, || print_account(&acc, None));
                 }
                 AccountsCmd::Revoke { handle, device } => {
                     let what = match &device {
@@ -707,7 +772,7 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
                     };
                     if !confirm(o, &what, " They can sign in again unless banned.")? { return Ok(()); }
                     let acc: AdminAccount = c.post(&format!("accounts/{}/revoke", handle_path(&handle)), &RevokeRequest { device }).await?;
-                    emit(o, &acc, || print_account(&acc));
+                    emit(o, &acc, || print_account(&acc, None));
                 }
             }
             Ok(())
@@ -872,9 +937,15 @@ fn print_status(base: &str, s: &StatusResponse) {
         println!("Uptime     {}", uptime(u));
     }
     println!(
-        "Limits     {} req/min per client · YouTube {} units/day · {} import pages",
-        s.limits.rate_limit_per_min, s.limits.youtube_daily_budget_units, s.limits.import_max_pages
+        "Limits     {} req/min per client · YouTube {} units/day · {} import pages · {} MB/account",
+        s.limits.rate_limit_per_min, s.limits.youtube_daily_budget_units, s.limits.import_max_pages, s.limits.account_max_mb
     );
+    if s.limits.max_accounts > 0 {
+        println!("Accounts   max {}", s.limits.max_accounts);
+    }
+    if let Some(min) = &s.limits.min_app_version {
+        println!("Min app    {min}");
+    }
     println!("Companion  {}", if s.limits.companion_enabled { "on" } else { "off" });
     println!("\nSources");
     for p in &s.providers {
@@ -894,7 +965,11 @@ pub(crate) fn print_stats(s: &StatsResponse) {
     }
     match &s.accounts {
         Some(a) => {
-            println!("Accounts            {}", a.accounts);
+            if s.max_accounts > 0 {
+                println!("Accounts            {} / {}", a.accounts, s.max_accounts);
+            } else {
+                println!("Accounts            {}", a.accounts);
+            }
             println!("Devices             {}", a.devices);
             println!("Active (1/7/30 d)   {} / {} / {}", a.active_1d, a.active_7d, a.active_30d);
         }
@@ -910,12 +985,15 @@ pub(crate) fn print_stats(s: &StatsResponse) {
 
 fn print_limits(l: &Limits) {
     println!("Account required               {}", l.require_account);
+    println!("Max accounts                    {}", if l.max_accounts == 0 { "no limit".to_string() } else { l.max_accounts.to_string() });
     println!("Requests per minute per client  {}", l.rate_limit_per_min);
     println!("YouTube units per day           {}", l.youtube_daily_budget_units);
     println!("YouTube songs per user and day  {}", if l.youtube_per_day == 0 { "no limit".to_string() } else { l.youtube_per_day.to_string() });
     println!("YouTube only for accounts       {}", l.youtube_require_account);
     println!("Songs per playlist              {}", l.playlist_max_tracks);
+    println!("Space per account (MB)          {}", l.account_max_mb);
     println!("Pages per playlist import       {}", l.import_max_pages);
+    println!("Min app version                 {}", l.min_app_version.as_deref().unwrap_or("every version"));
     println!("yt-dlp companion                {}", if l.companion_enabled { "on" } else { "off" });
     println!("AI assistants (MCP relay)       {}", if l.mcp_relay { "on" } else { "off" });
     println!("Companion audio in R2 (days)    {}", l.audio_cache_days);
@@ -973,12 +1051,65 @@ fn parse_limit(v: &str) -> Result<Option<u8>, CliError> {
         .ok_or_else(|| CliError::new(exit::USAGE, format!("`{v}`: use a number from 1 to 100 or `default`")))
 }
 
-fn print_account(a: &AdminAccount) {
+fn parse_min_app_version(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || matches!(t.to_ascii_lowercase().as_str(), "none" | "off" | "null" | "clear" | "-") {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn format_bytes(b: u64) -> String {
+    if b >= 1_000_000_000 {
+        format!("{:.2} GB", b as f64 / 1_000_000_000.0)
+    } else if b >= 1_000_000 {
+        format!("{:.1} MB", b as f64 / 1_000_000.0)
+    } else if b >= 1_000 {
+        format!("{:.1} KB", b as f64 / 1_000.0)
+    } else {
+        format!("{b} B")
+    }
+}
+
+fn print_accounts_list(r: &AdminAccountsResponse) {
+    if r.accounts.is_empty() {
+        println!("{}", if r.total == 0 { "No accounts." } else { "No accounts on this page." });
+        return;
+    }
+    let w = r.accounts.iter().map(|a| a.handle.len() + 1).max().unwrap_or(6).max(6);
+    println!("  {:<w$}  {:<9} {:<9} {:<10} {:<10} {}", "HANDLE", "DEVICES", "SYNC", "LAST SEEN", "CREATED", "STATUS");
+    for a in &r.accounts {
+        let handle = format!("@{}", a.handle);
+        let devs = format!("{}/{}", a.devices, a.device_limit);
+        let sync = format_bytes(a.sync_bytes);
+        let seen = a.last_seen.map(date).unwrap_or_else(|| "-".into());
+        let created = date(a.created_at);
+        let status = if a.banned { "banned" } else { "active" };
+        println!("  {handle:<w$}  {devs:<9} {sync:<9} {seen:<10} {created:<10} {status}");
+    }
+    let start = u64::from(r.offset) + 1;
+    let end = u64::from(r.offset) + r.accounts.len() as u64;
+    println!("\nShowing {start}-{end} of {} account(s).", r.total);
+    if end < r.total {
+        println!("Next page: glyph remote accounts list --limit {} --offset {end}", r.limit);
+    }
+}
+
+fn print_account(a: &AdminAccount, cap_mb: Option<u32>) {
     let own = match a.device_limit_set {
         Some(_) => "own limit",
         None => "server default",
     };
     println!("@{}  ({})", a.handle, a.id);
+    if a.banned {
+        println!("Status        banned");
+    }
+    println!("Created       {}", date(a.created_at));
+    match cap_mb {
+        Some(mb) => println!("Storage       {} / {} MB", format_bytes(a.used_bytes), mb),
+        None => println!("Storage       {}", format_bytes(a.used_bytes)),
+    }
     println!("Device limit  {} ({own})", a.device_limit);
     println!("Devices       {}", a.devices.len());
     for d in &a.devices {
@@ -1007,7 +1138,12 @@ pub async fn config(server: Option<String>, cmd: crate::config_cmd::ConfigCmd, o
             let keys: KeysResponse = c.get("keys").await?;
             emit(o, &serde_json::json!({ "server": c.base, "limits": old, "keys": keys.keys }), || {
                 for (k, v) in &map {
-                    println!("{k:<28} {v}");
+                    let display = match v {
+                        serde_json::Value::Null => "-".to_string(),
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    };
+                    println!("{k:<28} {display}");
                 }
                 for k in &keys.keys {
                     println!("{:<28} {}", format!("keys.{}", k.name), if k.set { k.masked.clone().unwrap_or_else(|| "set".into()) } else { "-".into() });
@@ -1023,7 +1159,12 @@ pub async fn config(server: Option<String>, cmd: crate::config_cmd::ConfigCmd, o
                 emit(o, &k, || println!("{}", if k.set { k.masked.clone().unwrap_or_else(|| "set".into()) } else { "-".into() }));
             } else {
                 let v = map.get(&key).ok_or_else(|| unknown(&key))?;
-                emit(o, &serde_json::json!({ (key.clone()): v }), || println!("{v}"));
+                let display = match v {
+                    serde_json::Value::Null => "-".to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => v.to_string(),
+                };
+                emit(o, &serde_json::json!({ (key.clone()): v }), || println!("{display}"));
             }
         }
         ConfigCmd::Set { key, value } => set_live(&c, o, &old, &map, &key, value, &unknown).await?,
@@ -1033,7 +1174,11 @@ pub async fn config(server: Option<String>, cmd: crate::config_cmd::ConfigCmd, o
                 set_live(&c, o, &old, &map, &key, Some(String::new()), &unknown).await?;
             } else {
                 let defaults = serde_json::to_value(Limits::default()).map_err(|e| e.to_string())?;
-                let v = defaults.get(&key_n).ok_or_else(|| unknown(&key_n))?.to_string();
+                let v = match defaults.get(&key_n).ok_or_else(|| unknown(&key_n))? {
+                    serde_json::Value::Null => "none".to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
                 set_live(&c, o, &old, &map, &key, Some(v), &unknown).await?;
             }
         }
@@ -1072,6 +1217,10 @@ async fn set_live(
             _ => return Err(CliError::new(exit::USAGE, format!("{key} takes true or false"))),
         },
         serde_json::Value::Number(_) => raw.trim().parse::<u64>().map(serde_json::Value::from).map_err(|_| CliError::new(exit::USAGE, format!("{key} takes a whole number")))?,
+        serde_json::Value::Null | serde_json::Value::String(_) if key == "min_app_version" => match parse_min_app_version(&raw) {
+            Some(v) => serde_json::Value::String(v),
+            None => serde_json::Value::Null,
+        },
         _ => serde_json::Value::String(raw),
     };
     let mut next = map.clone();
@@ -1159,6 +1308,23 @@ mod tests {
         assert!(Cli::try_parse_from(["t", "ban", "device", "kasto", "d_1"]).is_ok());
         assert!(Cli::try_parse_from(["t", "unban", "203.0.113.0/24"]).is_ok());
         assert!(Cli::try_parse_from(["t", "accounts", "revoke", "kasto"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "accounts"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "accounts", "list", "--search", "kasto", "--limit", "50", "--offset", "10"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "accounts", "max-accounts", "100"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "accounts", "storage-limit", "80"]).is_ok());
+        let lim = Cli::try_parse_from(["t", "limits", "--max-accounts", "250", "--account-max-mb", "100", "--min-app-version", "0.13.0"]).unwrap();
+        let super::RemoteCmd::Limits { max_accounts, account_max_mb, min_app_version, .. } = lim.remote.cmd else { panic!("wrong command") };
+        assert_eq!((max_accounts, account_max_mb, min_app_version.as_deref()), (Some(250), Some(100), Some("0.13.0")));
+    }
+
+    #[test]
+    fn helpers_format_bytes_and_parse_min_app_version() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1_500), "1.5 KB");
+        assert_eq!(format_bytes(2_500_000), "2.5 MB");
+        assert_eq!(parse_min_app_version("0.13.0").as_deref(), Some("0.13.0"));
+        assert_eq!(parse_min_app_version("none"), None);
+        assert_eq!(parse_min_app_version("OFF"), None);
     }
 
     use super::*;

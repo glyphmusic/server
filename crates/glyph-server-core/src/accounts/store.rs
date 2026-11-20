@@ -84,6 +84,19 @@ pub struct AccountStats {
     pub active_30d: u64,
 }
 
+/// One row for `GET /admin/v1/accounts` (`glyph remote accounts list`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserSummary {
+    pub id: String,
+    pub handle: String,
+    pub created_at: u64,
+    pub device_limit: u8,
+    pub device_limit_set: u8,
+    pub devices: u64,
+    pub last_seen: Option<u64>,
+    pub sync_bytes: u64,
+}
+
 /// A sign-in in progress (10 minutes).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Login {
@@ -209,12 +222,18 @@ pub trait AccountStore: MaybeSendSync {
     async fn account_stats(&self, _now: u64) -> StoreResult<Option<AccountStats>> {
         Ok(None)
     }
+    /// Total accounts currently stored (for enforcing `max_accounts`).
+    async fn user_count(&self) -> StoreResult<u64>;
+    /// Page of accounts ordered newest first, plus total matching count.
+    async fn list_users(&self, limit: u32, offset: u32, query: Option<&str>) -> StoreResult<(Vec<UserSummary>, u64)>;
 
     /// Apply items with [`wins`] against the stored copies, give every accepted
     /// item the next revision of the user (in order, atomically with respect to
     /// other pushes) and return which were accepted plus the user's newest rev.
     async fn push_items(&self, user_id: &str, items: &[Item]) -> StoreResult<(Vec<bool>, u64)>;
     async fn items(&self, user_id: &str, keys: &[(String, String)]) -> StoreResult<Vec<Item>>;
+    /// Bytes the user's live (not deleted) sync values take; counts toward the account size limit.
+    async fn item_bytes(&self, user_id: &str) -> StoreResult<u64>;
     /// Items with `rev > since`, ordered by rev.
     async fn items_since(&self, user_id: &str, since: u64, limit: u32) -> StoreResult<Vec<Item>>;
     /// Drop tombstones older than `before` (ms) and raise `purged_rev`.
@@ -258,6 +277,8 @@ pub trait BlobStore: MaybeSendSync {
     async fn get(&self, key: &str) -> StoreResult<Option<(Vec<u8>, String)>>;
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> StoreResult<()>;
     async fn delete_prefix(&self, prefix: &str) -> StoreResult<()>;
+    /// Total size of the objects under `prefix` (an account's pictures).
+    async fn prefix_bytes(&self, prefix: &str) -> StoreResult<u64>;
 }
 
 // ------------------------------------------------------------------ memory
@@ -455,6 +476,51 @@ impl AccountStore for MemStore {
         };
         Ok(Some(AccountStats { accounts: m.users.len() as u64, devices: m.devices.len() as u64, active_1d: active(1), active_7d: active(7), active_30d: active(30) }))
     }
+    async fn user_count(&self) -> StoreResult<u64> {
+        Ok(self.m.lock().unwrap().users.len() as u64)
+    }
+    async fn list_users(&self, limit: u32, offset: u32, query: Option<&str>) -> StoreResult<(Vec<UserSummary>, u64)> {
+        let m = self.m.lock().unwrap();
+        let q = query.map(|s| s.trim().trim_start_matches('@').to_ascii_lowercase()).filter(|s| !s.is_empty());
+        let mut users: Vec<User> = m
+            .users
+            .values()
+            .filter(|u| q.as_deref().is_none_or(|needle| u.handle.contains(needle)))
+            .map(|u| m.read(u))
+            .collect();
+        users.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        let total = users.len() as u64;
+        let page = users
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|u| {
+                let mut devices = 0u64;
+                let mut last_seen: Option<u64> = None;
+                for d in m.devices.values().filter(|d| d.user_id == u.id) {
+                    devices += 1;
+                    last_seen = Some(last_seen.map_or(d.last_seen, |prev| prev.max(d.last_seen)));
+                }
+                let sync_bytes = m
+                    .items
+                    .iter()
+                    .filter(|((uid, _, _), i)| uid == &u.id && !i.deleted)
+                    .map(|(_, i)| i.value.as_ref().map_or(0, |v| v.len() as u64))
+                    .sum();
+                UserSummary {
+                    id: u.id,
+                    handle: u.handle,
+                    created_at: u.created_at,
+                    device_limit: u.device_limit,
+                    device_limit_set: u.device_limit_set,
+                    devices,
+                    last_seen,
+                    sync_bytes,
+                }
+            })
+            .collect();
+        Ok((page, total))
+    }
     async fn push_items(&self, user_id: &str, items: &[Item]) -> StoreResult<(Vec<bool>, u64)> {
         let mut m = self.m.lock().unwrap();
         let Some(mut rev) = m.users.get(user_id).map(|u| u.rev) else {
@@ -479,6 +545,10 @@ impl AccountStore for MemStore {
             .iter()
             .filter_map(|(kind, key)| m.items.get(&(user_id.to_string(), kind.clone(), key.clone())).cloned())
             .collect())
+    }
+    async fn item_bytes(&self, user_id: &str) -> StoreResult<u64> {
+        let m = self.m.lock().unwrap();
+        Ok(m.items.iter().filter(|((u, _, _), i)| u == user_id && !i.deleted).map(|(_, i)| i.value.as_ref().map_or(0, |v| v.len() as u64)).sum())
     }
     async fn items_since(&self, user_id: &str, since: u64, limit: u32) -> StoreResult<Vec<Item>> {
         let m = self.m.lock().unwrap();
@@ -582,5 +652,8 @@ impl BlobStore for MemBlobs {
     async fn delete_prefix(&self, prefix: &str) -> StoreResult<()> {
         self.objects.lock().unwrap().retain(|k, _| !k.starts_with(prefix));
         Ok(())
+    }
+    async fn prefix_bytes(&self, prefix: &str) -> StoreResult<u64> {
+        Ok(self.objects.lock().unwrap().iter().filter(|(k, _)| k.starts_with(prefix)).map(|(_, (b, _))| b.len() as u64).sum())
     }
 }

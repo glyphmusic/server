@@ -44,11 +44,21 @@ pub struct FileConfig {
     pub import_max_pages: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playlist_max_tracks: Option<usize>,
+    /// Space one account may use (synced data and pictures), in MB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_max_mb: Option<u32>,
+    /// Maximum total accounts allowed on this server; 0 = no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_accounts: Option<u32>,
     /// YouTube songs per account or address and day; 0 = no limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub youtube_per_day: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_repo: Option<String>,
+    /// Oldest app version that still works with this server; older apps are
+    /// told to update. Unset = every version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_app_version: Option<String>,
     /// Folder with the built web player (glyph-apps/glyph-ui, `npm run
     /// build:web` -> `dist-web`), served at `/web`. Relative to this file.
     /// Unset = no web player.
@@ -172,8 +182,12 @@ pub struct Settings {
     pub proxy_audio: bool,
     pub import_max_pages: u32,
     pub playlist_max_tracks: usize,
+    pub account_max_mb: u32,
+    pub max_accounts: u32,
     pub youtube_per_day: u32,
     pub update_repo: String,
+    /// Oldest app version that still works (`min_app_version`, `GLYPH_MIN_APP_VERSION`).
+    pub min_app_version: Option<String>,
     /// Built web player served at `/web` (`web_dir`, `GLYPH_WEB_DIR`).
     pub web_dir: Option<PathBuf>,
     pub admin_password_hash: Option<String>,
@@ -352,8 +366,11 @@ impl Settings {
             proxy_audio: env("GLYPH_PROXY_AUDIO").map(|v| v != "0" && v != "false").or(file.proxy_audio).unwrap_or(true),
             import_max_pages: file.import_max_pages.unwrap_or(5),
             playlist_max_tracks: file.playlist_max_tracks.unwrap_or(5_000).clamp(1, 50_000),
+            account_max_mb: file.account_max_mb.unwrap_or(50).clamp(1, 10_000),
+            max_accounts: env("GLYPH_MAX_ACCOUNTS").and_then(|v| v.parse().ok()).or(file.max_accounts).unwrap_or(0).min(1_000_000),
             youtube_per_day: file.youtube_per_day.unwrap_or(0).min(100_000),
             update_repo: env("GLYPH_SERVER_REPO").or(file.update_repo).unwrap_or_else(|| "glyphmusic/server".into()),
+            min_app_version: env("GLYPH_MIN_APP_VERSION").or(file.min_app_version).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
             web_dir: env("GLYPH_WEB_DIR").map(PathBuf::from).or(file.web_dir).map(|d| if d.is_relative() { base.join(d) } else { d }),
             admin_password_hash: env("ADMIN_PASSWORD_HASH").or(file.admin.password_hash),
             tls,

@@ -53,6 +53,9 @@ A running server, here or anywhere (log in once with the admin password):
   glyph config set rate_limit_per_min 120 --server https://glyph.example.com
   glyph companion off --server https://glyph.example.com   server stops using YouTube
   glyph remote stats
+  glyph remote accounts list               all accounts, devices, storage and ban state
+  glyph remote accounts max-accounts 100   cap total accounts on this server (0 = no limit)
+  glyph remote accounts storage-limit 50   storage per account in MB
   glyph remote ban account somehandle      account, its addresses and hardware
   glyph remote ban ip 203.0.113.0/24
   glyph remote unban somehandle

@@ -250,6 +250,9 @@ impl Server {
         } else { false };
         if let Err(response) = self.check_access(&req) { return response; }
         let svc = self.services();
+        if let Some(e) = outdated_app(&svc.config, &req) {
+            return Response::error(e);
+        }
         if req.path == "/v1/access" && req.method == Method::Get {
             return Response::json(200, &serde_json::json!({"ok": true}));
         }
@@ -492,6 +495,11 @@ pub async fn find_cover(svc: &Services, track: &glyph_protocol::Track) -> Option
     find_cover_meta(svc, track).await.0
 }
 
+/// How long a found cover/album is remembered for everyone.
+const COVER_META_FOUND_TTL_S: u64 = 60 * crate::cache::DAY;
+/// How long "nothing found" is remembered (a provider may just have been down).
+const COVER_META_MISSING_TTL_S: u64 = 6 * crate::cache::HOUR;
+
 pub async fn find_cover_meta(svc: &Services, track: &glyph_protocol::Track) -> (Option<String>, Option<String>) {
     let own = track.cover_url.clone().filter(|u| glyph_protocol::cover_cache_allowed(u));
     let own_album = track.album.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -500,6 +508,38 @@ pub async fn find_cover_meta(svc: &Services, track: &glyph_protocol::Track) -> (
             return (Some(c.clone()), own_album);
         }
     }
+    // The lookup below only depends on the song and its own real cover, so
+    // every app asking for the same song shares one answer: album names show
+    // at once and Deezer/Spotify are asked once per song, not once per user.
+    // The song's own album and YouTube thumbnail are only fallbacks, added after.
+    let own_real = own.clone().filter(|u| !crate::merge::is_youtube_cover(u));
+    let key = format!(
+        "covermeta:v1:{}|{}|{}|{}",
+        track.isrc.as_deref().map(str::trim).unwrap_or("").to_ascii_uppercase(),
+        crate::merge::normalize_artist(&track.artist),
+        crate::merge::normalize_title(&track.title),
+        own_real.as_deref().unwrap_or(""),
+    );
+    let found: (Option<String>, Option<String>) = match crate::cache::get_json(&*svc.cache, &key).await {
+        Some(hit) => hit,
+        None => {
+            let mut bare = track.clone();
+            bare.cover_url = own_real;
+            bare.album = None;
+            let found = lookup_cover_meta(svc, &bare).await;
+            let ttl = if found.1.is_some() { COVER_META_FOUND_TTL_S } else { COVER_META_MISSING_TTL_S };
+            crate::cache::put_json(&*svc.cache, &key, &found, ttl).await;
+            found
+        }
+    };
+    (found.0.or(own), found.1.or(own_album))
+}
+
+/// Cover and album from Deezer/Spotify for a song without its own album
+/// (its cover, when given, is a real one, never a YouTube thumbnail).
+async fn lookup_cover_meta(svc: &Services, track: &glyph_protocol::Track) -> (Option<String>, Option<String>) {
+    let own = track.cover_url.clone();
+    let own_album: Option<String> = None;
     if let Some(isrc) = track.isrc.as_deref() {
         if let Some(found) = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms, providers::deezer::by_isrc(svc, isrc))
             .await
@@ -587,6 +627,20 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
     .collect()
 }
 
+/// 426 for API calls of a Glyph app older than `min_app_version` (its
+/// `User-Agent` is `Glyph/<version>`). `/v1/health` stays open: it is where
+/// the app learns that it has to update. Browsers and other clients pass.
+fn outdated_app(config: &crate::config::Config, req: &Request) -> Option<ApiErr> {
+    let min = config.min_app_version.as_deref().map(str::trim).filter(|m| !m.is_empty())?;
+    if !req.path.starts_with("/v1/") || req.path == "/v1/health" || req.method == Method::Options {
+        return None;
+    }
+    let app = req.header("user-agent").and_then(glyph_protocol::app_version_from_user_agent)?;
+    glyph_protocol::app_older_than(app, min).then(|| {
+        ApiErr::new(426, glyph_protocol::APP_OUTDATED, format!("This Glyph version ({app}) is too old for this server. Update Glyph to {min} or newer."))
+    })
+}
+
 async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
     {
         match route {
@@ -602,6 +656,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                     providers: svc.config.enabled_providers(),
                     accounts,
                     covers,
+                    min_app_version: svc.config.min_app_version.clone(),
                 },
             )),
             Route::Search => {
@@ -862,6 +917,24 @@ mod tests {
     }
 
     #[test]
+    fn album_lookups_are_shared_between_apps() {
+        let h = harness(Default::default());
+        h.http.on("api.deezer.com/search", 200, r#"{"data":[{"id":1,"title":"Song","duration":200,"artist":{"name":"Artist"},"album":{"title":"A","cover_big":"https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"}}]}"#);
+        let mut t = track("1", ProviderId::YouTube, "Song", "Artist", 200);
+        t.cover_url = Some("https://i.ytimg.com/vi/a/hqdefault.jpg".into());
+        assert_eq!(block_on(find_cover_meta(&h.svc, &t)).1.as_deref(), Some("A"));
+        // Another app asks for the same song (other video): answered from the
+        // cache, Deezer is not asked again.
+        let asked = h.http.call_count("api.deezer.com");
+        let mut other = track("2", ProviderId::YouTube, "Song", "Artist", 200);
+        other.cover_url = Some("https://i.ytimg.com/vi/b/hqdefault.jpg".into());
+        let (cover, album) = block_on(find_cover_meta(&h.svc, &other));
+        assert_eq!(album.as_deref(), Some("A"));
+        assert_eq!(cover.as_deref(), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));
+        assert_eq!(h.http.call_count("api.deezer.com"), asked);
+    }
+
+    #[test]
     fn health_advertises_capabilities() {
         let h = harness(Default::default());
         let hr: HealthResponse = serde_json::from_slice(block_on(server(&h).handle(get("/v1/health"))).bytes().unwrap()).unwrap();
@@ -891,6 +964,32 @@ mod tests {
         assert!(hr.providers.contains(&ProviderId::YouTube));
         let dump = String::from_utf8_lossy(r.bytes().unwrap()).to_string();
         assert!(!dump.contains("YT_SECRET_KEY"));
+    }
+
+    #[test]
+    fn apps_older_than_the_minimum_are_told_to_update() {
+        let h = harness(Default::default());
+        let s = server(&h);
+        let as_app = |path: &str, version: &str| {
+            Request::new(Method::Get, path, vec![("user-agent".into(), format!("Glyph/{version}"))], vec![], Some("1.2.3.4".into()))
+        };
+        // No minimum: every version works and health says nothing.
+        assert_ne!(block_on(s.handle(as_app("/v1/search?q=x", "0.1.0"))).status, 426);
+        assert!(json_of(&block_on(s.handle(get("/v1/health")))).get("min_app_version").is_none());
+
+        s.update_config(|c| c.min_app_version = Some("0.13.0".into()));
+        assert_eq!(json_of(&block_on(s.handle(get("/v1/health"))))["min_app_version"], "0.13.0");
+        // Health stays open, so an old app can learn that it has to update.
+        assert_eq!(block_on(s.handle(as_app("/v1/health", "0.12.11"))).status, 200);
+        let r = block_on(s.handle(as_app("/v1/search?q=x", "0.12.11")));
+        assert_eq!(r.status, 426);
+        assert_eq!(json_of(&r)["code"], glyph_protocol::APP_OUTDATED);
+        // New enough apps, browsers and other clients go on as before.
+        assert_ne!(block_on(s.handle(as_app("/v1/search?q=x", "0.13.0"))).status, 426);
+        assert_ne!(block_on(s.handle(as_app("/v1/search?q=x", "0.13.1-beta.1"))).status, 426);
+        assert_ne!(block_on(s.handle(get("/v1/search?q=x"))).status, 426);
+        // Pages (share links, the web player) are never blocked.
+        assert_ne!(block_on(s.handle(as_app("/", "0.1.0"))).status, 426);
     }
 
     #[test]

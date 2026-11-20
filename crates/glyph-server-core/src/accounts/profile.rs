@@ -14,7 +14,7 @@
 //!   playlist's cover.
 
 use super::store::{Profile, User};
-use super::{hex, image, is_sha256_hex, json_body, method, store_err, Accounts};
+use super::{hex, image, is_sha256_hex, json_body, method, store_err, to_webp, Accounts};
 use crate::error::ApiErr;
 use crate::server::{Request, Response};
 use crate::traits::{Method, Services};
@@ -182,6 +182,16 @@ impl Accounts {
                         return Err(ApiErr::new(413, "payload_too_large", format!("image larger than {} KB", max / 1024)));
                     }
                     let bytes = normalize_image(&req.body, banner)?;
+                    // The old picture is about to go: only the growth counts toward the limit.
+                    let old_len = match if banner { &p.banner } else { &p.avatar } {
+                        Some(o) => blobs.get(&blob_key(&a.user.id, o)).await.map_err(store_err)?.map_or(0, |(b, _)| b.len() as u64),
+                        None => 0,
+                    };
+                    if (bytes.len() as u64) > old_len
+                        && self.used_bytes(&a.user.id).await?.saturating_sub(old_len) + bytes.len() as u64 > super::routes::account_limit(svc)
+                    {
+                        return Err(super::account_full());
+                    }
                     let sha = hex(&Sha256::digest(&bytes));
                     blobs.put(&blob_key(&a.user.id, &sha), bytes, "image/webp").await.map_err(store_err)?;
                     Some(sha)
@@ -289,28 +299,11 @@ fn is_profile_image_path(rest: &str) -> bool {
     sub == Some("images") && arg.is_some_and(|s| !s.is_empty())
 }
 
-/// Decode untrusted uploads with bounded resources, discard metadata/animation,
-/// and encode our own canonical WebP. Never trust MIME or a magic-byte check.
+/// Untrusted uploads go through [`to_webp`]: a plain lossy WebP that fits is
+/// kept, anything else is decoded with bounded resources and encoded again
+/// (metadata and animation dropped). Never trust MIME or a magic-byte check.
 fn normalize_image(bytes: &[u8], banner: bool) -> Result<Vec<u8>, ApiErr> {
-    let invalid = || ApiErr::bad_request("invalid or oversized image");
-    let mut reader = ::image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|_| invalid())?;
-    if !matches!(reader.format(), Some(::image::ImageFormat::Png | ::image::ImageFormat::Jpeg | ::image::ImageFormat::WebP | ::image::ImageFormat::Gif)) { return Err(invalid()); }
-    let mut limits = ::image::Limits::default();
-    limits.max_alloc = Some(32 * 1024 * 1024);
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
-    reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| invalid())?;
-    let mut picture = if banner { decoded.thumbnail(1500, 500) } else { decoded.thumbnail(512, 512) };
-    loop {
-        let rgba = picture.to_rgba8();
-        let mut output = Vec::new();
-        ::image::codecs::webp::WebPEncoder::new_lossless(&mut output)
-            .encode(&rgba, rgba.width(), rgba.height(), ::image::ExtendedColorType::Rgba8).map_err(|_| invalid())?;
-        if output.len() <= MAX_AVATAR { return Ok(output); }
-        if picture.width().max(picture.height()) <= 64 { return Err(invalid()); }
-        picture = picture.thumbnail((picture.width()*3/4).max(1), (picture.height()*3/4).max(1));
-    }
+    if banner { to_webp(bytes, 1500, 500, MAX_AVATAR) } else { to_webp(bytes, 512, 512, MAX_AVATAR) }
 }
 
 #[cfg(test)]

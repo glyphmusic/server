@@ -41,7 +41,10 @@ pub fn build_server(s: &Settings, logs: Arc<LogBuffer>) -> Server {
     config.server_bearer_hash = s.server_bearer_hash.clone();
     config.import_max_pages = s.import_max_pages;
     config.playlist_max_tracks = s.playlist_max_tracks;
+    config.account_max_mb = s.account_max_mb;
+    config.max_accounts = s.max_accounts;
     config.youtube_per_day = s.youtube_per_day;
+    config.min_app_version = s.min_app_version.clone();
     config.bans = Arc::new(crate::settings::load_bans(&crate::settings::bans_path(&s.config_path)));
     config.companion_enabled = !companion_off_flag(s).exists();
     config.admin_password_hash = s

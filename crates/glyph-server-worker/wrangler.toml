@@ -106,6 +106,13 @@ RATE_LIMIT_PER_MIN = "60"
 PUBLIC_ORIGIN = "https://api.glyph.my"
 ACCOUNT_RP_ID = "glyph.my"
 SHARE_ORIGIN = "https://glyph.my"
+# Oldest app version that still works with this server. Set it after a change
+# that breaks older apps: they show "Update Glyph" and their API calls get 426.
+# MIN_APP_VERSION = "0.13.0"
+# Space per account in MB (synced data and pictures, default 50).
+# ACCOUNT_MAX_MB = "50"
+# Maximum total accounts allowed on this server (0 = no limit).
+# MAX_ACCOUNTS = "0"
 YOUTUBE_DAILY_BUDGET_UNITS = "9000"
 
 # Secrets (never put keys in this file). Set each one you have with

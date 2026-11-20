@@ -661,9 +661,19 @@ pub fn jam_page(code: &str, host: Option<&str>, l: Lang) -> Response {
     localized(crate::site::html_response_csp(200, html, "no-store", PLAYER_CSP, false), l)
 }
 
+/// Sends people (not link-preview bots) on to the web player with the list
+/// open (`/web/p/<id>`), where they can listen, save it or open the app.
+/// Only when this server has the web player; else they stay on this page.
+fn to_web_player(share_id: &str) -> String {
+    format!(
+        r#"<script>(function(){{if(/bot|crawler|spider|preview|facebookexternalhit|embedly|slurp|whatsapp|telegram/i.test(navigator.userAgent))return;var d=document.documentElement,show=function(){{d.style.visibility=""}};d.style.visibility="hidden";setTimeout(show,1500);fetch("/web/",{{cache:"no-store"}}).then(function(r){{if(r.ok)location.replace("/web/p/{share_id}");else show()}}).catch(show)}})();</script>"#
+    )
+}
+
 /// Page for a link opened in a browser, laid out like the app's list view:
 /// titlebar, cover column left, songs right, the player bar at the bottom.
-/// `found` = `None` renders "not found".
+/// People are sent on to the web player ([`to_web_player`]); bots and
+/// servers without it keep this page. `found` = `None` renders "not found".
 pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
     let titlebar = format!(
         r#"<header class="titlebar"><a class="logo" href="/">glyph</a><a class="backpill" href="/download">{}{}</a></header>"#,
@@ -691,12 +701,13 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
         String::new()
     };
     let html = format!(
-        r#"{head}{BG}{titlebar}
+        r#"{head}{go}{BG}{titlebar}
 <main class="list"><aside class="left">{art}<div class="info"><span class="kind mono">[{kind}]</span><h1 class="title">{title}</h1><div class="subrow">{by}<span class="meta mono">{meta}</span></div></div>
 <a class="pill" id="open-app" href="glyph://p/{share_id}">{open_app}</a>{actions}<div class="acts2"><button class="ib" id="cp" type="button" data-tip="{copy}" aria-label="{copy}" data-link="{base}">{link_ic}</button><a class="ib" href="/download" data-tip="{dl}" aria-label="{dl}">{dl_ic}</a></div></aside>
 <section class="songs-col">{rows}</section></main>
 {bar}{audio}{js}</body></html>"#,
         audio = audio_tags(&songs, &base),
+        go = to_web_player(&escape(split_link(link).1)),
         share_id = escape(split_link(link).1),
         open_app = if l == Lang::De { "In Glyph öffnen" } else { "Open in Glyph" },
         head = head(l, &format!("{title} · Glyph"), &card_meta(p, &songs, link, l), "page"),
@@ -709,7 +720,7 @@ pub fn page(found: Option<(&SharedPlaylist, &str)>, l: Lang) -> Response {
         dl_ic = ic("download"),
         rows = song_rows(&songs, &base, l),
         bar = if count > 0 { player_bar(l) } else { String::new() },
-        js = format!("{}<script>if(!/bot|crawler|spider|preview/i.test(navigator.userAgent))location.href=document.getElementById('open-app').href;</script>", scripts(r#"location.pathname.replace(/\/$/,"")"#, count, 44)),
+        js = scripts(r#"location.pathname.replace(/\/$/,"")"#, count, 44),
     );
     // Links die with their account: never cache them.
     localized(crate::site::html_response_csp(200, html, "no-store", PLAYER_CSP, false), l)
@@ -820,7 +831,9 @@ mod tests {
         assert!(html.contains("Road &lt;trip&gt;") && !html.contains("<trip>") && html.contains("@gisela"));
         assert!(html.contains("glyph://p/AbC123xy"));
         assert!(html.contains("Open in Glyph"));
-        assert!(html.contains("location.href=document.getElementById('open-app').href"));
+        // People go on to the web player with the list open; the app link stays as a button.
+        assert!(html.contains(r#"location.replace("/web/p/AbC123xy")"#) && html.contains(r#"fetch("/web/""#));
+        assert!(!html.contains("location.href=document.getElementById('open-app').href"));
         assert_eq!(page(None, Lang::En).status, 404);
     }
 
@@ -844,6 +857,18 @@ mod tests {
         let de = String::from_utf8_lossy(page(Some((&p, link)), Lang::De).bytes().unwrap()).to_string();
         assert!(de.contains(r#"<html lang="de">"#) && de.contains("Geteilt von @gisela"));
         assert!(songs("glyph:playlist:@@@").is_empty());
+    }
+
+    #[test]
+    fn reads_codes_made_by_the_web_player() {
+        // From glyph-ui/src/lib/api/share-code.ts encodeShare (browser deflate-raw):
+        // the web player now posts codes like this one to `POST /v1/share`.
+        let code = "glyph:playlist:LcwxCsIwGEDhq5Q3_0vVxX_T3Uk3cWhskEJpICZaLdmcvYKn8AReyCNIMMubHt_EBa2FAWXTjdX39XwjBHQ_5bJ1w6n6PBAalJUPCGeUm4shGovQoTTmmI8-L71BaNF6Nl8IIxp8tEn-3O7qCrUuUGvt3friLEmH9AM";
+        assert!(clean_code(code).is_some());
+        let s = songs(code);
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].title.as_str(), s[0].artist.as_str()), ("Song Ä", "Art"));
+        assert_eq!(s[1].source, glyph_protocol::ProviderId::Deezer);
     }
 
     #[test]

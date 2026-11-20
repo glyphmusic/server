@@ -716,7 +716,12 @@ fn covers_cache_and_own_uploads() {
     assert_eq!(s, 502);
 
     let (s1, _, _) = sign_up(&t, "covers");
-    let img = b"\x89PNG\r\n\x1a\nrest".to_vec();
+    let img = {
+        let pic = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([20, 40, 80, 255])));
+        let mut out = std::io::Cursor::new(Vec::new());
+        pic.write_to(&mut out, ::image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
     let name = hex(&Sha256::digest(&img));
     let put = |body: Vec<u8>, n: &str| {
         let r = block_on(t.s.handle(Request::new(Method::Put, &format!("/v1/sync/covers/{n}"), vec![("authorization".into(), format!("Bearer {}", s1.access_token))], body, None)));
@@ -726,7 +731,11 @@ fn covers_cache_and_own_uploads() {
     assert_eq!(put(b"plain text".to_vec(), &hex(&Sha256::digest(b"plain text"))), 400);
     assert_eq!(put(img.clone(), &name), 200);
     let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/sync/covers/{name}"), vec![("authorization".into(), format!("Bearer {}", s1.access_token))], vec![], None)));
-    assert_eq!((r.status, r.bytes().unwrap()), (200, img.as_slice()));
+    assert_eq!(r.status, 200);
+    let stored = r.bytes().unwrap();
+    assert_eq!(&stored[..4], b"RIFF");
+    assert_eq!(&stored[8..12], b"WEBP");
+    assert!(r.headers.iter().any(|(k, v)| k == "content-type" && v == "image/webp"));
     let r = block_on(t.s.handle(Request::new(Method::Get, &format!("/v1/sync/covers/{name}"), vec![], vec![], None)));
     assert_eq!(r.status, 401);
 }
@@ -907,12 +916,13 @@ fn operator_sets_default_and_per_account_device_limits() {
     assert!(matches!(pair("two"), LoginPollResponse::Done { .. }));
     assert_eq!(pair("three"), LoginPollResponse::DeviceLimit);
     // Own limit beats the default; None goes back to it.
-    let a = block_on(acc.admin_set_limit("@Limited", Some(3))).unwrap();
+    let bans = crate::bans::BanList::default();
+    let a = block_on(acc.admin_set_limit("@Limited", Some(3), &bans, 0)).unwrap();
     assert_eq!((a.device_limit, a.device_limit_set, a.devices.len()), (3, Some(3), 2));
     assert!(matches!(pair("three"), LoginPollResponse::Done { .. }));
-    let a = block_on(acc.admin_set_limit("limited", None)).unwrap();
+    let a = block_on(acc.admin_set_limit("limited", None, &bans, 0)).unwrap();
     assert_eq!((a.device_limit, a.device_limit_set), (2, None));
-    assert!(block_on(acc.admin_set_limit("nobody", Some(3))).is_err());
+    assert!(block_on(acc.admin_set_limit("nobody", Some(3), &bans, 0)).is_err());
 }
 
 #[test]
@@ -969,7 +979,13 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     let (viewer, _, _) = sign_up(&t, "viewer");
     let now = t.h.rt.now_ms();
     let bearer = |s: &Session| vec![("authorization".to_string(), format!("Bearer {}", s.access_token))];
-    let cover = b"\x89PNG\r\n\x1a\ncover".to_vec();
+    let make_pic = |color| {
+        let image = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba(color)));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    };
+    let cover = make_pic([90, 40, 20, 255]);
     let cover_sha = hex(&Sha256::digest(&cover));
     let r = block_on(t.s.handle(Request::new(Method::Put, &format!("/v1/sync/covers/{cover_sha}"), bearer(&owner), cover.clone(), None)));
     assert_eq!(r.status, 200);
@@ -992,12 +1008,6 @@ fn profiles_are_private_until_opened_and_show_only_what_was_picked() {
     assert_eq!(s, 404);
 
     // Picture: stored, served by its hash, the old one removed when replaced.
-    let make_pic = |color| {
-        let image = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(8, 8, ::image::Rgba(color)));
-        let mut bytes = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
-        bytes.into_inner()
-    };
     let pic = make_pic([10,20,30,255]);
     let r = block_on(t.s.handle(Request::new(Method::Put, "/v1/profile/avatar", bearer(&owner), pic.clone(), None)));
     assert_eq!(r.status, 200);
@@ -1650,4 +1660,56 @@ fn sync_uses_dedicated_quota_without_global_lockout() {
     t.h.rt.advance(61_000);
     let (st, _) = call(&t, Method::Get, "/v1/sync/pull?since=0", serde_json::Value::Null, Some(&session.access_token));
     assert_eq!(st, 200);
+}
+
+#[test]
+fn account_storage_limit_caps_sync_and_pictures_and_allows_deletes() {
+    let t = setup();
+    // 1 MB account cap so we can fill it in a few pushes.
+    t.s.update_config(|c| c.account_max_mb = 1);
+    let (s, _, _) = sign_up(&t, "quota_user");
+    let now = t.h.rt.now_ms();
+
+    let (st, v) = call(&t, Method::Get, "/v1/account/storage", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!((st, v["used_bytes"].as_u64(), v["limit_bytes"].as_u64()), (200, Some(0), Some(1_000_000)));
+
+    // Push ~900 KB across three items -> fits.
+    let big = "x".repeat(300_000);
+    for k in ["a", "b", "c"] {
+        let it = item("note", k, Some(serde_json::json!({ "d": big })), now);
+        let (st, v) = call(&t, Method::Post, "/v1/sync/push", serde_json::json!({ "items": [it] }), Some(&s.access_token));
+        assert_eq!(st, 200, "{v}");
+    }
+    let (st, v) = call(&t, Method::Get, "/v1/account/storage", serde_json::Value::Null, Some(&s.access_token));
+    assert_eq!(st, 200);
+    let used = v["used_bytes"].as_u64().unwrap();
+    assert!(used > 900_000 && used < 1_000_000, "used={used}");
+
+    // Another 200 KB pushes past 1 MB -> 413 account_full.
+    let over = item("note", "d", Some(serde_json::json!({ "d": "y".repeat(200_000) })), now);
+    let (st, v) = call(&t, Method::Post, "/v1/sync/push", serde_json::json!({ "items": [over.clone()] }), Some(&s.access_token));
+    assert_eq!((st, v["code"].as_str()), (413, Some("account_full")));
+
+    // Deleting an existing item always goes through and frees room.
+    let del = SyncItem { kind: "note".into(), key: "c".into(), value: None, updated_at: now + 1, deleted: true, rev: 0 };
+    let (st, v) = call(&t, Method::Post, "/v1/sync/push", serde_json::json!({ "items": [del] }), Some(&s.access_token));
+    assert_eq!(st, 200, "{v}");
+
+    // Now the 200 KB item fits.
+    let (st, v) = call(&t, Method::Post, "/v1/sync/push", serde_json::json!({ "items": [over] }), Some(&s.access_token));
+    assert_eq!(st, 200, "{v}");
+
+    // Cover upload counts toward storage and is stored as WebP.
+    let pic = {
+        let img = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(32, 32, ::image::Rgba([12, 34, 56, 255])));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, ::image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    let sha = hex(&Sha256::digest(&pic));
+    let bearer = vec![("authorization".to_string(), format!("Bearer {}", s.access_token))];
+    let r = block_on(t.s.handle(Request::new(Method::Put, &format!("/v1/sync/covers/{sha}"), bearer.clone(), pic, None)));
+    assert_eq!(r.status, 200);
+    let (_, after_cover) = call(&t, Method::Get, "/v1/account/storage", serde_json::Value::Null, Some(&s.access_token));
+    assert!(after_cover["used_bytes"].as_u64().unwrap() > 800_000);
 }
