@@ -227,6 +227,9 @@ pub struct AdminDevice {
     /// A hashed address is on file (banning the account bans it too).
     #[serde(default)]
     pub ip_known: bool,
+    /// App version the device last reported (e.g. `0.12.13`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 
 /// `GET /admin/v1/accounts/{handle}`.
@@ -249,6 +252,12 @@ pub struct AdminAccount {
     /// May use the admin dashboard in the app.
     #[serde(default)]
     pub admin: bool,
+    /// sha256 of the profile picture (`/v1/profiles/{handle}/images/{sha}`), if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    /// sha256 of the profile banner (`/v1/profiles/{handle}/images/{sha}`), if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
 }
 
 /// One row of `GET /admin/v1/accounts`.
@@ -268,6 +277,12 @@ pub struct AdminAccountSummary {
     /// May use the admin dashboard in the app.
     #[serde(default)]
     pub admin: bool,
+    /// sha256 of the profile picture (`/v1/profiles/{handle}/images/{sha}`), if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    /// sha256 of the profile banner (`/v1/profiles/{handle}/images/{sha}`), if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
 }
 
 /// `GET /admin/v1/accounts`.
@@ -396,6 +411,16 @@ pub struct RevokeRequest {
     /// `None` = every device of the account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+}
+
+/// `POST /admin/v1/accounts/{handle}/profile/reset`: remove an account's
+/// profile picture and/or banner and delete their blobs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResetProfileImagesRequest {
+    #[serde(default)]
+    pub avatar: bool,
+    #[serde(default)]
+    pub banner: bool,
 }
 
 /// `GET /admin/v1/stats`.
@@ -528,4 +553,127 @@ pub struct AppRelease {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppReleasesResponse {
     pub releases: Vec<AppRelease>,
+}
+
+/// Why a client or account is currently blocked by automatic protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockReason {
+    /// 15-minute abuse lockout after repeated rate-limit hits (`temporarily_blocked`).
+    AbuseBlock,
+    /// Short-lived per-minute rate limit (`rate_limited`).
+    RateLimited,
+    /// Daily YouTube song cap reached (`youtube_daily_limit`).
+    YoutubeLimit,
+    /// Admin login lockout after repeated wrong passwords (`locked_out`).
+    LoginLockout,
+}
+
+impl BlockReason {
+    /// Higher = more severe (keeps an active abuse block from being downgraded
+    /// to a shorter rate-limit entry).
+    pub fn severity(self) -> u8 {
+        match self {
+            Self::RateLimited => 1,
+            Self::YoutubeLimit => 2,
+            Self::LoginLockout => 3,
+            Self::AbuseBlock => 4,
+        }
+    }
+}
+
+fn one() -> u32 { 1 }
+
+/// One live automatic block or rate limit (`GET /admin/v1/blocks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveBlock {
+    /// Opaque id used to lift the block (`POST /admin/v1/blocks/clear`).
+    pub id: String,
+    pub reason: BlockReason,
+    /// `"account"`, `"device"`, `"install"`, or `"ip"`.
+    pub kind: String,
+    /// Operator-facing label (`@handle`, `@handle / Laptop`, `install ab12cd34`,
+    /// `IP ab12cd34`). Never contains a raw client IP address.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Route area (`"api"`, `"media"`, `"sync"`, `"youtube"`, `"admin"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[serde(default = "one")]
+    pub hits: u32,
+    /// True when the admin can lift this block early via `POST /admin/v1/blocks/clear`.
+    #[serde(default)]
+    pub clearable: bool,
+}
+
+/// Internal persisted record of an [`ActiveBlock`], carrying precomputed
+/// limiter hashes so the block can be lifted without storing raw client IPs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackedBlock {
+    #[serde(flatten)]
+    pub block: ActiveBlock,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clear_hashes: Vec<String>,
+}
+
+/// `GET /admin/v1/blocks` and `POST /admin/v1/blocks/clear`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BlocksResponse {
+    pub blocks: Vec<ActiveBlock>,
+}
+
+/// `POST /admin/v1/blocks/clear`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClearBlockRequest {
+    pub id: String,
+}
+
+/// Maximum live automatic blocks kept for the admin view.
+pub const MAX_ACTIVE_BLOCKS: usize = 200;
+
+/// Prunes expired blocks and inserts or merges `entry` by `id`.
+pub fn upsert_block(list: &mut Vec<TrackedBlock>, mut entry: TrackedBlock, now: u64) {
+    list.retain(|x| x.block.expires_at > now);
+    if let Some(cur) = list.iter_mut().find(|x| x.block.id == entry.block.id) {
+        cur.block.hits = cur.block.hits.saturating_add(1);
+        cur.block.expires_at = cur.block.expires_at.max(entry.block.expires_at);
+        if entry.block.reason.severity() >= cur.block.reason.severity() {
+            cur.block.reason = entry.block.reason;
+            if entry.block.scope.is_some() {
+                cur.block.scope = entry.block.scope;
+            }
+        }
+        cur.block.clearable |= entry.block.clearable;
+        if cur.block.handle.is_none() && entry.block.handle.is_some() {
+            cur.block.handle = entry.block.handle;
+            cur.block.label = entry.block.label;
+            cur.block.kind = entry.block.kind;
+        }
+        if cur.block.user_id.is_none() && entry.block.user_id.is_some() {
+            cur.block.user_id = entry.block.user_id;
+        }
+        for h in entry.clear_hashes {
+            if !cur.clear_hashes.contains(&h) {
+                cur.clear_hashes.push(h);
+            }
+        }
+    } else {
+        entry.block.hits = entry.block.hits.max(1);
+        list.push(entry);
+    }
+    list.sort_by(|a, b| {
+        b.block
+            .reason
+            .severity()
+            .cmp(&a.block.reason.severity())
+            .then_with(|| b.block.expires_at.cmp(&a.block.expires_at))
+    });
+    if list.len() > MAX_ACTIVE_BLOCKS {
+        list.truncate(MAX_ACTIVE_BLOCKS);
+    }
 }

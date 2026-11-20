@@ -139,6 +139,8 @@ struct DeviceRow {
     ip_hash: Option<String>,
     #[serde(default)]
     hw_hash: Option<String>,
+    #[serde(default)]
+    app_version: Option<String>,
 }
 impl From<DeviceRow> for Device {
     fn from(r: DeviceRow) -> Self {
@@ -155,6 +157,7 @@ impl From<DeviceRow> for Device {
             refresh_hash: r.refresh_hash,
             ip_hash: r.ip_hash,
             hw_hash: r.hw_hash,
+            app_version: r.app_version,
             refresh_exp: r.refresh_exp,
         }
     }
@@ -202,7 +205,7 @@ struct RevRow {
 const USER_COLS: &str = "id, handle, created_at,
     COALESCE(NULLIF(device_limit, 0), (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_device_limit'), 5) AS device_limit,
     device_limit AS device_limit_set, rev, purged_rev, recovery_hash, handle_changed_at, pw_salt, pw_hash";
-const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp, approximate_location, ip_hash, hw_hash";
+const DEVICE_COLS: &str = "id, user_id, name, platform, created_at, last_seen, access_hash, access_exp, refresh_hash, refresh_exp, approximate_location, ip_hash, hw_hash, app_version";
 const ITEM_COLS: &str = "kind, key, value, updated_at, device_id, deleted, rev";
 
 #[async_trait(?Send)]
@@ -435,7 +438,7 @@ impl AccountStore for D1Store {
 
     async fn put_device(&self, d: &Device) -> StoreResult<()> {
         self.run(
-            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!("INSERT OR REPLACE INTO devices ({DEVICE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             &[
                 s(&d.id),
                 s(&d.user_id),
@@ -450,6 +453,7 @@ impl AccountStore for D1Store {
                 opt(&d.approximate_location),
                 opt(&d.ip_hash),
                 opt(&d.hw_hash),
+                opt(&d.app_version),
             ],
         )
         .await
@@ -460,8 +464,8 @@ impl AccountStore for D1Store {
         // One statement: the count and the insert cannot interleave with another sign-in.
         self.run(
             &format!(
-                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?14"
+                "INSERT INTO devices ({DEVICE_COLS}) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                 WHERE (SELECT COUNT(*) FROM devices WHERE user_id = ?2) < ?15"
             ),
             &[
                 s(&d.id),
@@ -477,6 +481,7 @@ impl AccountStore for D1Store {
                 opt(&d.approximate_location),
                 opt(&d.ip_hash),
                 opt(&d.hw_hash),
+                opt(&d.app_version),
                 n(limit as u64),
             ],
         )
@@ -498,9 +503,12 @@ impl AccountStore for D1Store {
         Ok(())
     }
 
-    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>, app_version: Option<&str>) -> StoreResult<()> {
         let o = |v: Option<&str>| opt(&v.map(str::to_string));
-        self.run("UPDATE devices SET ip_hash = COALESCE(?2, ip_hash), hw_hash = COALESCE(?3, hw_hash) WHERE id = ?1", &[s(id), o(ip_hash), o(hw_hash)])
+        self.run(
+            "UPDATE devices SET ip_hash = COALESCE(?2, ip_hash), hw_hash = COALESCE(?3, hw_hash), app_version = COALESCE(?4, app_version) WHERE id = ?1",
+            &[s(id), o(ip_hash), o(hw_hash), o(app_version)],
+        )
             .await
             .map(|_| ())
     }
@@ -543,6 +551,8 @@ impl AccountStore for D1Store {
             devices: u64,
             last_seen: Option<u64>,
             sync_bytes: Option<f64>,
+            avatar: Option<String>,
+            banner: Option<String>,
         }
         let q = query
             .map(|v| v.trim().trim_start_matches('@').to_ascii_lowercase())
@@ -552,7 +562,9 @@ impl AccountStore for D1Store {
             u.device_limit AS device_limit_set,
             (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS devices,
             (SELECT MAX(d.last_seen) FROM devices d WHERE d.user_id = u.id) AS last_seen,
-            (SELECT SUM(LENGTH(CAST(si.value AS BLOB))) FROM sync_items si WHERE si.user_id = u.id AND si.deleted = 0) AS sync_bytes";
+            (SELECT SUM(LENGTH(CAST(si.value AS BLOB))) FROM sync_items si WHERE si.user_id = u.id AND si.deleted = 0) AS sync_bytes,
+            p.avatar AS avatar,
+            p.banner AS banner";
         let (count_stmt, list_stmt) = match q {
             Some(needle) => {
                 let escaped = needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
@@ -560,7 +572,7 @@ impl AccountStore for D1Store {
                 (
                     self.stmt("SELECT COUNT(*) AS c FROM users WHERE handle LIKE ?1 ESCAPE '\\'", &[s(&pattern)])?,
                     self.stmt(
-                        &format!("SELECT {select_cols} FROM users u WHERE u.handle LIKE ?1 ESCAPE '\\' ORDER BY u.created_at DESC, u.id ASC LIMIT ?2 OFFSET ?3"),
+                        &format!("SELECT {select_cols} FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.handle LIKE ?1 ESCAPE '\\' ORDER BY u.created_at DESC, u.id ASC LIMIT ?2 OFFSET ?3"),
                         &[s(&pattern), n(limit as u64), n(offset as u64)],
                     )?,
                 )
@@ -568,7 +580,7 @@ impl AccountStore for D1Store {
             None => (
                 self.stmt("SELECT COUNT(*) AS c FROM users", &[])?,
                 self.stmt(
-                    &format!("SELECT {select_cols} FROM users u ORDER BY u.created_at DESC, u.id ASC LIMIT ?1 OFFSET ?2"),
+                    &format!("SELECT {select_cols} FROM users u LEFT JOIN profiles p ON p.user_id = u.id ORDER BY u.created_at DESC, u.id ASC LIMIT ?1 OFFSET ?2"),
                     &[n(limit as u64), n(offset as u64)],
                 )?,
             ),
@@ -596,6 +608,8 @@ impl AccountStore for D1Store {
                 devices: r.devices,
                 last_seen: r.last_seen,
                 sync_bytes: r.sync_bytes.unwrap_or(0.0) as u64,
+                avatar: r.avatar,
+                banner: r.banner,
             })
             .collect();
         Ok((out, total))

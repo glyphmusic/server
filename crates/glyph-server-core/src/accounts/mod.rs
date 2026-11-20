@@ -450,14 +450,16 @@ impl Accounts {
         Some((user.id, device))
     }
 
-    /// Keeps the device's ban hashes current; writes only when one changed.
+    /// Keeps the device's ban hashes and app version current; writes only when one changed.
     pub(crate) async fn mark(&self, svc: &Services, device: &Device, req: &Request) {
         let ip = req.client_ip.as_deref().and_then(|ip| crate::bans::ip_hash(&svc.config.bans.salt, ip));
         let hw = req.header(glyph_protocol::HARDWARE_ID_HEADER).and_then(crate::bans::hardware_hash);
+        let ver = device_app_version(req);
         let ip = ip.filter(|h| device.ip_hash.as_deref() != Some(h.as_str()));
         let hw = hw.filter(|h| device.hw_hash.as_deref() != Some(h.as_str()));
-        if ip.is_some() || hw.is_some() {
-            let _ = self.store.mark_device(&device.id, ip.as_deref(), hw.as_deref()).await;
+        let ver = ver.filter(|v| device.app_version.as_deref() != Some(v.as_str()));
+        if ip.is_some() || hw.is_some() || ver.is_some() {
+            let _ = self.store.mark_device(&device.id, ip.as_deref(), hw.as_deref(), ver.as_deref()).await;
         }
     }
 
@@ -530,6 +532,7 @@ impl Accounts {
             refresh_exp: now + REFRESH_TTL,
             ip_hash: None,
             hw_hash: None,
+            app_version: None,
         };
         if !self.store.add_device(&device, user.device_limit).await.map_err(store_err)? {
             return Err(ApiErr::new(409, "device_limit", "remove a device first"));
@@ -544,6 +547,18 @@ impl Accounts {
         }
     }
 
+}
+
+/// App version reported by a Glyph client: `X-Glyph-App-Version` (web player)
+/// or `User-Agent: Glyph/<version>` (desktop / Android apps).
+fn device_app_version(req: &Request) -> Option<String> {
+    if let Some(raw) = req.header("x-glyph-app-version") {
+        let v = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+        if !v.is_empty() && v.len() <= 32 && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')) {
+            return Some(v.to_string());
+        }
+    }
+    req.header("user-agent").and_then(glyph_protocol::app_version_from_user_agent).map(str::to_string)
 }
 
 /// A 302 to `to` (a provider URL or a path on this server).
@@ -644,6 +659,8 @@ impl Accounts {
                     sync_bytes: u.sync_bytes,
                     banned,
                     admin,
+                    avatar: u.avatar,
+                    banner: u.banner,
                 }
             })
             .collect();
@@ -664,17 +681,58 @@ impl Accounts {
         let used_bytes = self.used_bytes(&u.id).await?;
         let banned = bans.bans.iter().any(|b| b.kind == BanKind::Account && b.value == u.id && b.live(now));
         let admin = self.store.admins().await.map_err(store_err)?.contains(&u.id);
+        let prof = self.store.profile(&u.id).await.map_err(store_err)?;
         Ok(AdminAccount {
             id: u.id,
             handle: u.handle,
             created_at: u.created_at,
             device_limit: u.device_limit,
             device_limit_set: (u.device_limit_set > 0).then_some(u.device_limit_set),
-            devices: devices.into_iter().map(|d| AdminDevice { id: d.id, name: d.name, platform: d.platform, last_seen: d.last_seen, hardware: d.hw_hash, ip_known: d.ip_hash.is_some() }).collect(),
+            devices: devices.into_iter().map(|d| AdminDevice { id: d.id, name: d.name, platform: d.platform, last_seen: d.last_seen, hardware: d.hw_hash, ip_known: d.ip_hash.is_some(), app_version: d.app_version }).collect(),
             used_bytes,
             banned,
             admin,
+            avatar: prof.as_ref().and_then(|p| p.avatar.clone()),
+            banner: prof.and_then(|p| p.banner),
         })
+    }
+
+    /// Removes an account's profile picture and/or banner and deletes the
+    /// unreferenced blob(s).
+    pub async fn admin_reset_profile_images(
+        &self,
+        handle: &str,
+        avatar: bool,
+        banner: bool,
+        bans: &crate::bans::BanList,
+        now: u64,
+    ) -> Result<crate::admin::types::AdminAccount, ApiErr> {
+        if !avatar && !banner {
+            return Err(ApiErr::bad_request("set avatar and/or banner to true"));
+        }
+        let handle = normalize_handle(handle).map_err(|_| ApiErr::not_found("no such account"))?;
+        let u = self.store.user_by_handle(&handle).await.map_err(store_err)?.ok_or_else(|| ApiErr::not_found("no such account"))?;
+        if let Some(mut p) = self.store.profile(&u.id).await.map_err(store_err)? {
+            let old_avatar = if avatar { p.avatar.take() } else { None };
+            let old_banner = if banner { p.banner.take() } else { None };
+            if old_avatar.is_some() || old_banner.is_some() {
+                if let Some(blobs) = &self.blobs {
+                    // Avatar and banner may share the same sha256; only delete blobs no longer referenced.
+                    if let Some(sha) = old_avatar.as_deref().filter(|s| p.banner.as_deref() != Some(*s)) {
+                        blobs.delete_prefix(&format!("users/{}/profile/{sha}", u.id)).await.map_err(store_err)?;
+                    }
+                    if let Some(sha) = old_banner
+                        .as_deref()
+                        .filter(|s| p.avatar.as_deref() != Some(*s) && old_avatar.as_deref() != Some(*s))
+                    {
+                        blobs.delete_prefix(&format!("users/{}/profile/{sha}", u.id)).await.map_err(store_err)?;
+                    }
+                }
+                p.updated_at = now;
+                self.store.put_profile(&u.id, &p).await.map_err(store_err)?;
+            }
+        }
+        self.admin_account(&handle, bans, now).await
     }
 
     /// The account and its devices, for bans derived from them.

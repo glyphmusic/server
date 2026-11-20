@@ -166,6 +166,8 @@ pub struct Server {
     pub(crate) host: Arc<dyn AdminHost>,
     /// Accounts and sync; `None` = those routes are 404.
     pub(crate) accounts: Option<Arc<crate::accounts::Accounts>>,
+    /// In-process active automatic blocks (fallback when the host has no shared storage).
+    blocks: Arc<std::sync::Mutex<Vec<crate::admin::types::TrackedBlock>>>,
 }
 
 impl Server {
@@ -174,7 +176,13 @@ impl Server {
     }
 
     pub fn from_arc(svc: Arc<Services>) -> Self {
-        Self { svc: Arc::new(RwLock::new(svc)), host: Arc::new(NoHost), accounts: None, queue: crate::admission::new_queue() }
+        Self {
+            svc: Arc::new(RwLock::new(svc)),
+            host: Arc::new(NoHost),
+            accounts: None,
+            queue: crate::admission::new_queue(),
+            blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
     }
 
     pub fn with_host(mut self, host: Arc<dyn AdminHost>) -> Self {
@@ -297,7 +305,7 @@ impl Server {
             }
         } else { None };
         let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.cache_blobs.is_some() || a.blobs.is_some()));
-        match dispatch(&svc, route, req, features).await {
+        match dispatch(self, &svc, route, req, features).await {
             Ok(mut r) => {
                 if let Body::Stream(stream) = r.body {
                     r.body = Body::Stream(boxed_stream(futures::stream::unfold((stream, permit), |(mut stream, permit)| async move {
@@ -335,11 +343,11 @@ impl Server {
             if let Some(ban) = svc.config.bans.find(&who, now) {
                 return Err(banned(ban, now));
             }
-            check_rules(&svc, &[
+            self.admit_rules_or_track(&svc, req, namespace, &[
                 (format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8)),
                 (format!("{namespace}:guest:{ip}"), ip_key, base),
-            ]).await?;
-            if media { youtube_quota(&svc, req, &format!("user:{owner}")).await?; }
+            ], true, None).await?;
+            if media { self.check_youtube_quota(&svc, req, &format!("user:{owner}"), Some(owner), None).await?; }
             return self.check_account_access(req, true);
         }
         let is_sync = !media && is_sync_route(&req.path);
@@ -356,17 +364,17 @@ impl Server {
                         let sync_lim = sync_base.saturating_mul(4);
                         let u_key = format!("user:{user}");
                         let d_key = format!("device:{}", device.id);
-                        check_rules_mode(&svc, &[
+                        self.admit_rules_or_track(&svc, req, "sync", &[
                             (format!("sync:{ip_key}"), ip_key, sync_base.saturating_mul(8)),
                             (format!("sync:{u_key}"), u_key, sync_lim),
                             (format!("sync:{d_key}"), d_key, sync_lim),
-                        ], false).await?;
+                        ], false, Some((&user, Some(&device.name)))).await?;
                         return self.check_account_access(req, true);
                     }
                 }
             } else {
                 // Fixed IP ceiling: adding or rotating an install ID never raises it.
-                check_rules(&svc, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))]).await?;
+                self.admit_rules_or_track(&svc, req, namespace, &[(format!("{namespace}:{ip_key}"), ip_key.clone(), base.saturating_mul(8))], true, None).await?;
                 if let Some(a) = &self.accounts {
                     if let Some((user, device)) = a.abuse_identity(&svc, req).await {
                         let who = crate::bans::Subject { account: Some(user.as_str()), ..who };
@@ -374,14 +382,14 @@ impl Server {
                             return Err(banned(ban, now));
                         }
                         a.mark(&svc, &device, req).await;
-                        if media { youtube_quota(&svc, req, &format!("user:{user}")).await?; }
+                        if media { self.check_youtube_quota(&svc, req, &format!("user:{user}"), Some(&user), Some(&device.name)).await?; }
                         let u_key = format!("user:{user}");
                         let d_key = format!("device:{}", device.id);
                         let lim = base.saturating_mul(4);
-                        check_rules_mode(&svc, &[
+                        self.admit_rules_or_track(&svc, req, namespace, &[
                             (format!("{namespace}:{u_key}"), u_key, lim),
                             (format!("{namespace}:{d_key}"), d_key, lim),
-                        ], false).await?;
+                        ], false, Some((&user, Some(&device.name)))).await?;
                         return self.check_account_access(req, true);
                     }
                 }
@@ -391,8 +399,8 @@ impl Server {
                 let key = format!("install:{id}");
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
-            check_rules(&svc, &rules).await?;
-            if media { youtube_quota(&svc, req, &format!("ip:{ip}")).await?; }
+            self.admit_rules_or_track(&svc, req, namespace, &rules, true, None).await?;
+            if media { self.check_youtube_quota(&svc, req, &format!("ip:{ip}"), None, None).await?; }
             self.check_account_access(req, false)
         } else {
             let mut rules = vec![
@@ -403,10 +411,158 @@ impl Server {
                 let key = format!("install:{id}");
                 rules.push((format!("{namespace}:{key}"), key, base));
             }
-            check_rules(&svc, &rules).await?;
-            if media { youtube_quota(&svc, req, &format!("ip:{ip}")).await?; }
+            self.admit_rules_or_track(&svc, req, namespace, &rules, true, None).await?;
+            if media { self.check_youtube_quota(&svc, req, &format!("ip:{ip}"), None, None).await?; }
             self.check_account_access(req, false)
         }
+    }
+
+    pub(crate) async fn record_block(&self, entry: crate::admin::types::TrackedBlock, now: u64) {
+        {
+            let mut list = self.blocks.lock().unwrap();
+            crate::admin::types::upsert_block(&mut list, entry.clone(), now);
+        }
+        let _ = self.host.record_block(&entry, now).await;
+    }
+
+    pub(crate) async fn list_blocks(&self, now: u64) -> Vec<crate::admin::types::TrackedBlock> {
+        if let Some(mut hosted) = self.host.active_blocks(now).await {
+            hosted.retain(|x| x.block.expires_at > now);
+            hosted.sort_by(|a, b| {
+                b.block
+                    .reason
+                    .severity()
+                    .cmp(&a.block.reason.severity())
+                    .then_with(|| b.block.expires_at.cmp(&a.block.expires_at))
+            });
+            return hosted;
+        }
+        let mut list = self.blocks.lock().unwrap();
+        list.retain(|x| x.block.expires_at > now);
+        list.clone()
+    }
+
+    pub(crate) async fn clear_block(&self, svc: &Services, id: &str, now: u64) -> Result<Vec<crate::admin::types::ActiveBlock>, ApiErr> {
+        let local = {
+            let mut list = self.blocks.lock().unwrap();
+            list.retain(|x| x.block.expires_at > now);
+            list.iter().position(|x| x.block.id == id).map(|i| list.remove(i))
+        };
+        let hosted = self.host.remove_block(id, now).await;
+        let found = hosted.or(local).ok_or_else(|| ApiErr::not_found("no active block matches"))?;
+        if !found.block.clearable {
+            return Err(ApiErr::bad_request("this temporary limit expires on its own"));
+        }
+        svc.limiter.unblock_hashes(&found.clear_hashes).await;
+        Ok(self.list_blocks(now).await.into_iter().map(|t| t.block).collect())
+    }
+
+    async fn admit_rules_or_track(
+        &self,
+        svc: &Services,
+        req: &Request,
+        scope: &str,
+        rules: &[(String, String, u32)],
+        penalize: bool,
+        known_user: Option<(&str, Option<&str>)>,
+    ) -> Result<(), ApiErr> {
+        if let Err((is_abuse_block, retry, principal)) = svc.limiter.admit_rules_checked(rules, 60, penalize).await {
+            let now = svc.rt.now_ms();
+            let (uid, dev_name) = match known_user {
+                Some((u, d)) => (Some(u.to_string()), d.map(str::to_string)),
+                None => match &self.accounts {
+                    Some(a) if req.header("authorization").is_some_and(|h| h.starts_with("Bearer ")) => {
+                        match a.abuse_identity(svc, req).await {
+                            Some((u, d)) => (Some(u), Some(d.name)),
+                            None => (None, None),
+                        }
+                    }
+                    _ => (None, None),
+                },
+            };
+            let handle = match (&self.accounts, uid.as_deref()) {
+                (Some(a), Some(u)) => a.store.user(u).await.ok().flatten().map(|x| x.handle),
+                _ => None,
+            };
+            let (kind, label) = block_identity(svc, &principal, handle.as_deref(), dev_name.as_deref());
+            let reason = if is_abuse_block {
+                crate::admin::types::BlockReason::AbuseBlock
+            } else {
+                crate::admin::types::BlockReason::RateLimited
+            };
+            let clear_hashes = if is_abuse_block {
+                vec![
+                    crate::access::token_hash(&format!("ban:{principal}")),
+                    crate::access::token_hash(&format!("strikes:{principal}")),
+                ]
+            } else {
+                Vec::new()
+            };
+            let id = crate::access::token_hash(&format!("abuse|{principal}"))[..12].to_string();
+            let entry = crate::admin::types::TrackedBlock {
+                block: crate::admin::types::ActiveBlock {
+                    id,
+                    reason,
+                    kind,
+                    label,
+                    handle,
+                    user_id: uid,
+                    scope: Some(scope.to_string()),
+                    created_at: now,
+                    expires_at: now.saturating_add(retry.saturating_mul(1000)),
+                    hits: 1,
+                    clearable: is_abuse_block,
+                },
+                clear_hashes,
+            };
+            self.record_block(entry, now).await;
+            let mut e = ApiErr::rate_limited(retry);
+            if is_abuse_block {
+                e.body.code = "temporarily_blocked".into();
+                e.body.message = "temporary abuse protection; retry later".into();
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn check_youtube_quota(
+        &self,
+        svc: &Services,
+        req: &Request,
+        who: &str,
+        uid: Option<&str>,
+        dev_name: Option<&str>,
+    ) -> Result<(), ApiErr> {
+        if let Err(e) = youtube_quota(svc, req, who).await {
+            let now = svc.rt.now_ms();
+            let retry = e.body.retry_after_s.unwrap_or(3600);
+            let handle = match (&self.accounts, uid) {
+                (Some(a), Some(u)) => a.store.user(u).await.ok().flatten().map(|x| x.handle),
+                _ => None,
+            };
+            let (kind, label) = block_identity(svc, who, handle.as_deref(), dev_name);
+            let id = crate::access::token_hash(&format!("youtube|{who}"))[..12].to_string();
+            let entry = crate::admin::types::TrackedBlock {
+                block: crate::admin::types::ActiveBlock {
+                    id,
+                    reason: crate::admin::types::BlockReason::YoutubeLimit,
+                    kind,
+                    label,
+                    handle,
+                    user_id: uid.map(str::to_string),
+                    scope: Some("youtube".into()),
+                    created_at: now,
+                    expires_at: now.saturating_add(retry.saturating_mul(1000)),
+                    hits: 1,
+                    clearable: false,
+                },
+                clear_hashes: Vec::new(),
+            };
+            self.record_block(entry, now).await;
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn check_account_access(&self, req: &Request, member: bool) -> Result<bool, ApiErr> {
@@ -471,20 +627,31 @@ fn is_sync_route(path: &str) -> bool {
     p == "/v1/sync" || p.starts_with("/v1/sync/")
 }
 
-async fn check_rules(svc: &Services, rules: &[(String, String, u32)]) -> Result<(), ApiErr> {
-    check_rules_mode(svc, rules, true).await
-}
-
-async fn check_rules_mode(svc: &Services, rules: &[(String, String, u32)], penalize: bool) -> Result<(), ApiErr> {
-    if let Err((banned, retry)) = svc.limiter.admit_rules_checked(rules, 60, penalize).await {
-        let mut e = ApiErr::rate_limited(retry);
-        if banned {
-            e.body.code = "temporarily_blocked".into();
-            e.body.message = "temporary abuse protection; retry later".into();
-        }
-        return Err(e);
+/// Privacy-preserving `(kind, label)` for an automatic block: never exposes a raw IP.
+pub(crate) fn block_identity(svc: &Services, principal: &str, handle: Option<&str>, device: Option<&str>) -> (String, String) {
+    if let Some(h) = handle {
+        return if principal.starts_with("device:") {
+            let lbl = match device {
+                Some(d) => format!("@{h} / {d}"),
+                None => format!("@{h}"),
+            };
+            ("device".into(), lbl)
+        } else if principal.starts_with("ip:") {
+            ("account".into(), format!("@{h} (IP)"))
+        } else {
+            ("account".into(), format!("@{h}"))
+        };
     }
-    Ok(())
+    if let Some(id) = principal.strip_prefix("install:") {
+        return ("install".into(), format!("install {}", &id[..id.len().min(8)]));
+    }
+    if let Some(ip) = principal.strip_prefix("ip:") {
+        let h = crate::bans::ip_hash(&svc.config.bans.salt, ip)
+            .unwrap_or_else(|| crate::access::token_hash(principal));
+        return ("ip".into(), format!("IP {}", &h[..h.len().min(8)]));
+    }
+    let h = crate::access::token_hash(principal);
+    ("ip".into(), format!("client {}", &h[..h.len().min(8)]))
 }
 
 /// Cover art for `track`: its own non-YouTube cover when it is on a known cover
@@ -641,7 +808,7 @@ fn outdated_app(config: &crate::config::Config, req: &Request) -> Option<ApiErr>
     })
 }
 
-async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
+async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
     {
         match route {
             Route::Health => Ok(Response::json(
@@ -802,7 +969,7 @@ async fn dispatch(svc: &Arc<Services>, route: Route, req: Request, (accounts, co
                 }
                 if r.offset == 0 {
                     let ip = req.client_ip.as_deref().unwrap_or("unknown");
-                    check_rules(svc, &[(format!("import-start:{ip}"), format!("ip:{ip}"), 4)]).await?;
+                    server.admit_rules_or_track(svc, &req, "import", &[(format!("import-start:{ip}"), format!("ip:{ip}"), 4)], true, None).await?;
                 }
                 let resp = match svc.cmds.import_page(&r).await {
                     Some(result) => result?,

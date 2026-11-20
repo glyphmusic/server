@@ -62,6 +62,18 @@ pub trait AdminHost: MaybeSendSync {
     async fn history(&self) -> Vec<DayStats> {
         Vec::new()
     }
+    /// Record an active automatic block / rate limit on shared host storage.
+    async fn record_block(&self, _entry: &TrackedBlock, _now: u64) -> bool {
+        false
+    }
+    /// Read live automatic blocks from shared host storage (`None` = use in-process memory).
+    async fn active_blocks(&self, _now: u64) -> Option<Vec<TrackedBlock>> {
+        None
+    }
+    /// Remove a live block from shared host storage when lifted early.
+    async fn remove_block(&self, _id: &str, _now: u64) -> Option<TrackedBlock> {
+        None
+    }
 }
 
 /// Used when no host is configured (tests, embedding).

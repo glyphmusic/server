@@ -37,6 +37,20 @@ impl RateLimiter for MemoryRateLimiter {
         }
     }
 
+    async fn unblock_hashes(&self, hashes: &[String]) {
+        if hashes.is_empty() {
+            return;
+        }
+        self.bans
+            .lock()
+            .unwrap()
+            .retain(|k, _| !hashes.iter().any(|h| h == &crate::access::token_hash(&format!("ban:{k}"))));
+        self.state
+            .lock()
+            .unwrap()
+            .retain(|k, _| !hashes.iter().any(|h| h == &crate::access::token_hash(k)));
+    }
+
     async fn check(&self, key: &str, limit: u32, window_s: u64) -> RateDecision {
         let now = self.rt.now_ms();
         let window_ms = window_s * 1000;

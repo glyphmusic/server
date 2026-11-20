@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.8 - 2026-11-20
+
+### Added
+
+- **Device app version tracking**: records each device's last reported Glyph app version (`app_version` via `User-Agent` / `X-Glyph-App-Version`, D1 migration `0017_device_app_version.sql`) and surfaces it in the admin dashboard and CLI.
+- **Admin API blocks & profile reset**: added `/admin/v1/blocks` and `/admin/v1/blocks/clear` to inspect and lift active abuse blocks, rate limits, YouTube daily limits and login lockouts, plus `/admin/v1/accounts/<handle>/profile/reset` to remove a user's profile picture or banner.
+
+### Changed
+
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.12.14` and refreshed embedded desktop (`0.12.14`) and server (`0.11.8`) changelogs.
+
 ## 0.11.7 - 2026-11-20
 
 ### Added

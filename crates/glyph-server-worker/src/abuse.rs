@@ -14,6 +14,8 @@ pub struct D1Limiter {
 }
 #[derive(serde::Deserialize)]
 struct Row { count: u32, expires: u64 }
+#[derive(serde::Deserialize)]
+struct BanRow { key: String, expires: u64 }
 fn num(n: u64) -> JsValue { JsValue::from_f64(n as f64) }
 fn key(k: &str) -> JsValue { JsValue::from_str(&glyph_server_core::access::token_hash(k)) }
 
@@ -68,6 +70,21 @@ impl RateLimiter for D1Limiter {
         }
     }
 
+    async fn unblock_hashes(&self, hashes: &[String]) {
+        if hashes.is_empty() {
+            return;
+        }
+        if let Some(db) = &self.db {
+            let ph: Vec<String> = (1..=hashes.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!("DELETE FROM abuse_limits WHERE key IN ({})", ph.join(","));
+            let args: Vec<JsValue> = hashes.iter().map(|h| JsValue::from_str(h)).collect();
+            if let Ok(stmt) = db.prepare(&sql).bind(&args) {
+                let _ = stmt.run().await;
+            }
+        }
+        self.admin.unblock_hashes(hashes).await;
+    }
+
     async fn check_often(&self, k: &str, limit: u32, window_s: u64) -> RateDecision {
         self.admin.check(k, limit, window_s).await
     }
@@ -75,7 +92,7 @@ impl RateLimiter for D1Limiter {
     /// Bans are read from D1 (one batched read, no write); the per-request
     /// quotas are counted in the Cache API, so ordinary traffic writes
     /// nothing to D1. Only violations write (strikes, then a ban).
-    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64)> {
+    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64, String)> {
         if rules.is_empty() { return Ok(()); }
         let Some(db) = &self.db else { return self.admin.admit_rules_checked(rules, window_s, penalize).await; };
         let now = self.rt.now_ms();
@@ -85,20 +102,26 @@ impl RateLimiter for D1Limiter {
                 principals.push(p.as_str());
             }
         }
+        let ban_hashes: Vec<String> = principals.iter().map(|p| glyph_server_core::access::token_hash(&format!("ban:{p}"))).collect();
         let ban_placeholders: Vec<String> = (1..=principals.len()).map(|i| format!("?{i}")).collect();
         let ban_sql = format!(
-            "SELECT count,expires FROM abuse_limits WHERE key IN ({}) AND expires>?{} ORDER BY expires DESC LIMIT 1",
+            "SELECT key,expires FROM abuse_limits WHERE key IN ({}) AND expires>?{} ORDER BY expires DESC LIMIT 1",
             ban_placeholders.join(","),
             principals.len() + 1
         );
-        let mut ban_args: Vec<JsValue> = principals.iter().map(|p| key(&format!("ban:{p}"))).collect();
+        let mut ban_args: Vec<JsValue> = ban_hashes.iter().map(|h| JsValue::from_str(h)).collect();
         ban_args.push(num(now));
         let Ok(ban_stmt) = db.prepare(&ban_sql).bind(&ban_args) else { return self.admin.admit_rules_checked(rules, window_s, penalize).await; };
-        match ban_stmt.first::<Row>(None).await {
+        match ban_stmt.first::<BanRow>(None).await {
             Ok(Some(row)) => {
                 let left = row.expires.saturating_sub(now);
                 if left > 0 {
-                    return Err((true, left.div_ceil(1000)));
+                    let who = ban_hashes
+                        .iter()
+                        .position(|h| h == &row.key)
+                        .and_then(|i| principals.get(i).copied())
+                        .unwrap_or_else(|| principals[0]);
+                    return Err((true, left.div_ceil(1000), who.to_string()));
                 }
             }
             Ok(None) => {}
@@ -109,10 +132,10 @@ impl RateLimiter for D1Limiter {
                 if penalize {
                     self.penalize(principal).await;
                     if let Some(retry) = self.blocked(principal).await {
-                        return Err((true, retry));
+                        return Err((true, retry, principal.clone()));
                     }
                 }
-                return Err((false, retry_after_s));
+                return Err((false, retry_after_s, principal.clone()));
             }
         }
         Ok(())

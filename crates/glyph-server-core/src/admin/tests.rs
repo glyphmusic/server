@@ -448,6 +448,7 @@ fn accounts_list_and_max_accounts_cap() {
         refresh_exp: 99_999,
         ip_hash: None,
         hw_hash: None,
+        app_version: None,
     }))
     .unwrap();
     block_on(store.push_items("u_2", &[Item {
@@ -593,6 +594,7 @@ fn admin_accounts_use_the_dashboard_but_not_owner_routes() {
         refresh_exp: u64::MAX / 2,
         ip_hash: None,
         hw_hash: None,
+        app_version: None,
     };
     for (id, handle) in [("u_1", "alice"), ("u_2", "bob"), ("u_3", "carol")] {
         assert!(block_on(store.create_user(&user(id, handle), None, 1)).unwrap());
@@ -682,4 +684,173 @@ fn release_channels_are_set_with_limits_and_shown_in_health() {
     let mut bad = v.clone();
     bad["stable_app_version"] = "soon".into();
     assert_eq!(call(&t, req(Method::Put, "/admin/v1/limits", &bad.to_string(), tok)).0, 400);
+}
+
+#[test]
+fn admin_lists_profile_images_and_resets_avatar_and_banner() {
+    use crate::accounts::store::{AccountStore, BlobStore, Device, MemBlobs, MemStore, Profile, User};
+    use sha2::{Digest, Sha256};
+
+    let mut t = setup(true, TestHost::default());
+    let store = Arc::new(MemStore::default());
+    let blobs = Arc::new(MemBlobs::default());
+    struct Entropy;
+    impl crate::accounts::Entropy for Entropy {
+        fn fill(&self, bytes: &mut [u8]) { bytes.fill(3); }
+    }
+    t.server = t.server.with_accounts(crate::accounts::Accounts {
+        store: store.clone(),
+        blobs: Some(blobs.clone()),
+        cache_blobs: None,
+        entropy: Arc::new(Entropy),
+        origin: "https://glyph.example".into(),
+        extra_origins: vec![],
+        rp_id: None,
+        push: None,
+    });
+    t.server.update_config(|c| c.bans = Arc::new(crate::bans::BanList { salt: "s".into(), bans: vec![] }));
+
+    let mk_user = |id: &str, handle: &str| User {
+        id: id.into(),
+        handle: handle.into(),
+        created_at: 1,
+        device_limit: 5,
+        device_limit_set: 0,
+        rev: 0,
+        purged_rev: 0,
+        recovery_hash: "r".into(),
+        handle_changed_at: 0,
+        pw_salt: None,
+        pw_hash: None,
+    };
+    let hex = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let mk_dev = |id: &str, user_id: &str, tok: &str| Device {
+        approximate_location: None,
+        id: id.into(),
+        user_id: user_id.into(),
+        name: "Phone".into(),
+        platform: "android".into(),
+        created_at: 1,
+        last_seen: 1,
+        access_hash: hex(tok),
+        access_exp: u64::MAX / 2,
+        refresh_hash: format!("r{id}"),
+        refresh_exp: u64::MAX / 2,
+        ip_hash: None,
+        hw_hash: None,
+        app_version: None,
+    };
+    for (id, h) in [("u_1", "alice"), ("u_2", "bob"), ("u_3", "carol")] {
+        assert!(block_on(store.create_user(&mk_user(id, h), None, 1)).unwrap());
+    }
+    block_on(store.put_device(&mk_dev("d_1", "u_1", "gat_alice"))).unwrap();
+    block_on(store.put_device(&mk_dev("d_2", "u_2", "gat_bob"))).unwrap();
+
+    let av_sha = hex("avatar-bytes");
+    let bn_sha = hex("banner-bytes");
+    let shared_sha = hex("shared-bytes");
+    block_on(blobs.put(&format!("users/u_3/profile/{av_sha}"), vec![1, 2, 3], "image/webp")).unwrap();
+    block_on(blobs.put(&format!("users/u_3/profile/{bn_sha}"), vec![4, 5, 6], "image/webp")).unwrap();
+    block_on(blobs.put(&format!("users/u_2/profile/{shared_sha}"), vec![7, 8, 9], "image/webp")).unwrap();
+    block_on(store.put_profile("u_3", &Profile { avatar: Some(av_sha.clone()), banner: Some(bn_sha.clone()), ..Default::default() })).unwrap();
+    block_on(store.put_profile("u_2", &Profile { avatar: Some(shared_sha.clone()), banner: Some(shared_sha.clone()), ..Default::default() })).unwrap();
+
+    let pair = login(&t);
+    let owner = Some(pair.access_token.as_str());
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/alice/admin", r#"{"admin":true}"#, owner)).0, 200);
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/bob/admin", r#"{"admin":true}"#, owner)).0, 200);
+    let alice = Some("gat_alice");
+
+    // List and detail both expose avatar and banner.
+    let (s, list, _) = call(&t, req(Method::Get, "/admin/v1/accounts", "", alice));
+    assert_eq!(s, 200);
+    let carol_row = list["accounts"].as_array().unwrap().iter().find(|a| a["handle"] == "carol").unwrap();
+    assert_eq!(carol_row["avatar"].as_str(), Some(av_sha.as_str()));
+    assert_eq!(carol_row["banner"].as_str(), Some(bn_sha.as_str()));
+
+    let (s, det, _) = call(&t, req(Method::Get, "/admin/v1/accounts/carol", "", alice));
+    assert_eq!((s, det["avatar"].as_str(), det["banner"].as_str()), (200, Some(av_sha.as_str()), Some(bn_sha.as_str())));
+
+    // Empty reset body is rejected.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/carol/profile/reset", "{}", alice)).0, 400);
+    // Wrong method is 405.
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/accounts/carol/profile/reset", "", alice)).0, 405);
+    // Admin account cannot reset another admin's profile images.
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/bob/profile/reset", r#"{"avatar":true}"#, alice)).0, 403);
+
+    // Admin account can reset a regular user's avatar, keeping their banner.
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/accounts/carol/profile/reset", r#"{"avatar":true}"#, alice));
+    assert_eq!((s, v["avatar"].is_null(), v["banner"].as_str()), (200, true, Some(bn_sha.as_str())));
+    assert!(!blobs.objects.lock().unwrap().contains_key(&format!("users/u_3/profile/{av_sha}")));
+    assert!(blobs.objects.lock().unwrap().contains_key(&format!("users/u_3/profile/{bn_sha}")));
+
+    // Resetting carol's banner removes its blob too.
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/accounts/carol/profile/reset", r#"{"banner":true}"#, alice));
+    assert_eq!((s, v["avatar"].is_null(), v["banner"].is_null()), (200, true, true));
+    assert!(!blobs.objects.lock().unwrap().contains_key(&format!("users/u_3/profile/{bn_sha}")));
+
+    // When avatar and banner share a blob, resetting only avatar keeps the blob for banner.
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/accounts/bob/profile/reset", r#"{"avatar":true}"#, owner));
+    assert_eq!((s, v["avatar"].is_null(), v["banner"].as_str()), (200, true, Some(shared_sha.as_str())));
+    assert!(blobs.objects.lock().unwrap().contains_key(&format!("users/u_2/profile/{shared_sha}")));
+
+    // Resetting banner now removes the shared blob.
+    let (s, v, _) = call(&t, req(Method::Post, "/admin/v1/accounts/bob/profile/reset", r#"{"banner":true}"#, owner));
+    assert_eq!((s, v["avatar"].is_null(), v["banner"].is_null()), (200, true, true));
+    assert!(!blobs.objects.lock().unwrap().contains_key(&format!("users/u_2/profile/{shared_sha}")));
+}
+
+#[test]
+fn admin_blocks_lists_api_rate_limits_abuse_blocks_and_clears_them() {
+    let t = setup(true, TestHost::default());
+    t.server.update_config(|c| {
+        c.rate_limit_per_min = 1;
+        c.bans = Arc::new(crate::bans::BanList { salt: "s".into(), bans: vec![] });
+    });
+    let pair = login(&t);
+    let owner = Some(pair.access_token.as_str());
+
+    // Initially no active API blocks.
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/blocks", "", owner));
+    assert_eq!((s, v["blocks"].as_array().map(Vec::len)), (200, Some(0)));
+
+    // Trigger rate limit (1st allowed, 2nd rate-limited), then escalate to 15-min abuse block (12 strikes).
+    let client_ip = "203.0.113.77";
+    let hit = || call(&t, Request::new(Method::Get, "/v1/lyrics", vec![], vec![], Some(client_ip.into())).with_transport(true, false));
+    assert_ne!(hit().0, 429);
+    let (s, v, _) = hit();
+    assert_eq!((s, v["code"].as_str()), (429, Some("rate_limited")));
+
+    let (s, list, _) = call(&t, req(Method::Get, "/admin/v1/blocks", "", owner));
+    assert_eq!(s, 200);
+    let blocks = list["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["reason"], "rate_limited");
+    assert_eq!(blocks[0]["clearable"], false);
+    assert!(!blocks[0]["label"].as_str().unwrap().contains(client_ip), "never expose raw client IP");
+
+    // Hammer until escalated to temporary abuse block (11 more strikes -> 12 total).
+    let mut last_code = String::new();
+    for _ in 0..12 {
+        let (_, v, _) = hit();
+        last_code = v["code"].as_str().unwrap_or("").to_string();
+    }
+    assert_eq!(last_code, "temporarily_blocked");
+
+    let (s, list, _) = call(&t, req(Method::Get, "/admin/v1/blocks", "", owner));
+    assert_eq!(s, 200);
+    let blocks = list["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "escalating updates the same entry instead of duplicating");
+    assert_eq!(blocks[0]["reason"], "abuse_block");
+    assert_eq!(blocks[0]["clearable"], true);
+    let id = blocks[0]["id"].as_str().unwrap().to_string();
+
+    // Advance past the 1-min window: client is STILL blocked by the 15-min abuse block.
+    t.h.rt.advance(65_000);
+    assert_eq!(hit().1["code"], "temporarily_blocked");
+
+    // Admin lifts the block early -> client is admitted again!
+    let (s, cleared, _) = call(&t, req(Method::Post, "/admin/v1/blocks/clear", &format!(r#"{{"id":"{id}"}}"#), owner));
+    assert_eq!((s, cleared["blocks"].as_array().map(Vec::len)), (200, Some(0)));
+    assert_ne!(hit().0, 429, "client should be unblocked immediately");
 }

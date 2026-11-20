@@ -609,6 +609,39 @@ impl AdminHost for WorkerHost {
         }
     }
 
+    async fn record_block(&self, entry: &glyph_server_core::admin::types::TrackedBlock, now: u64) -> bool {
+        let Some(db) = &self.db else { return false };
+        // Debounce D1 writes per (block id, severity) so a flood of 429s from an
+        // already-blocked client does not exhaust the daily D1 write budget.
+        let gate_key = format!("block-seen:{}:{}", entry.block.id, entry.block.reason.severity());
+        if glyph_server_core::cache::get_json::<u64>(self.cache.as_ref(), &gate_key).await.is_some_and(|exp| exp >= entry.block.expires_at.saturating_sub(15_000)) {
+            return true;
+        }
+        glyph_server_core::cache::put_json(self.cache.as_ref(), &gate_key, &entry.block.expires_at, 60).await;
+        let mut list = read_active_blocks(db, now).await;
+        glyph_server_core::admin::types::upsert_block(&mut list, entry.clone(), now);
+        write_active_blocks(db, &list).await;
+        true
+    }
+
+    async fn active_blocks(&self, now: u64) -> Option<Vec<glyph_server_core::admin::types::TrackedBlock>> {
+        let db = self.db.as_ref()?;
+        Some(read_active_blocks(db, now).await)
+    }
+
+    async fn remove_block(&self, id: &str, now: u64) -> Option<glyph_server_core::admin::types::TrackedBlock> {
+        let db = self.db.as_ref()?;
+        let mut list = read_active_blocks(db, now).await;
+        let pos = list.iter().position(|x| x.block.id == id)?;
+        let removed = list.remove(pos);
+        write_active_blocks(db, &list).await;
+        for sev in 1..=4u8 {
+            let gate_key = format!("block-seen:{id}:{sev}");
+            self.cache.put(&gate_key, vec![], 1).await;
+        }
+        Some(removed)
+    }
+
     async fn persist_limits(&self, l: &Limits) -> std::result::Result<(), HostError> {
         let db = self.db.as_ref().ok_or_else(|| HostError::Unsupported("needs the GLYPH_DB binding".into()))?;
         let value = serde_json::to_string(l).map_err(|_| HostError::Failed("could not encode limits".into()))?;
@@ -632,6 +665,31 @@ impl AdminHost for WorkerHost {
                 .map_err(|_| HostError::Failed("limits saved; audio cleanup pending".into()))?;
         }
         Ok(())
+    }
+}
+
+async fn read_active_blocks(db: &worker::D1Database, now: u64) -> Vec<glyph_server_core::admin::types::TrackedBlock> {
+    #[derive(serde::Deserialize)]
+    struct Row { value: String }
+    let mut list: Vec<glyph_server_core::admin::types::TrackedBlock> = match db
+        .prepare("SELECT value FROM server_settings WHERE key = 'active_blocks'")
+        .first::<Row>(None)
+        .await
+    {
+        Ok(Some(r)) => serde_json::from_str(&r.value).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    list.retain(|x| x.block.expires_at > now);
+    list
+}
+
+async fn write_active_blocks(db: &worker::D1Database, list: &[glyph_server_core::admin::types::TrackedBlock]) {
+    let Ok(value) = serde_json::to_string(list) else { return };
+    if let Ok(stmt) = db
+        .prepare("INSERT INTO server_settings (key, value) VALUES ('active_blocks', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(&[value.into()])
+    {
+        let _ = stmt.run().await;
     }
 }
 

@@ -54,9 +54,12 @@ enum R {
     AccountGet,
     AccountPut,
     AccountRevoke,
+    AccountProfileReset,
     BansGet,
     BansAdd,
     BansRemove,
+    BlocksGet,
+    BlocksClear,
     Stats,
     Me,
     History,
@@ -120,11 +123,14 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "bans" if m == Post => (R::BansAdd, Post),
         "bans" => (R::BansGet, Get),
         "bans/remove" => (R::BansRemove, Post),
+        "blocks" => (R::BlocksGet, Get),
+        "blocks/clear" => (R::BlocksClear, Post),
         "stats" => (R::Stats, Get),
         "me" => (R::Me, Get),
         "history" => (R::History, Get),
         "app-releases" => (R::AppReleases, Get),
         "accounts" => (R::AccountsList, Get),
+        s if s.strip_prefix("accounts/").is_some_and(|h| h.ends_with("/profile/reset")) => (R::AccountProfileReset, Post),
         s if s.strip_prefix("accounts/").is_some_and(|h| h.ends_with("/admin")) => (R::AccountRole, Post),
         s if s.starts_with("accounts/") && s.ends_with("/revoke") => (R::AccountRevoke, Post),
         s if s.starts_with("accounts/") && m == Put => (R::AccountPut, Put),
@@ -456,17 +462,25 @@ impl Server {
                 &self.host.companion_update(matches!(route,R::RdlpCheck|R::RdlpApply), matches!(route,R::CompanionApply|R::RdlpApply)).await.map_err(host_err)?)),
             R::UpdateCheck => Ok(Response::json(200, &self.host.update_check().await.map_err(host_err)?)),
             R::UpdateApply => Ok(Response::json(200, &self.host.update_apply().await.map_err(host_err)?)),
-            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountsList | R::AccountGet | R::AccountPut | R::AccountRevoke | R::AccountRole => {
+            R::AccountDefaultsGet | R::AccountDefaultsPut | R::AccountsList | R::AccountGet | R::AccountPut | R::AccountRevoke | R::AccountProfileReset | R::AccountRole => {
                 let acc = self.accounts.as_ref().ok_or_else(|| ApiErr::new(501, "not_supported", "accounts are not enabled on this server"))?;
                 let handle = sub.strip_prefix("accounts/").unwrap_or("");
-                let target = handle.strip_suffix("/revoke").or_else(|| handle.strip_suffix("/admin")).unwrap_or(handle);
-                if matches!(route, R::AccountPut | R::AccountRevoke) {
+                let target = handle
+                    .strip_suffix("/profile/reset")
+                    .or_else(|| handle.strip_suffix("/revoke"))
+                    .or_else(|| handle.strip_suffix("/admin"))
+                    .unwrap_or(handle);
+                if matches!(route, R::AccountPut | R::AccountRevoke | R::AccountProfileReset) {
                     self.guard_target(&caller, target, svc, now).await?;
                 }
                 match route {
                     R::AccountRole => {
                         let b: AdminRoleRequest = parse_body(&req)?;
                         Ok(Response::json(200, &acc.admin_set_role(target, b.admin, &svc.config.bans, now).await?))
+                    }
+                    R::AccountProfileReset => {
+                        let b: ResetProfileImagesRequest = parse_body(&req)?;
+                        Ok(Response::json(200, &acc.admin_reset_profile_images(target, b.avatar, b.banner, &svc.config.bans, now).await?))
                     }
                     R::AccountDefaultsGet => Ok(Response::json(200, &acc.admin_defaults().await?)),
                     R::AccountDefaultsPut => Ok(Response::json(200, &acc.admin_set_defaults(&parse_body::<AccountDefaults>(&req)?).await?)),
@@ -497,6 +511,19 @@ impl Server {
                 self.ban(svc, b).await
             }
             R::BansRemove => self.unban(svc, parse_body(&req)?).await,
+            R::BlocksGet => {
+                let blocks = self.list_blocks(now).await.into_iter().map(|t| t.block).collect();
+                Ok(Response::json(200, &BlocksResponse { blocks }))
+            }
+            R::BlocksClear => {
+                let b: ClearBlockRequest = parse_body(&req)?;
+                let id = b.id.trim();
+                if id.is_empty() || id.len() > 64 {
+                    return Err(ApiErr::bad_request("invalid block id"));
+                }
+                let blocks = self.clear_block(svc, id, now).await?;
+                Ok(Response::json(200, &BlocksResponse { blocks }))
+            }
             R::Stats => {
                 let now = svc.rt.now_ms();
                 let storage = self.host.storage().await.map(|mut s| {
@@ -549,8 +576,32 @@ impl Server {
         if !auth::verify_password(&b.password, hash) {
             let n = cache::get_json::<u64>(&*svc.cache, &fail_key).await.unwrap_or(0) + 1;
             if n >= MAX_LOGIN_FAILURES {
-                cache::put_json(&*svc.cache, &lock_key, &(now + LOCKOUT_S * 1000), LOCKOUT_S).await;
+                let until = now + LOCKOUT_S * 1000;
+                cache::put_json(&*svc.cache, &lock_key, &until, LOCKOUT_S).await;
                 cache::put_json(&*svc.cache, &fail_key, &0u64, LOCKOUT_S).await;
+                let principal = format!("ip:{who}");
+                let (kind, label) = crate::server::block_identity(svc, &principal, None, None);
+                let id = crate::access::token_hash(&format!("login|{principal}"))[..12].to_string();
+                self.record_block(
+                    TrackedBlock {
+                        block: ActiveBlock {
+                            id,
+                            reason: BlockReason::LoginLockout,
+                            kind,
+                            label,
+                            handle: None,
+                            user_id: None,
+                            scope: Some("admin".into()),
+                            created_at: now,
+                            expires_at: until,
+                            hits: 1,
+                            clearable: false,
+                        },
+                        clear_hashes: Vec::new(),
+                    },
+                    now,
+                )
+                .await;
             } else {
                 cache::put_json(&*svc.cache, &fail_key, &n, LOCKOUT_S).await;
             }

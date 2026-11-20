@@ -160,28 +160,31 @@ pub trait RateLimiter: MaybeSendSync {
     async fn blocked(&self, key: &str) -> Option<u64>;
     /// Record a rejected request; repeated violations trigger a temporary ban.
     async fn penalize(&self, key: &str);
+    /// Lift temporary abuse lockouts/strikes whose `token_hash("ban:{k}")` or
+    /// `token_hash("strikes:{k}")` is listed in `hashes`.
+    async fn unblock_hashes(&self, _hashes: &[String]) {}
     /// Check `(quota_key, principal, limit)` rules in order for `window_s`.
-    /// Returns `Err((true, retry_after_s))` if `principal` is blocked, or
-    /// `Err((false, retry_after_s))` if rate-limited.
-    async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64)> {
+    /// Returns `Err((true, retry_after_s, principal))` if `principal` is
+    /// blocked, or `Err((false, retry_after_s, principal))` if rate-limited.
+    async fn admit_rules(&self, rules: &[(String, String, u32)], window_s: u64) -> Result<(), (bool, u64, String)> {
         self.admit_rules_checked(rules, window_s, true).await
     }
     /// Same as [`admit_rules`](Self::admit_rules), but when `penalize` is false
     /// hitting the window cap returns `429 rate_limited` without recording
     /// strikes toward a temporary global lockout. Existing bans still apply.
-    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64)> {
+    async fn admit_rules_checked(&self, rules: &[(String, String, u32)], window_s: u64, penalize: bool) -> Result<(), (bool, u64, String)> {
         for (quota_key, principal, limit) in rules {
             if let Some(retry) = self.blocked(principal).await {
-                return Err((true, retry));
+                return Err((true, retry, principal.clone()));
             }
             if let RateDecision::Limited { retry_after_s } = self.check(quota_key, *limit, window_s).await {
                 if penalize {
                     self.penalize(principal).await;
                     if let Some(retry) = self.blocked(principal).await {
-                        return Err((true, retry));
+                        return Err((true, retry, principal.clone()));
                     }
                 }
-                return Err((false, retry_after_s));
+                return Err((false, retry_after_s, principal.clone()));
             }
         }
         Ok(())

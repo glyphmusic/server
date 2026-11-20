@@ -71,6 +71,8 @@ pub struct Device {
     pub ip_hash: Option<String>,
     /// [`crate::bans::hardware_hash`] of the app's hardware id.
     pub hw_hash: Option<String>,
+    /// Last reported app version (e.g. `0.12.13`).
+    pub app_version: Option<String>,
 }
 
 /// Counts for `glyph remote stats`.
@@ -95,6 +97,8 @@ pub struct UserSummary {
     pub devices: u64,
     pub last_seen: Option<u64>,
     pub sync_bytes: u64,
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
 }
 
 /// A sign-in in progress (10 minutes).
@@ -224,8 +228,8 @@ pub trait AccountStore: MaybeSendSync {
     async fn delete_device(&self, user_id: &str, id: &str) -> StoreResult<bool>;
     /// Remove all devices belonging to `user_id`.
     async fn delete_user_devices(&self, user_id: &str) -> StoreResult<()>;
-    /// Remember the hashes bans match on (only called when they changed).
-    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()>;
+    /// Remember the hashes bans match on and the device's app version (only called when changed).
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>, app_version: Option<&str>) -> StoreResult<()>;
     /// Totals for the operator; `None` when the store cannot count.
     async fn account_stats(&self, _now: u64) -> StoreResult<Option<AccountStats>> {
         Ok(None)
@@ -477,10 +481,11 @@ impl AccountStore for MemStore {
         self.m.lock().unwrap().devices.retain(|_, d| d.user_id != user_id);
         Ok(())
     }
-    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>) -> StoreResult<()> {
+    async fn mark_device(&self, id: &str, ip_hash: Option<&str>, hw_hash: Option<&str>, app_version: Option<&str>) -> StoreResult<()> {
         if let Some(d) = self.m.lock().unwrap().devices.get_mut(id) {
             if ip_hash.is_some() { d.ip_hash = ip_hash.map(str::to_string); }
             if hw_hash.is_some() { d.hw_hash = hw_hash.map(str::to_string); }
+            if app_version.is_some() { d.app_version = app_version.map(str::to_string); }
         }
         Ok(())
     }
@@ -523,6 +528,7 @@ impl AccountStore for MemStore {
                     .filter(|((uid, _, _), i)| uid == &u.id && !i.deleted)
                     .map(|(_, i)| i.value.as_ref().map_or(0, |v| v.len() as u64))
                     .sum();
+                let prof = m.profiles.get(&u.id);
                 UserSummary {
                     id: u.id,
                     handle: u.handle,
@@ -532,6 +538,8 @@ impl AccountStore for MemStore {
                     devices,
                     last_seen,
                     sync_bytes,
+                    avatar: prof.and_then(|p| p.avatar.clone()),
+                    banner: prof.and_then(|p| p.banner.clone()),
                 }
             })
             .collect();

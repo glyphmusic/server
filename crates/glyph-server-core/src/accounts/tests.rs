@@ -279,10 +279,16 @@ fn bans_block_accounts_their_addresses_and_hardware() {
     use crate::bans::{hardware_hash, ip_hash, Ban, BanKind, BanList};
     let t = setup();
     let (session, _, _) = sign_up(&t, "ban_test");
-    let req = |ip: &str, hw: Option<&str>| {
+    let req = |ip: &str, hw: Option<&str>, ua: Option<&str>, web_ver: Option<&str>| {
         let mut h = vec![("authorization".to_string(), format!("Bearer {}", session.access_token))];
         if let Some(hw) = hw {
             h.push((glyph_protocol::HARDWARE_ID_HEADER.to_string(), hw.to_string()));
+        }
+        if let Some(ua) = ua {
+            h.push(("user-agent".to_string(), ua.to_string()));
+        }
+        if let Some(v) = web_ver {
+            h.push(("x-glyph-app-version".to_string(), v.to_string()));
         }
         Request::new(Method::Get, "/v1/lyrics", h, vec![], Some(ip.into()))
     };
@@ -291,15 +297,21 @@ fn bans_block_accounts_their_addresses_and_hardware() {
     let set = |bans: Vec<Ban>| t.s.update_config(|c| c.bans = Arc::new(BanList { salt: "s".into(), bans }));
     block_on(async {
         set(vec![]);
-        // The device remembers hashes of what it used, never the address.
-        assert!(t.s.admit(&req("198.51.100.1", Some("hw-0123456789")), false).await.is_ok());
+        // The device remembers hashes of what it used (never the address) and its app version.
+        assert!(t.s.admit(&req("198.51.100.1", Some("hw-0123456789"), Some("Glyph/0.12.13"), None), false).await.is_ok());
         let accounts = t.s.accounts.as_ref().unwrap();
-        let (user, device) = accounts.abuse_identity(&t.s.services(), &req("198.51.100.1", None)).await.unwrap();
+        let (user, device) = accounts.abuse_identity(&t.s.services(), &req("198.51.100.1", None, None, None)).await.unwrap();
         assert_eq!(device.ip_hash, ip_hash("s", "198.51.100.1"));
         assert_eq!(device.hw_hash, hardware_hash("hw-0123456789"));
+        assert_eq!(device.app_version.as_deref(), Some("0.12.13"));
+
+        // Web player reports its version via X-Glyph-App-Version.
+        assert!(t.s.admit(&req("198.51.100.1", None, Some("Mozilla/5.0"), Some("0.12.14")), false).await.is_ok());
+        let (_, device) = accounts.abuse_identity(&t.s.services(), &req("198.51.100.1", None, None, None)).await.unwrap();
+        assert_eq!(device.app_version.as_deref(), Some("0.12.14"));
 
         set(vec![ban(BanKind::Account, user.clone())]);
-        let e = t.s.admit(&req("203.0.113.9", None), false).await.unwrap_err();
+        let e = t.s.admit(&req("203.0.113.9", None, None, None), false).await.unwrap_err();
         assert_eq!((e.status, e.body.code.as_str()), (403, "banned"));
         assert!(t.s.admit(&guest("203.0.113.9"), false).await.is_ok(), "only the account is banned");
 

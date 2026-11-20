@@ -226,6 +226,16 @@ pub enum AccountsCmd {
         #[arg(long)]
         off: bool,
     },
+    /// Remove an account's profile picture and/or banner (default: both)
+    ResetProfile {
+        handle: String,
+        /// Only reset the profile picture
+        #[arg(long)]
+        avatar: bool,
+        /// Only reset the banner
+        #[arg(long)]
+        banner: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -800,6 +810,18 @@ pub async fn run(a: RemoteArgs, o: Opts) -> Result<(), CliError> {
                     let acc: AdminAccount = c.post(&format!("accounts/{}/admin", handle_path(&handle)), &AdminRoleRequest { admin: !off }).await?;
                     emit(o, &acc, || print_account(&acc, None));
                 }
+                AccountsCmd::ResetProfile { handle, avatar, banner } => {
+                    let (avatar, banner) = if !avatar && !banner { (true, true) } else { (avatar, banner) };
+                    let target = match (avatar, banner) {
+                        (true, true) => "profile picture and banner",
+                        (true, false) => "profile picture",
+                        (false, true) => "banner",
+                        (false, false) => unreachable!(),
+                    };
+                    if !confirm(o, &format!("reset the {target} of @{}", handle_path(&handle)), "")? { return Ok(()); }
+                    let acc: AdminAccount = c.post(&format!("accounts/{}/profile/reset", handle_path(&handle)), &ResetProfileImagesRequest { avatar, banner }).await?;
+                    emit(o, &acc, || print_account(&acc, None));
+                }
             }
             Ok(())
         }
@@ -1148,7 +1170,8 @@ fn print_account(a: &AdminAccount, cap_mb: Option<u32>) {
     println!("Device limit  {} ({own})", a.device_limit);
     println!("Devices       {}", a.devices.len());
     for d in &a.devices {
-        println!("  {:<20} {:<24} {:<8} last seen {}", d.id, d.name, d.platform, date(d.last_seen));
+        let ver = d.app_version.as_deref().map(|v| format!(" v{v}")).unwrap_or_default();
+        println!("  {:<20} {:<24} {:<8}{:<10} last seen {}", d.id, d.name, d.platform, ver, date(d.last_seen));
         if let Some(h) = &d.hardware {
             println!("  {:<20} hardware {h}", "");
         }
