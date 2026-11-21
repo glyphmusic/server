@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.10 - 2026-11-21
+
+### Fixed
+
+- **No abuse bans during multi-playlist transfers**: raised the per-minute `import-start` pace limit (20/min for signed-in accounts, 8/min for guests) and return a soft `429 rate_limited` instead of handing out 15-minute `temporarily_blocked` abuse bans during batch playlist transfers.
+
+### Changed
+
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.12.16` and refreshed embedded desktop (`0.12.16`) and server (`0.11.10`) changelogs.
+
 ## 0.11.9 - 2026-11-21
 
 ### Fixed

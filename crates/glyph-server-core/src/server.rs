@@ -305,7 +305,7 @@ impl Server {
             }
         } else { None };
         let features = (self.accounts.is_some(), self.accounts.as_ref().is_some_and(|a| a.cache_blobs.is_some() || a.blobs.is_some()));
-        match dispatch(self, &svc, route, req, features).await {
+        match dispatch(self, &svc, route, req, features, member).await {
             Ok(mut r) => {
                 if let Body::Stream(stream) = r.body {
                     r.body = Body::Stream(boxed_stream(futures::stream::unfold((stream, permit), |(mut stream, permit)| async move {
@@ -808,7 +808,7 @@ fn outdated_app(config: &crate::config::Config, req: &Request) -> Option<ApiErr>
     })
 }
 
-async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool)) -> Result<Response, ApiErr> {
+async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Request, (accounts, covers): (bool, bool), member: bool) -> Result<Response, ApiErr> {
     {
         match route {
             Route::Health => Ok(Response::json(
@@ -968,8 +968,11 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     return response(hit);
                 }
                 if r.offset == 0 {
+                    // Pace multi-playlist transfers gently without handing out
+                    // 15-minute abuse bans (`admit` already guards raw floods).
                     let ip = req.client_ip.as_deref().unwrap_or("unknown");
-                    server.admit_rules_or_track(svc, &req, "import", &[(format!("import-start:{ip}"), format!("ip:{ip}"), 4)], true, None).await?;
+                    let limit = if member { 20 } else { 8 };
+                    server.admit_rules_or_track(svc, &req, "import", &[(format!("import-start:{ip}"), format!("ip:{ip}"), limit)], false, None).await?;
                 }
                 let resp = match svc.cmds.import_page(&r).await {
                     Some(result) => result?,
@@ -1457,5 +1460,30 @@ mod tests {
         assert_eq!(v["banner"], "https://commons/muse.jpg");
         assert_eq!(v["fans"], 5000000);
         assert_eq!(v["verified"], true);
+    }
+
+    #[test]
+    fn multi_playlist_import_rate_limit_does_not_trigger_abuse_ban() {
+        let h = harness(all_secrets());
+        h.http.on("api/token", 200, r#"{"access_token":"T","expires_in":3600}"#);
+        h.http.on("fields=name", 200, r#"{"name":"List","tracks":{"total":1}}"#);
+        h.http.on("/items?", 200, r#"{"items":[{"track":{"id":"a","name":"A","artists":[{"name":"X"}]}}],"next":null}"#);
+        let s = server(&h);
+        // Transfer 25 distinct playlists in one minute from one guest IP:
+        // first 8 succeed, remaining receive soft `rate_limited` (never `temporarily_blocked`).
+        for i in 0..25 {
+            let body = format!(r#"{{"url":"spotify:playlist:list{i}","offset":0}}"#);
+            let req = Request::new(Method::Post, "/v1/import/spotify", vec![], body.into_bytes(), Some("203.0.113.42".into()));
+            let resp = block_on(s.handle(req));
+            if i < 8 {
+                assert_eq!(resp.status, 200, "playlist {i} should succeed");
+            } else {
+                assert_eq!(resp.status, 429, "playlist {i} should be softly rate limited");
+                assert_eq!(json_of(&resp)["code"], "rate_limited", "import-start must not trigger abuse ban");
+            }
+        }
+        // Other API endpoints are NOT abuse-banned for this IP.
+        let lyrics_req = Request::new(Method::Get, "/v1/lyrics?title=x&artist=y", vec![], vec![], Some("203.0.113.42".into()));
+        assert_ne!(block_on(s.handle(lyrics_req)).status, 429);
     }
 }

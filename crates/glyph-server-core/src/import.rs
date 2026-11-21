@@ -302,6 +302,11 @@ fn map_err(e: ProviderError) -> ApiErr {
         ProviderError::Http(401) | ProviderError::Http(403) => {
             ApiErr::new(403, "playlist_not_accessible", "the provider denied playlist access; use an authorized account or import a playlist file")
         }
+        ProviderError::Quota => {
+            let mut err = ApiErr::new(503, "provider_rate_limited", "upstream provider is temporarily busy; retry shortly");
+            err.body.retry_after_s = Some(5);
+            err
+        }
         ProviderError::NotConfigured => ApiErr::unavailable("this server has no key for that provider"),
         other => ApiErr::unavailable(format!("provider error: {other}")),
     }
