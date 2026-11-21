@@ -21,6 +21,7 @@ pub mod config;
 pub mod error;
 pub mod hints;
 pub mod import;
+pub mod match_feedback;
 pub mod merge;
 pub mod media;
 pub mod params;

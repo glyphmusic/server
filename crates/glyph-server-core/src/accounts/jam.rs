@@ -637,4 +637,52 @@ impl Accounts {
             _ => Err(ApiErr::not_found("unknown endpoint")),
         }
     }
+
+    /// Active Jam rooms for the admin dashboard (`GET /admin/v1/jams`).
+    pub(crate) async fn admin_jams(&self, now: u64) -> Result<crate::admin::types::AdminJamsResponse, ApiErr> {
+        let entries = self.store.mcp_list(HOSTS, "", now).await.map_err(store_err)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut jams = Vec::new();
+        for (_host_id, code) in entries {
+            if !seen.insert(code.clone()) {
+                continue;
+            }
+            let Some(meta) = self.jam_get::<Meta>(&code, "meta", now).await? else { continue };
+            let Ok(state) = self.jam_state(&code, now).await else { continue };
+            let last_seen = self.jam_last_seen(&code, &meta, now).await?;
+            let host_online = now.saturating_sub(last_seen) < HOST_TIMEOUT_MS;
+            let mut members: Vec<String> = state.members.iter().map(|m| m.handle.clone()).collect();
+            if members.is_empty() {
+                members.push(meta.host.clone());
+            }
+            let member_count = members.len();
+            let (track, playing) = match &state.now {
+                Some(n) => {
+                    let label = if n.track.artist.trim().is_empty() {
+                        n.track.title.clone()
+                    } else {
+                        format!("{} · {}", n.track.artist, n.track.title)
+                    };
+                    (Some(label), n.playing)
+                }
+                None => (None, false),
+            };
+            jams.push(crate::admin::types::AdminJam {
+                code,
+                host: meta.host,
+                members,
+                member_count,
+                host_online,
+                created_at: meta.created,
+                last_seen,
+                expires_at: meta.created + MAX_AGE_MS,
+                track,
+                playing,
+                queue_len: state.queue.len(),
+            });
+        }
+        jams.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.code.cmp(&b.code)));
+        let total = jams.len();
+        Ok(crate::admin::types::AdminJamsResponse { jams, total })
+    }
 }

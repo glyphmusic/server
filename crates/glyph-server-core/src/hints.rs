@@ -51,7 +51,12 @@ pub fn song_key(t: &Track) -> Option<String> {
 }
 
 /// The shared video id for `t`, if one is confirmed.
+/// A consensus-promoted replacement from [`crate::match_feedback`] takes
+/// precedence over an older automatic hint.
 pub async fn lookup(svc: &Services, t: &Track) -> Option<String> {
+    if let Some(promoted) = crate::match_feedback::lookup_promoted_youtube(svc, t).await {
+        return Some(promoted);
+    }
     let key = song_key(t)?;
     cache::get_json::<Entry>(&*svc.cache, &key).await?.confirmed
 }

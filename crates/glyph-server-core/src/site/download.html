@@ -70,7 +70,7 @@
 </aside>
 <main class="content">
   <h1 class="title">Download</h1>
-  <p class="subt">Glyph for Windows, macOS, Linux and Android. Free, no ads, legal sources only.</p>
+  <p class="subt">Glyph for Windows, macOS, Linux, Android and iPhone / iPad (Web App). Free, no ads, legal sources only.</p>
 
   <div class="chan">
     <div class="seg" role="group" aria-label="Channel">
@@ -97,6 +97,7 @@
     <p><strong>Stable</strong> gets tested versions. <strong>Latest</strong> gets every new version first and can have more bugs. You can switch later in the app under Settings &gt; About &gt; Channel. Going back to Stable there offers the newest stable version.</p>
     <p>Windows: run the setup to install Glyph. New versions update the same installation and keep your library and settings. For the portable ZIP, unzip it and run <code>glyph.exe</code>. macOS and Linux: unpack the <code>.tar.gz</code> and run <code>glyph</code>.</p>
     <p>Android (preview): open the <code>.apk</code> on your phone and allow installing it. To update, install the new APK over the old one. Android cannot install an older version over a newer one: to go from Latest back to Stable, wait for the next Stable, or uninstall first (this deletes the app's data).</p>
+    <p>iPhone &amp; iPad: open the <a href="/web/?install=1" style="text-decoration:underline;text-underline-offset:2px">Web App</a> in Safari, tap the <strong>Share</strong> button, then choose <strong>Add to Home Screen</strong>. Glyph installs as a full-screen app with its own icon and syncs your library with your other devices.</p>
     <p>Each release has a <code>SHA256SUMS.txt</code> to check the download. The desktop app updates itself from the same releases.</p>
   </div>
 <footer class="foot">
@@ -124,6 +125,7 @@
     { os: "linux", target: "x86_64-unknown-linux-gnu", name: "Linux", sub: "x64 · tar.gz" },
     { os: "linux-arm", target: "aarch64-unknown-linux-gnu", name: "Linux", sub: "arm64 · tar.gz" },
     { os: "android", target: "android", name: "Android", sub: "Preview · apk" },
+    { os: "ios", target: "pwa", name: "iPhone & iPad", sub: "Web App · Add to Home Screen", href: "/web/?install=1", cta: "Open Web App" },
   ];
   const DESC = {
     stable: "Tested versions. The safe pick.",
@@ -131,7 +133,8 @@
   };
   const DL_ICON = document.querySelector("#dl-main .ic").outerHTML;
   const ua = navigator.userAgent;
-  const mine = /Android/.test(ua) ? "android" : /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? (/aarch64|arm64/i.test(ua) ? "linux-arm" : "linux") : "";
+  const isIos = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const mine = isIos ? "ios" : /Android/.test(ua) ? "android" : /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "macos" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? (/aarch64|arm64/i.test(ua) ? "linux-arm" : "linux") : "";
   const $ = id => document.getElementById(id);
   const mb = n => (n / 1048576).toFixed(1) + " MB";
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
@@ -202,23 +205,30 @@
 
     $("plats").replaceChildren();
     for (const p of PLATS) {
-      const a = assetFor(p.target);
       const row = el("div", "srow" + (p.os === mine ? " mine" : ""));
       const l = el("div", "l");
-      l.append(el("span", "lab", p.name), el("span", "st", subOf(p, a)));
       const c = el("div", "c");
-      if (a) c.append(el("span", "size", mb(a.size)));
-      const btn = el("a", "lb", a || !rel ? "Download" : "Not in this release");
-      if (a) {
-        btn.href = a.browser_download_url;
-        btn.setAttribute("download", a.name);
-        btn.addEventListener("click", onStart(a));
-      } else if (rel) {
-        btn.setAttribute("aria-disabled", "true");
+      if (p.href) {
+        l.append(el("span", "lab", p.name), el("span", "st", p.sub));
+        const btn = el("a", "lb", p.cta || "Open");
+        btn.href = p.href;
+        c.append(btn);
       } else {
-        btn.href = fallback[ch];
+        const a = assetFor(p.target);
+        l.append(el("span", "lab", p.name), el("span", "st", subOf(p, a)));
+        if (a) c.append(el("span", "size", mb(a.size)));
+        const btn = el("a", "lb", a || !rel ? "Download" : "Not in this release");
+        if (a) {
+          btn.href = a.browser_download_url;
+          btn.setAttribute("download", a.name);
+          btn.addEventListener("click", onStart(a));
+        } else if (rel) {
+          btn.setAttribute("aria-disabled", "true");
+        } else {
+          btn.href = fallback[ch];
+        }
+        c.append(btn);
       }
-      c.append(btn);
       row.append(l, c);
       $("plats").append(row);
     }
@@ -230,8 +240,13 @@
     btn.innerHTML = DL_ICON;
     old.replaceWith(btn);
     const main = PLATS.find(p => p.os === mine);
-    const ma = main && assetFor(main.target);
-    if (ma) {
+    const ma = main && !main.href && assetFor(main.target);
+    if (main && main.href) {
+      $("main-lab").textContent = `Glyph for ${main.name}`;
+      btn.append(el("span", "", main.cta || "Open Web App"));
+      btn.href = main.href;
+      v.prepend(main.sub + " · ");
+    } else if (ma) {
       $("main-lab").textContent = `Glyph for ${main.name}`;
       btn.append(el("span", "", "Download"));
       btn.href = ma.browser_download_url;

@@ -8,7 +8,9 @@
 
 use crate::cache;
 use crate::traits::Cache;
-use glyph_protocol::{ResolveRequest, Track, YouTubeHintRequest};
+use glyph_protocol::{
+    MatchAlternativesRequest, ResolveRequest, Track, WrongMatchReportRequest, YouTubeHintRequest,
+};
 use serde::Serialize;
 
 /// A value a client sent, after the protocol's shape checks.
@@ -42,6 +44,21 @@ impl From<ResolveRequest> for Claimed<ResolveRequest> {
 impl From<YouTubeHintRequest> for Claimed<YouTubeHintRequest> {
     fn from(mut r: YouTubeHintRequest) -> Self {
         r.track.sanitize();
+        Self(r)
+    }
+}
+
+impl From<MatchAlternativesRequest> for Claimed<MatchAlternativesRequest> {
+    fn from(mut r: MatchAlternativesRequest) -> Self {
+        r.track.sanitize();
+        Self(r)
+    }
+}
+
+impl From<WrongMatchReportRequest> for Claimed<WrongMatchReportRequest> {
+    fn from(mut r: WrongMatchReportRequest) -> Self {
+        r.track.sanitize();
+        r.chosen.sanitize();
         Self(r)
     }
 }

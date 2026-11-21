@@ -84,11 +84,11 @@ pub fn content_type(file: &str) -> &'static str {
     }
 }
 
-/// Response headers for `file`. The page is checked on every visit (a new
-/// build shows at once); the built assets have their hash in the name and
-/// never change; anything else is kept for an hour.
+/// Response headers for `file`. The page, service worker and manifest are
+/// checked on every visit (a new build shows at once); the built assets have
+/// their hash in the name and never change; anything else is kept for an hour.
 pub fn headers(file: &str) -> Vec<(String, String)> {
-    let cache = if file == INDEX || file.ends_with(".html") {
+    let cache = if file == INDEX || file.ends_with(".html") || file == "sw.js" || file.ends_with(".webmanifest") {
         "no-cache"
     } else if file.starts_with("assets/") {
         "public, max-age=31536000, immutable"
@@ -146,6 +146,11 @@ mod tests {
         assert_eq!(get(&js, "content-type").as_deref(), Some("text/javascript; charset=utf-8"));
         assert!(get(&js, "cache-control").unwrap().contains("immutable"));
         assert!(get(&js, "content-security-policy").is_none());
+        let sw = headers("sw.js");
+        assert_eq!(get(&sw, "cache-control").as_deref(), Some("no-cache"));
+        assert_eq!(get(&sw, "content-type").as_deref(), Some("text/javascript; charset=utf-8"));
+        let manifest = headers("manifest.webmanifest");
+        assert_eq!(get(&manifest, "cache-control").as_deref(), Some("no-cache"));
         assert_eq!(content_type("assets/x.woff2"), "font/woff2");
     }
 }

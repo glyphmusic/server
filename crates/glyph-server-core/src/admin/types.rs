@@ -633,6 +633,37 @@ pub struct ClearBlockRequest {
     pub id: String,
 }
 
+/// One active Jam room (`GET /admin/v1/jams`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminJam {
+    pub code: String,
+    pub host: String,
+    /// Handles of everyone currently in the room (host first).
+    pub members: Vec<String>,
+    pub member_count: usize,
+    pub host_online: bool,
+    /// When the room was created (unix ms).
+    pub created_at: u64,
+    /// Last sign of life from the host (unix ms).
+    pub last_seen: u64,
+    /// When the room expires automatically (unix ms).
+    pub expires_at: u64,
+    /// What is playing right now, if anything (`Artist · Title`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    #[serde(default)]
+    pub playing: bool,
+    #[serde(default)]
+    pub queue_len: usize,
+}
+
+/// `GET /admin/v1/jams`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AdminJamsResponse {
+    pub jams: Vec<AdminJam>,
+    pub total: usize,
+}
+
 /// Maximum live automatic blocks kept for the admin view.
 pub const MAX_ACTIVE_BLOCKS: usize = 200;
 

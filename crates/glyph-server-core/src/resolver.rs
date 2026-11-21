@@ -234,6 +234,27 @@ pub async fn resolve(svc: &Services, req: impl Into<Claimed<ResolveRequest>>) ->
     let req = claim.get();
     let want = &req.track;
     let prio = if req.youtube_only { vec![ProviderId::YouTube] } else { effective_priority(&req.priority) };
+
+    // A consensus-promoted replacement from wrong-song feedback supersedes
+    // any stale cached auto-match (when its provider is enabled and allowed).
+    if let Some(promoted) = crate::match_feedback::lookup_promoted(svc, want).await {
+        if (!req.youtube_only || promoted.source == ProviderId::YouTube)
+            && prio.contains(&promoted.source)
+            && svc.config.provider_enabled(promoted.source)
+        {
+            if let Ok(pb) = providers::playback_for(svc, promoted.source, &promoted.id).await {
+                let mut m = promoted;
+                merge_into(&mut m, want);
+                return ResolveResponse {
+                    matched: Some(m),
+                    source: Some(pb),
+                    confidence: 1.0,
+                    youtube_hint: None,
+                };
+            }
+        }
+    }
+
     let key = if req.youtube_only { format!("{}:youtube-only", cache_key(want, &prio)) } else { cache_key(want, &prio) };
     // Only full sources are final mappings. A preview or an old miss must
     // retry the higher-priority providers, including on the companion.

@@ -138,6 +138,8 @@ enum Route {
     Cover,
     Download,
     YouTubeHint,
+    MatchAlternatives,
+    MatchReport,
     Artist,
 }
 
@@ -153,6 +155,8 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/cover" => (Route::Cover, Method::Post),
         "/v1/download" => (Route::Download, Method::Post),
         "/v1/youtube/hint" => (Route::YouTubeHint, Method::Post),
+        "/v1/match/alternatives" => (Route::MatchAlternatives, Method::Post),
+        "/v1/match/report" => (Route::MatchReport, Method::Post),
         "/v1/artist" => (Route::Artist, Method::Get),
         _ => return None,
     })
@@ -787,6 +791,7 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (youtube && svc.config.youtube_require_account, YOUTUBE_ACCOUNT_REQUIRED),
         (true, YOUTUBE_HINTS),
         (true, RATINGS),
+        (true, WRONG_SONG),
     ]
     .into_iter()
     .filter(|(on, _)| *on)
@@ -865,6 +870,34 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
                     .ok_or_else(|| ApiErr::bad_request("missing install id"))?;
                 Ok(Response::json(200, &crate::hints::report(svc, &voter, r).await?))
+            }
+            Route::MatchAlternatives => {
+                let r: glyph_protocol::MatchAlternativesRequest = parse_body(&req)?;
+                let direct = matches!(req.query.get("direct"), Some("1" | "true"));
+                Ok(Response::json(200, &crate::match_feedback::alternatives(svc, r, direct).await?))
+            }
+            Route::MatchReport => {
+                let r: glyph_protocol::WrongMatchReportRequest = parse_body(&req)?;
+                // Prefer verified signed-in account id (strongest sybil resistance),
+                // else client IP (so rotating install_id from one host cannot stuff votes),
+                // else anonymous install id.
+                let mut voter: Option<String> = None;
+                if let Some(acc) = &server.accounts {
+                    if req.header("authorization").is_some_and(|h| h.starts_with("Bearer ")) {
+                        if let Some((uid, _)) = acc.abuse_identity(svc, &req).await {
+                            voter = Some(format!("acc:{uid}"));
+                        }
+                    }
+                }
+                let voter = voter
+                    .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
+                    .or_else(|| {
+                        req.header(INSTALL_ID_HEADER)
+                            .filter(|id| !id.is_empty() && id.len() <= 64)
+                            .map(|id| format!("id:{id}"))
+                    })
+                    .ok_or_else(|| ApiErr::bad_request("missing voter identity"))?;
+                Ok(Response::json(200, &crate::match_feedback::report(svc, &voter, r).await?))
             }
             Route::Artist => {
                 let name = req.query.required("name")?;

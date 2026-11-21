@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0 - 2026-11-21
+
+### Added
+
+- **Wrong-song feedback (`POST /v1/match/alternatives`, `POST /v1/match/report`)**: apps can ask for ranked replacement versions of a song with 30-second previews and report the right one. Votes are stored per hashed listener and the global match only changes once enough distinct listeners agree and the server verifies the candidate itself against its own provider lookup (`wrong_song` capability, `match_feedback.rs`).
+- **Active Jams in the admin API**: the admin status lists running Jam rooms (listeners, queue length, running time, host online) for the in-app Server dashboard.
+
+### Changed
+
+- **Site refresh**: new `/` and `/download` pages, and the web player is served with install-as-app support (manifest and icons).
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.13.0` and refreshed embedded desktop (`0.13.0`) and server (`0.12.0`) changelogs.
+
 ## 0.11.10 - 2026-11-21
 
 ### Fixed

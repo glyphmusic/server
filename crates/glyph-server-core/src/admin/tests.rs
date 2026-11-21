@@ -854,3 +854,130 @@ fn admin_blocks_lists_api_rate_limits_abuse_blocks_and_clears_them() {
     assert_eq!((s, cleared["blocks"].as_array().map(Vec::len)), (200, Some(0)));
     assert_ne!(hit().0, 429, "client should be unblocked immediately");
 }
+
+#[test]
+fn admin_jams_lists_active_rooms_and_omits_ended_ones() {
+    use crate::accounts::store::{AccountStore, Device, MemStore, User};
+    use crate::traits::Runtime;
+    use sha2::{Digest, Sha256};
+
+    let mut t = setup(true, TestHost::default());
+    let store = Arc::new(MemStore::default());
+    struct Entropy(std::sync::atomic::AtomicU8);
+    impl crate::accounts::Entropy for Entropy {
+        fn fill(&self, out: &mut [u8]) {
+            let v = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = v.wrapping_add(i as u8);
+            }
+        }
+    }
+    t.server = t.server.with_accounts(crate::accounts::Accounts {
+        store: store.clone(),
+        blobs: None,
+        cache_blobs: None,
+        entropy: Arc::new(Entropy(std::sync::atomic::AtomicU8::new(1))),
+        origin: "https://glyph.example".into(),
+        extra_origins: vec![],
+        rp_id: None,
+        push: None,
+    });
+    let hex = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    for (id, h, tok) in [("u_1", "alice", "gat_alice"), ("u_2", "bob", "gat_bob")] {
+        assert!(block_on(store.create_user(
+            &User {
+                id: id.into(),
+                handle: h.into(),
+                created_at: 1,
+                device_limit: 5,
+                device_limit_set: 0,
+                rev: 0,
+                purged_rev: 0,
+                recovery_hash: "r".into(),
+                handle_changed_at: 0,
+                pw_salt: None,
+                pw_hash: None,
+            },
+            None,
+            1
+        ))
+        .unwrap());
+        block_on(store.put_device(&Device {
+            approximate_location: None,
+            id: format!("d_{id}"),
+            user_id: id.into(),
+            name: "PC".into(),
+            platform: "windows".into(),
+            created_at: 1,
+            last_seen: 1,
+            access_hash: hex(tok),
+            access_exp: u64::MAX / 2,
+            refresh_hash: format!("r_{id}"),
+            refresh_exp: u64::MAX / 2,
+            ip_hash: None,
+            hw_hash: None,
+            app_version: None,
+        }))
+        .unwrap();
+    }
+
+    let pair = login(&t);
+    let owner = Some(pair.access_token.as_str());
+    assert_eq!(call(&t, req(Method::Post, "/admin/v1/accounts/alice/admin", r#"{"admin":true}"#, owner)).0, 200);
+
+    // Non-admin account cannot list jams.
+    assert_eq!(call(&t, req(Method::Get, "/admin/v1/jams", "", Some("gat_bob"))).0, 403);
+
+    // Initially empty.
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/jams", "", owner));
+    assert_eq!((s, v["total"].as_u64(), v["jams"].as_array().map(Vec::len)), (200, Some(0), Some(0)));
+
+    // Alice starts a jam, Bob joins, Alice publishes state with a playing track.
+    let (s, started, _) = call(&t, req(Method::Post, "/v1/jam", "", Some("gat_alice")));
+    assert_eq!(s, 200);
+    let code = started["code"].as_str().unwrap().to_string();
+    assert_eq!(call(&t, req(Method::Post, &format!("/v1/jam/{code}/join"), "", Some("gat_bob"))).0, 200);
+
+    let mut st: glyph_protocol::jam::State = serde_json::from_value(started).unwrap();
+    st.members.push(glyph_protocol::jam::Member { handle: "bob".into(), host: false, avatar: None });
+    st.now = Some(glyph_protocol::jam::Now {
+        track: glyph_protocol::Track {
+            id: "t1".into(),
+            source: glyph_protocol::ProviderId::Audius,
+            title: "Nightcall".into(),
+            artist: "Kavinsky".into(),
+            album: None,
+            duration_ms: Some(258_000),
+            cover_url: None,
+            permalink: None,
+            isrc: None,
+            external_ids: Default::default(),
+            explicit: false,
+        },
+        position_ms: 12_000,
+        playing: true,
+        at_ms: t.h.rt.now_ms(),
+        resolved: None,
+    });
+    let (s, _, _) = call(&t, req(Method::Post, &format!("/v1/jam/{code}/state"), &serde_json::to_string(&st).unwrap(), Some("gat_alice")));
+    assert_eq!(s, 200);
+
+    // Both owner and admin account see the active room.
+    for tok in [owner, Some("gat_alice")] {
+        let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/jams", "", tok));
+        assert_eq!(s, 200);
+        assert_eq!(v["total"], 1);
+        let room = &v["jams"][0];
+        assert_eq!(room["code"], code);
+        assert_eq!(room["host"], "alice");
+        assert_eq!(room["member_count"], 2);
+        assert_eq!(room["host_online"], true);
+        assert_eq!(room["playing"], true);
+        assert_eq!(room["track"], "Kavinsky · Nightcall");
+    }
+
+    // Ending the jam removes it from active rooms.
+    assert_eq!(call(&t, req(Method::Delete, &format!("/v1/jam/{code}"), "", Some("gat_alice"))).0, 200);
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/jams", "", owner));
+    assert_eq!((s, v["total"].as_u64(), v["jams"].as_array().map(Vec::len)), (200, Some(0), Some(0)));
+}

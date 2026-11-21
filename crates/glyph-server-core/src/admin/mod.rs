@@ -60,6 +60,7 @@ enum R {
     BansRemove,
     BlocksGet,
     BlocksClear,
+    JamsList,
     Stats,
     Me,
     History,
@@ -125,6 +126,7 @@ fn route(sub: &str, m: Method) -> Result<R, ApiErr> {
         "bans/remove" => (R::BansRemove, Post),
         "blocks" => (R::BlocksGet, Get),
         "blocks/clear" => (R::BlocksClear, Post),
+        "jams" => (R::JamsList, Get),
         "stats" => (R::Stats, Get),
         "me" => (R::Me, Get),
         "history" => (R::History, Get),
@@ -523,6 +525,13 @@ impl Server {
                 }
                 let blocks = self.clear_block(svc, id, now).await?;
                 Ok(Response::json(200, &BlocksResponse { blocks }))
+            }
+            R::JamsList => {
+                let res = match &self.accounts {
+                    Some(a) => a.admin_jams(now).await?,
+                    None => AdminJamsResponse::default(),
+                };
+                Ok(Response::json(200, &res))
             }
             R::Stats => {
                 let now = svc.rt.now_ms();

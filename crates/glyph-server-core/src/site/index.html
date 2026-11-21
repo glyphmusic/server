@@ -786,6 +786,7 @@ body {
             <a href="/download"><span>macOS Apple silicon &amp; Intel</span><span>.dmg</span></a>
             <a href="/download"><span>Linux x64 &amp; arm64</span><span>.AppImage</span></a>
             <a href="/download"><span>Android</span><span>.apk</span></a>
+            <a href="/web/?install=1"><span>iPhone &amp; iPad</span><span>Web App</span></a>
           </div>
           <a class="lb" href="/web/"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><ellipse cx="12" cy="12" rx="4" ry="9.5"/><path d="M2.5 12h19"/></svg>Web player</a>
           <a class="login" href="/web/#settings/account">Log in</a>
@@ -1175,11 +1176,21 @@ body {
 
   // Name the platform on the download buttons.
   const ua = navigator.userAgent;
-  const os = /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac OS X|Macintosh/.test(ua) ? "macOS" : /Linux|X11/.test(ua) ? "Linux" : "";
-  if (os) {
+  const isIos = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isIos) {
     for (const id of ["dl-main", "dl-bottom"]) {
+      const a = document.getElementById(id);
+      if (a) a.href = "/web/?install=1";
       const sp = document.querySelector("#" + id + " span");
-      if (sp) sp.textContent = "Download for " + os;
+      if (sp) sp.textContent = "Add to iPhone / iPad";
+    }
+  } else {
+    const os = /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac OS X|Macintosh/.test(ua) ? "macOS" : /Linux|X11/.test(ua) ? "Linux" : "";
+    if (os) {
+      for (const id of ["dl-main", "dl-bottom"]) {
+        const sp = document.querySelector("#" + id + " span");
+        if (sp) sp.textContent = "Download for " + os;
+      }
     }
   }
 })();
