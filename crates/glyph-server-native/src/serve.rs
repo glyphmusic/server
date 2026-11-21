@@ -504,8 +504,11 @@ async fn retry_stale_youtube(
 
 /// Streams one audio response from the provider. Byte ranges are forwarded
 /// upstream, so a seek only costs the requested bytes.
+/// Full `googlevideo.com` fetches are read in 1 MiB ranges because YouTube
+/// throttles non-ranged single-GET audio streams to ~25-35 KB/s.
 /// The permit moves into the body only on success, so a retry can reuse it.
 async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+    const GOOGLEVIDEO_CHUNK: u64 = 1024 * 1024;
     // Fetch on the extraction host: YouTube signatures can be bound to its IP.
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> = std::sync::OnceLock::new();
     let client = match CLIENT.get_or_init(|| reqwest::Client::builder()
@@ -519,9 +522,14 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         Ok(c) => c,
         Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "audio client unavailable"),
     };
+    let explicit_range = range.filter(|r| r.len() <= 64 && r.starts_with("bytes="));
+    let chunked_googlevideo = explicit_range.is_none()
+        && url::Url::parse(url).ok().is_some_and(|u| u.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")));
     let mut req = client.get(url).header("accept-encoding", "identity");
-    if let Some(r) = range.filter(|r| r.len() <= 64 && r.starts_with("bytes=")) {
+    if let Some(r) = explicit_range {
         req = req.header("range", r);
+    } else if chunked_googlevideo {
+        req = req.header("range", format!("bytes=0-{}", GOOGLEVIDEO_CHUNK - 1));
     }
     let resp = match req.send().await {
         Ok(r) if r.status().is_success() => r,
@@ -534,6 +542,93 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         }
         Err(_) => return plain(StatusCode::BAD_GATEWAY, "audio upstream unavailable"),
     };
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .cloned()
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+    if !(content_type.to_str().is_ok_and(|c| c.starts_with("audio/") || c.starts_with("video/") || c.starts_with("application/octet-stream"))) {
+        return plain(StatusCode::BAD_GATEWAY, "upstream did not return audio");
+    }
+    let validators: Vec<_> = ["etag", "last-modified"].into_iter().filter_map(|key|
+        resp.headers().get(key).cloned().map(|value| (key, value))).collect();
+
+    if chunked_googlevideo && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let Some((first_start, first_end, full_total)) = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| {
+                let (bounds, total) = h.strip_prefix("bytes ")?.split_once('/')?;
+                let (a, b) = bounds.split_once('-')?;
+                let (a, b, t) = (a.parse::<u64>().ok()?, b.parse::<u64>().ok()?, total.parse::<u64>().ok()?);
+                (a == 0 && a <= b && b < t).then_some((a, b, t))
+            })
+        else {
+            return plain(StatusCode::BAD_GATEWAY, "invalid upstream content range");
+        };
+        if full_total > MAX_AUDIO_BYTES {
+            return plain(StatusCode::PAYLOAD_TOO_LARGE, "full audio object exceeds size limit");
+        }
+        let mut out = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .header("cache-control", "no-store")
+            .header("accept-ranges", "bytes")
+            .header("content-length", full_total);
+        for (key, value) in validators { out = out.header(key, value); }
+        let permit = permit.take();
+        let next_start = first_end + 1;
+        let url_owned = url.to_string();
+        let client_clone = client.clone();
+        let first_stream = resp.bytes_stream().map(move |chunk| {
+            chunk.map_err(|_| std::io::Error::other("audio transfer failed"))
+        });
+        let rest_ranges: Vec<(u64, u64)> = if next_start < full_total {
+            (next_start..full_total)
+                .step_by(GOOGLEVIDEO_CHUNK as usize)
+                .map(|s| (s, (s + GOOGLEVIDEO_CHUNK).min(full_total) - 1))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let rest = futures::stream::iter(rest_ranges)
+            .map(move |(from, to)| {
+                let client = client_clone.clone();
+                let url = url_owned.clone();
+                async move {
+                    let resp = client
+                        .get(&url)
+                        .header("accept-encoding", "identity")
+                        .header("range", format!("bytes={from}-{to}"))
+                        .send()
+                        .await
+                        .map_err(|_| std::io::Error::other("audio transfer failed"))?;
+                    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                        return Err(std::io::Error::other("upstream range denied"));
+                    }
+                    let want = (to - from + 1) as usize;
+                    let bytes = resp.bytes().await.map_err(|_| std::io::Error::other("audio transfer failed"))?;
+                    if bytes.len() != want {
+                        return Err(std::io::Error::other("short upstream range"));
+                    }
+                    Ok(bytes)
+                }
+            })
+            .buffered(2);
+        let mut received = first_start;
+        let combined = first_stream.chain(rest).map(move |chunk| {
+            let _ = &permit;
+            let chunk = chunk?;
+            received += chunk.len() as u64;
+            if received > full_total {
+                return Err(std::io::Error::other("audio exceeded expected size"));
+            }
+            Ok(chunk)
+        });
+        return out.body(Body::from_stream(combined)).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "audio transfer failed"));
+    }
+
     let total = resp.content_length();
     if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         match resp.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(glyph_server_core::media::content_range_total) {
@@ -545,17 +640,7 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
     if total.is_some_and(|n| n > MAX_AUDIO_BYTES) {
         return plain(StatusCode::PAYLOAD_TOO_LARGE, "audio too large");
     }
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .cloned()
-        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
-    if !(content_type.to_str().is_ok_and(|c| c.starts_with("audio/") || c.starts_with("video/") || c.starts_with("application/octet-stream"))) {
-        return plain(StatusCode::BAD_GATEWAY, "upstream did not return audio");
-    }
     let content_range = resp.headers().get("content-range").cloned();
-    let validators: Vec<_> = ["etag", "last-modified"].into_iter().filter_map(|key|
-        resp.headers().get(key).cloned().map(|value| (key, value))).collect();
     let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     let mut out = Response::builder()
         .status(if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
@@ -662,7 +747,7 @@ async fn companion(server: &Server, path: &str, target: &str, headers: &[(String
     let slots = if path.starts_with("/internal/audio/") { audio_slots() }
         else if path == "/internal/import" {
             static IMPORT_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-            IMPORT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+            IMPORT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8)))
         }
         else if path == "/internal/resolve" { RESOLVE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }
         else if path == "/internal/lyrics" { LYRICS_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16))) }

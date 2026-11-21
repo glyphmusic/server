@@ -138,11 +138,19 @@ pub(crate) async fn import_page(svc: &Services, link: &str, segs: &[String], off
     let likes = segs.get(1).is_some_and(|s| s == "likes");
     let user_tracks = segs.len() == 1 || segs.get(1).is_some_and(|s| s == "tracks");
     let target = if likes || user_tracks { format!("https://soundcloud.com/{}", segs[0]) } else { link.to_string() };
-    let meta: serde_json::Value = fetch_json(svc, HttpRequest::get(build_url("https://api.soundcloud.com/resolve", &[("url", &target)])).header("authorization", format!("OAuth {tok}"))).await?;
+    let meta_key = format!("sc-import-meta-v1:{target}");
+    let meta: serde_json::Value = match cache::get_json::<serde_json::Value>(&*svc.cache, &meta_key).await {
+        Some(cached) => cached,
+        None => {
+            let fresh: serde_json::Value = fetch_json(svc, HttpRequest::get(build_url("https://api.soundcloud.com/resolve", &[("url", &target)])).header("authorization", format!("OAuth {tok}"))).await?;
+            cache::put_json(&*svc.cache, &meta_key, &fresh, 600).await;
+            fresh
+        }
+    };
     if meta["kind"] == "track" {
         if offset != 0 { return Err(ProviderError::Parse); }
         let t = import_track(&meta).ok_or(ProviderError::Parse)?;
-        return Ok(PageResponse { list: glyph_protocol::ImportResponse { name: t.title.clone(), source: ProviderId::SoundCloud, tracks: vec![t] }, next_offset: None });
+        return Ok(PageResponse { list: glyph_protocol::ImportResponse { name: t.title.clone(), source: ProviderId::SoundCloud, tracks: vec![t] }, next_offset: None, total: None });
     }
     if meta["kind"] == "playlist" && meta["track_count"].as_u64().is_some_and(|n| n > max_tracks as u64) { return Err(ProviderError::Parse); }
     let urn = meta["urn"].as_str().map(str::to_string).or_else(|| meta["id"].as_u64().map(|n| n.to_string())).ok_or(ProviderError::Parse)?;
@@ -169,7 +177,7 @@ pub(crate) async fn import_page(svc: &Services, link: &str, segs: &[String], off
     if tracks.len() > limit || (next.is_some() && offset + IMPORT_PAGE_SIZE >= max_tracks) { return Err(ProviderError::Parse); }
     let next_offset = next.map(|_| offset + IMPORT_PAGE_SIZE);
     if let Some(next) = next { cache::put_json(&*svc.cache, &cursor_key(offset + IMPORT_PAGE_SIZE), &next, 600).await; }
-    Ok(PageResponse { list: glyph_protocol::ImportResponse { name, source: ProviderId::SoundCloud, tracks }, next_offset })
+    Ok(PageResponse { list: glyph_protocol::ImportResponse { name, source: ProviderId::SoundCloud, tracks }, next_offset, total: None })
 }
 
 /// Name and songs of a soundcloud.com link: a set, a user's likes

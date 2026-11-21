@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.9 - 2026-11-21
+
+### Fixed
+
+- **Faster playlist imports & YouTube misses**: cached SoundCloud resolve metadata across paginated imports, included total track counts in import pagination, and skipped slow `yt-dlp` fallbacks when native YouTube search returns a valid empty result set (e.g. unindexed ISRCs).
+- **R2 cache for `quality=high` audio**: `quality=high` companion audio requests now read from and populate the Cloudflare R2 audio cache instead of bypassing it.
+
+### Changed
+
+- **Native server & snapshots**: improved native server handling (`serve.rs`), updated `release-protocol` to `0.12.15` (`sync_kind::LIKED_CLEAR`), and refreshed embedded desktop (`0.12.15`) and server (`0.11.9`) changelogs.
+
 ## 0.11.8 - 2026-11-20
 
 ### Added

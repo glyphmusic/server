@@ -248,8 +248,11 @@ pub async fn handle(
     // Everything fetched through the companion is kept on Cloudflare (R2), so
     // a song plays once from the companion machine and from R2 after that,
     // even while that machine is off. The companion itself caches nothing.
+    // `quality=high` uses the same raw original stream as an unqualified
+    // request, so it can read from and (for non-MP4 streams) store in `r2_key`.
     let audio_bucket = env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS")).ok();
-    let r2_key = (companion && variant.is_none()).then(|| r2_audio_key(url.path())).flatten();
+    let raw_companion = companion && variant.as_ref().is_none_or(|(_, q)| *q == media::AudioVariant::High);
+    let r2_key = raw_companion.then(|| r2_audio_key(url.path())).flatten();
     let mut from_r2 = false;
     if let (Some(bucket), Some(k)) = (&audio_bucket, &r2_key) {
         let max_age_ms = u64::from(svc.config.audio_cache_days) * 86_400_000;
@@ -391,10 +394,12 @@ pub async fn handle(
             let _ = worker::Cache::default().put(key, cached).await;
         });
     }
-    if let Some((id,quality))=variant {
+    let mut stored_variant = false;
+    if let (Some((id,quality)), false)=(variant, from_r2) {
         if length.is_none_or(|n|n>0 && n<=MAX_CACHE_BYTES)
             && (quality != media::AudioVariant::High || content_type.starts_with("audio/mp4")) {
             if let (Ok(db),Ok(bucket))=(env.d1("GLYPH_DB"),env.bucket("GLYPH_CACHE").or_else(|_| env.bucket("GLYPH_COVERS"))) {
+                stored_variant = true;
                 let mut copy=full.cloned()?;
                 let days=svc.config.audio_cache_days;
                 let cap=u64::from(svc.config.audio_cache_max_gb)*1_000_000_000;
@@ -410,7 +415,7 @@ pub async fn handle(
             }
         }
     }
-    if let (Some(bucket), Some(k), false) = (audio_bucket, r2_key, from_r2) {
+    if let (Some(bucket), Some(k), false, false) = (audio_bucket, r2_key, from_r2, stored_variant) {
         if length.is_some_and(|n| n > 0 && n <= MAX_CACHE_BYTES) {
             let mut copy = full.cloned()?;
             let content_type = content_type.clone();

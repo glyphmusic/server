@@ -245,6 +245,11 @@ async fn native_search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
     let v: serde_json::Value = fetch_json(svc, req).await?;
     let out = parse_native(&v);
     if out.is_empty() {
+        // A valid YouTube search payload with 0 results (e.g. an unindexed ISRC)
+        // is a genuine miss — do not burn seconds spawning yt-dlp for it.
+        if v.get("contents").is_some() {
+            return Ok(out);
+        }
         return Err(ProviderError::Parse);
     }
     Ok(out)
@@ -440,5 +445,14 @@ mod tests {
         let h = harness_with_ytdlp(all_secrets());
         *h.cmds.missing.lock().unwrap() = Some("ytsearch".into());
         assert_eq!(block_on(search(&h.svc, "x")).unwrap_err(), ProviderError::NotConfigured);
+    }
+
+    #[test]
+    fn native_search_empty_contents_does_not_fall_back_to_ytdlp() {
+        let h = harness_with_ytdlp(all_secrets());
+        h.http.on("youtubei/v1/search", 200, r#"{"contents":{"twoColumnSearchResultsRenderer":{"primaryContents":{"sectionListRenderer":{"contents":[]}}}}}"#);
+        let hits = block_on(search(&h.svc, "RUA1D2622252")).unwrap();
+        assert!(hits.is_empty());
+        assert_eq!(h.cmds.call_count("ytsearch10:"), 0);
     }
 }
