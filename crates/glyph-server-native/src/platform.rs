@@ -66,12 +66,32 @@ impl HttpClient for ReqwestClient {
 pub struct TokioCommands;
 
 fn fast_audio_args(args: &[String]) -> Option<Vec<String>> {
-    if !glyph_server_core::media::valid_command(args) || args.get(3).map(String::as_str) != Some("--get-url") { return None; }
+    if !glyph_server_core::media::valid_command(args)
+        || args.get(3).map(String::as_str) != Some("--get-url")
+        || args.get(6).map(String::as_str) != Some(glyph_server_core::media::AUDIO_FORMAT)
+    {
+        return None;
+    }
     let mut fast = args.to_vec();
     let separator = fast.iter().position(|a| a == "--")?;
     // Audio-only direct files do not need video manifests or next-page data.
     fast.splice(separator..separator, ["--extractor-args".into(), "youtube:skip=hls,dash;player_skip=initial_data".into()]);
     Some(fast)
+}
+
+fn fast_video_request(args: &[String]) -> Option<(&str, u32)> {
+    if !glyph_server_core::media::valid_command(args)
+        || args.get(3).map(String::as_str) != Some("--get-url")
+    {
+        return None;
+    }
+    let max_h = match args.get(6).map(String::as_str) {
+        Some(glyph_server_core::media::VIDEO_HD_FORMAT) => 720,
+        Some(glyph_server_core::media::VIDEO_MUXED_FORMAT) => 360,
+        _ => return None,
+    };
+    let id = args.last()?.strip_prefix("https://www.youtube.com/watch?v=")?;
+    Some((id, max_h))
 }
 
 pub(crate) fn usable_audio_url(bytes: &[u8]) -> bool {
@@ -87,10 +107,27 @@ mod audio_command_tests {
     use super::*;
     #[test]
     fn fast_path_is_only_for_fixed_audio_commands() {
-        let args: Vec<String> = ["--ignore-config", "--no-warnings", "--no-playlist-reverse", "--get-url", "--no-playlist", "-f", glyph_server_core::media::AUDIO_FORMAT, "--", "https://www.youtube.com/watch?v=abcdefghijk"].into_iter().map(str::to_string).collect();
+        let mk = |fmt: &str| -> Vec<String> {
+            ["--ignore-config", "--no-warnings", "--no-playlist-reverse", "--get-url", "--no-playlist", "-f", fmt, "--", "https://www.youtube.com/watch?v=abcdefghijk"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        let args = mk(glyph_server_core::media::AUDIO_FORMAT);
         let fast = fast_audio_args(&args).unwrap();
         assert_eq!(&fast[7..9], &["--extractor-args", "youtube:skip=hls,dash;player_skip=initial_data"]);
         assert_eq!(&fast[9..], &args[7..]);
+        assert!(fast_video_request(&args).is_none());
+
+        // Video commands must NEVER enter the audio-only r-dlp fast path.
+        let hd_args = mk(glyph_server_core::media::VIDEO_HD_FORMAT);
+        assert!(fast_audio_args(&hd_args).is_none());
+        assert_eq!(fast_video_request(&hd_args), Some(("abcdefghijk", 720)));
+
+        let sd_args = mk(glyph_server_core::media::VIDEO_MUXED_FORMAT);
+        assert!(fast_audio_args(&sd_args).is_none());
+        assert_eq!(fast_video_request(&sd_args), Some(("abcdefghijk", 360)));
+
         let mut metadata = args.clone(); metadata[3] = "--dump-json".into();
         assert!(fast_audio_args(&metadata).is_none());
         assert!(usable_audio_url(b"https://a.googlevideo.com/audio\n"));
@@ -107,6 +144,16 @@ impl CommandRunner for TokioCommands {
             if let Some(id) = args.last().and_then(|url| url.strip_prefix("https://www.youtube.com/watch?v=")) {
                 if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_millis(timeout_ms.min(15_000)), super::ytdlp_pool::resolve(program, id)).await {
                     return Ok(output);
+                }
+            }
+        }
+        if let Some((id, max_h)) = fast_video_request(args) {
+            if super::ytdlp_pool::enabled() {
+                if let Ok(Ok(resolved)) = tokio::time::timeout(
+                    Duration::from_millis(timeout_ms.min(10_000)),
+                    super::ytdlp_pool::resolve_video(program, id, max_h),
+                ).await {
+                    return Ok(format!("{}\n", resolved.url).into_bytes());
                 }
             }
         }

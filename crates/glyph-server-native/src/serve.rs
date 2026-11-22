@@ -118,29 +118,100 @@ pub fn companion_off_flag(s: &Settings) -> std::path::PathBuf {
 
 static COMPANION_OFF: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Hover warmups, clicks and encoders for the same video share extraction.
-/// The cache is checked again after acquiring the per-video gate.
-async fn audio_url(svc: &Services, provider: glyph_protocol::ProviderId, id: &str) -> Result<String, glyph_server_core::providers::ProviderError> {
+fn youtube_gate(id: &str) -> Arc<tokio::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock, Weak};
     static GATES: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap();
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    match gates.get(id).and_then(Weak::upgrade) {
+        Some(gate) => gate,
+        None => {
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
+            gates.insert(id.to_string(), Arc::downgrade(&gate));
+            gate
+        }
+    }
+}
+
+/// Hover warmups, clicks and encoders for the same video share extraction.
+/// The cache is checked again after acquiring the per-video gate.
+async fn audio_url(svc: &Services, provider: glyph_protocol::ProviderId, id: &str) -> Result<String, glyph_server_core::providers::ProviderError> {
     if provider != glyph_protocol::ProviderId::YouTube {
         return glyph_server_core::media::audio_url(svc, provider, id).await;
     }
-    let gate = {
-        let mut gates = GATES.get_or_init(Default::default).lock().unwrap();
-        gates.retain(|_, gate| gate.strong_count() > 0);
-        match gates.get(id).and_then(Weak::upgrade) {
-            Some(gate) => gate,
-            None => {
-                let gate = Arc::new(tokio::sync::Mutex::new(()));
-                gates.insert(id.to_string(), Arc::downgrade(&gate));
-                gate
-            }
-        }
-    };
+    let gate = youtube_gate(id);
     let _guard = gate.lock().await;
     glyph_server_core::media::audio_url(svc, provider, id).await
+}
+
+/// Single-flight video resolution through the warmed `r-dlp` worker pool:
+/// one ~60-80ms call resolves AND cross-caches 720p, 360p, and matching AAC
+/// audio so `/v1/video/youtube/{id}`, `/v1/audio/youtube/{id}` and quality
+/// switches hit cache immediately with zero duplicate YouTube calls.
+async fn video_url(svc: &Services, id: &str, hd: bool) -> Result<String, glyph_server_core::providers::ProviderError> {
+    use glyph_server_core::{media, providers::ProviderError};
+    if !media::valid_video_id(id) || !svc.config.provider_enabled(glyph_protocol::ProviderId::YouTube) {
+        return Err(ProviderError::NotConfigured);
+    }
+    if let Some(hit) = media::cached_video_url(svc, id, hd).await {
+        return Ok(hit);
+    }
+    let gate = youtube_gate(id);
+    let _guard = gate.lock().await;
+    if let Some(hit) = media::cached_video_url(svc, id, hd).await {
+        return Ok(hit);
+    }
+    if crate::ytdlp_pool::enabled() {
+        let program = svc.config.ytdlp_path.as_deref().unwrap_or("yt-dlp");
+        let max_h = if hd { 720 } else { 360 };
+        if let Ok(Ok(resolved)) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::ytdlp_pool::resolve_video(program, id, max_h),
+        )
+        .await
+        {
+            // Cross-populate 720p, 360p and audio from this single r-dlp pass.
+            if let Some(ref audio) = resolved.audio_url {
+                media::put_audio_url(svc, id, audio).await;
+            }
+            let hd_url = resolved
+                .streams
+                .iter()
+                .filter(|(h, _)| *h <= 720)
+                .max_by_key(|(h, _)| *h)
+                .or_else(|| resolved.streams.iter().min_by_key(|(h, _)| *h))
+                .map(|(_, u)| u.as_str());
+            let sd_url = resolved
+                .streams
+                .iter()
+                .filter(|(h, _)| *h <= 360)
+                .max_by_key(|(h, _)| *h)
+                .or_else(|| resolved.streams.iter().min_by_key(|(h, _)| *h))
+                .map(|(_, u)| u.as_str());
+            if let Some(u) = hd_url {
+                media::put_video_url(svc, id, true, u).await;
+            }
+            if let Some(u) = sd_url {
+                media::put_video_url(svc, id, false, u).await;
+            }
+            media::put_video_url(svc, id, hd, &resolved.url).await;
+            return Ok(resolved.url);
+        }
+    }
+    media::video_url(svc, id, hd).await
+}
+
+/// Start resolving via `r-dlp` as soon as `/v1/video/resolve` answers so the
+/// browser's immediate `<video>` and `<audio>` requests find all streams hot.
+fn prefetch_video_url(svc: &Arc<Services>, id: &str) {
+    if !glyph_server_core::media::valid_video_id(id) {
+        return;
+    }
+    let (svc, id) = (svc.clone(), id.to_string());
+    tokio::spawn(async move {
+        let _ = video_url(&svc, &id, true).await;
+    });
 }
 
 /// The app asks for `/internal/audio/<id>` right after a YouTube resolve.
@@ -347,6 +418,13 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
         .server
         .handle(Request::new(method, &target, headers, body, Some(ip)).with_transport(secure, local))
         .await;
+    if path_only == "/v1/video/resolve" && resp.status == 200 {
+        if let Some((_, qs)) = target.split_once('?') {
+            if let Some(id) = glyph_server_core::params::Query::parse(qs).get("id") {
+                prefetch_video_url(&st.server.services(), id);
+            }
+        }
+    }
     if log_it {
         // Path only: no query (search terms), no client address.
         tracing::info!("{method_s} {path_only} -> {}", resp.status);
@@ -527,7 +605,7 @@ async fn video_media(server: &Server, path: &str, headers: &[(String, String)], 
         return plain(StatusCode::BAD_REQUEST, "invalid video path");
     };
     let hd = request.query.get("stream") == Some("hd");
-    let url = match media::video_url(&svc, id, hd).await {
+    let url = match video_url(&svc, id, hd).await {
         Ok(u) => u,
         Err(_) => return plain(StatusCode::BAD_GATEWAY, "video source unavailable"),
     };
@@ -536,11 +614,11 @@ async fn video_media(server: &Server, path: &str, headers: &[(String, String)], 
         return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later");
     };
     let mut permit = Some(permit);
-    let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, &mut permit).await;
-    if matches!(out.status().as_u16(), 403 | 404) {
+    let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, true, &mut permit).await;
+    if matches!(out.status().as_u16(), 403 | 404 | 502) {
         media::forget_video_url(&svc, id, hd).await;
-        if let Ok(fresh) = media::video_url(&svc, id, hd).await {
-            return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, &mut permit).await;
+        if let Ok(fresh) = video_url(&svc, id, hd).await {
+            return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, true, &mut permit).await;
         }
     }
     out
@@ -552,17 +630,21 @@ async fn video_media(server: &Server, path: &str, headers: &[(String, String)], 
 /// throttles non-ranged single-GET audio streams to ~25-35 KB/s.
 /// The permit moves into the body only on success, so a retry can reuse it.
 async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
-    fetch_upstream_media(url, range, MAX_AUDIO_BYTES, permit).await
+    fetch_upstream_media(url, range, MAX_AUDIO_BYTES, false, permit).await
 }
 
-async fn fetch_upstream_media(url: &str, range: Option<&str>, max_bytes: u64, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+async fn fetch_upstream_media(url: &str, range: Option<&str>, max_bytes: u64, expect_video: bool, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
     const GOOGLEVIDEO_CHUNK: u64 = 1024 * 1024;
+    // Match r-dlp's client User-Agent on googlevideo.com so YouTube answers
+    // directly with 206 Partial Content instead of adding a 302 redirect RTT.
+    const GOOGLEVIDEO_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
     // Fetch on the extraction host: YouTube signatures can be bound to its IP.
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> = std::sync::OnceLock::new();
     let client = match CLIENT.get_or_init(|| reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(300))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() < 5 && attempt.url().scheme() == "https" && attempt.url().host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) { attempt.follow() } else { attempt.stop() }
         })).build())
@@ -571,9 +653,12 @@ async fn fetch_upstream_media(url: &str, range: Option<&str>, max_bytes: u64, pe
         Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "audio client unavailable"),
     };
     let explicit_range = range.filter(|r| r.len() <= 64 && r.starts_with("bytes="));
-    let chunked_googlevideo = explicit_range.is_none()
-        && url::Url::parse(url).ok().is_some_and(|u| u.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")));
+    let is_googlevideo = url::Url::parse(url).ok().is_some_and(|u| u.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")));
+    let chunked_googlevideo = explicit_range.is_none() && is_googlevideo;
     let mut req = client.get(url).header("accept-encoding", "identity");
+    if is_googlevideo {
+        req = req.header("user-agent", GOOGLEVIDEO_UA);
+    }
     if let Some(r) = explicit_range {
         req = req.header("range", r);
     } else if chunked_googlevideo {
@@ -595,8 +680,18 @@ async fn fetch_upstream_media(url: &str, range: Option<&str>, max_bytes: u64, pe
         .get("content-type")
         .cloned()
         .unwrap_or(HeaderValue::from_static("application/octet-stream"));
-    if !(content_type.to_str().is_ok_and(|c| c.starts_with("audio/") || c.starts_with("video/") || c.starts_with("application/octet-stream"))) {
-        return plain(StatusCode::BAD_GATEWAY, "upstream did not return audio");
+    let allowed_ct = content_type.to_str().is_ok_and(|c| {
+        if expect_video {
+            c.starts_with("video/") || c.starts_with("application/octet-stream")
+        } else {
+            c.starts_with("audio/") || c.starts_with("video/") || c.starts_with("application/octet-stream")
+        }
+    });
+    if !allowed_ct {
+        return plain(
+            StatusCode::BAD_GATEWAY,
+            if expect_video { "upstream did not return video" } else { "upstream did not return audio" },
+        );
     }
     let validators: Vec<_> = ["etag", "last-modified"].into_iter().filter_map(|key|
         resp.headers().get(key).cloned().map(|value| (key, value))).collect();
@@ -830,17 +925,17 @@ async fn companion(server: &Server, path: &str, target: &str, headers: &[(String
             return plain(StatusCode::BAD_REQUEST, "invalid video request");
         }
         let hd = target.split_once('?').map(|(_, q)| glyph_server_core::params::Query::parse(q).get("stream") == Some("hd")).unwrap_or(false);
-        let url = match glyph_server_core::media::video_url(&svc, id, hd).await {
+        let url = match video_url(&svc, id, hd).await {
             Ok(u) => u,
             Err(_) => return plain(StatusCode::BAD_GATEWAY, "video lookup failed"),
         };
         let mut permit = Some(_permit);
         let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
-        let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, &mut permit).await;
-        if matches!(out.status().as_u16(), 403 | 404) {
+        let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, true, &mut permit).await;
+        if matches!(out.status().as_u16(), 403 | 404 | 502) {
             glyph_server_core::media::forget_video_url(&svc, id, hd).await;
-            if let Ok(fresh) = glyph_server_core::media::video_url(&svc, id, hd).await {
-                return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, &mut permit).await;
+            if let Ok(fresh) = video_url(&svc, id, hd).await {
+                return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, true, &mut permit).await;
             }
         }
         return out;

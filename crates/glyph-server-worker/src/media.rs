@@ -58,6 +58,11 @@ pub async fn handle_video(
         };
         return Response::error("video upstream denied the request", mapped);
     }
+    if let Some(ct) = upstream.headers().get("content-type")? {
+        if !(ct.starts_with("video/") || ct.starts_with("application/octet-stream")) {
+            return Response::error("upstream did not return video", 502);
+        }
+    }
     if status == 206 {
         if let Some(cr) = upstream.headers().get("content-range")? {
             if !media::content_range_total(&cr).is_some_and(|n| n <= MAX_VIDEO_BYTES) {

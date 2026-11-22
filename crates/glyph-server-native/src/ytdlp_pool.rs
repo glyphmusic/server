@@ -53,6 +53,12 @@ pub fn enabled() -> bool {
     rdlp_path().is_some() || (cfg!(unix) && std::env::var("YTDLP_SERVICE_TOKEN").is_ok_and(|token| token.len() >= 32))
 }
 
+pub struct ResolvedVideo {
+    pub url: String,
+    pub audio_url: Option<String>,
+    pub streams: Vec<(u32, String)>,
+}
+
 struct Worker {
     _child: Child,
     stdin: ChildStdin,
@@ -60,6 +66,7 @@ struct Worker {
     program: String,
     requests: u32,
     native: bool,
+    supports_video: bool,
 }
 
 impl Worker {
@@ -82,9 +89,22 @@ impl Worker {
             .spawn().map_err(|_| CommandError::Unavailable)?;
         let stdin = child.stdin.take().ok_or(CommandError::Failed)?;
         let stdout = BufReader::new(child.stdout.take().ok_or(CommandError::Failed)?);
-        let mut worker = Self { _child: child, stdin, stdout, program: program.into(), requests: 0, native };
+        let mut worker = Self {
+            _child: child,
+            stdin,
+            stdout,
+            program: program.into(),
+            requests: 0,
+            native,
+            supports_video: false,
+        };
         let ready = worker.line().await?;
         if ready.get("ready").and_then(|v| v.as_bool()) != Some(true) { return Err(CommandError::Failed); }
+        worker.supports_video = native
+            && ready
+                .get("capabilities")
+                .and_then(|c| c.as_array())
+                .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("video")));
         Ok(worker)
     }
 
@@ -115,6 +135,48 @@ impl Worker {
         self.requests = self.requests.saturating_add(1);
         Ok(bytes)
     }
+
+    async fn resolve_video(&mut self, id: &str, max_height: u32) -> Result<ResolvedVideo, CommandError> {
+        if !self.supports_video {
+            return Err(CommandError::Unavailable);
+        }
+        let request = format!("{}\n", serde_json::json!({"id": id, "kind": "video", "max_height": max_height}));
+        self.stdin.write_all(request.as_bytes()).await.map_err(|_| CommandError::Failed)?;
+        self.stdin.flush().await.map_err(|_| CommandError::Failed)?;
+        let response = self.line().await?;
+        if response.get("kind").and_then(|v| v.as_str()) != Some("video")
+            || response.get("id").and_then(|v| v.as_str()) != Some(id)
+            || response.get("height").and_then(|v| v.as_u64()).unwrap_or(0) == 0
+        {
+            return Err(CommandError::Failed);
+        }
+        let url = response.get("url").and_then(|v| v.as_str()).ok_or(CommandError::Failed)?;
+        if !super::platform::usable_audio_url(url.as_bytes()) {
+            return Err(CommandError::Failed);
+        }
+        let audio_url = response
+            .get("audio_url")
+            .and_then(|v| v.as_str())
+            .filter(|u| super::platform::usable_audio_url(u.as_bytes()))
+            .map(str::to_string);
+        let mut streams = Vec::new();
+        if let Some(arr) = response.get("streams").and_then(|v| v.as_array()) {
+            for s in arr {
+                let h = s.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if let Some(u) = s.get("url").and_then(|v| v.as_str()).filter(|u| super::platform::usable_audio_url(u.as_bytes())) {
+                    if h > 0 {
+                        streams.push((h, u.to_string()));
+                    }
+                }
+            }
+        }
+        self.requests = self.requests.saturating_add(1);
+        Ok(ResolvedVideo {
+            url: url.to_string(),
+            audio_url,
+            streams,
+        })
+    }
 }
 
 pub async fn resolve(program: &str, id: &str) -> Result<Vec<u8>, CommandError> {
@@ -128,6 +190,22 @@ pub async fn resolve(program: &str, id: &str) -> Result<Vec<u8>, CommandError> {
     };
     let result = worker.resolve(id).await;
     if result.is_ok() { *slot = Some(worker); }
+    result
+}
+
+pub async fn resolve_video(program: &str, id: &str, max_height: u32) -> Result<ResolvedVideo, CommandError> {
+    let start = NEXT.fetch_add(1, Ordering::Relaxed) % WORKERS;
+    let mut slot = available_slot(pool(), start).await;
+    let mut worker = match slot.take() {
+        Some(worker) if worker.program == program && !recycle(worker.native, worker.requests) => worker,
+        _ => Worker::start(program).await?,
+    };
+    let result = worker.resolve_video(id, max_height).await;
+    // Keep the healthy worker alive even if a single video was unavailable or
+    // an older binary doesn't advertise video capability yet.
+    if result.is_ok() || matches!(result, Err(CommandError::Unavailable)) {
+        *slot = Some(worker);
+    }
     result
 }
 

@@ -108,9 +108,9 @@ fn audio_url_key(id: &str) -> String {
 
 fn video_url_key(id: &str, hd: bool) -> String {
     if hd {
-        format!("ytvideo:hd:v1:{id}")
+        format!("ytvideo:hd:v2:{id}")
     } else {
-        format!("ytvideo:muxed:v1:{id}")
+        format!("ytvideo:muxed:v2:{id}")
     }
 }
 
@@ -124,6 +124,45 @@ pub fn video_path(id: &str, hd: bool) -> String {
 
 pub async fn forget_video_url(svc: &Services, id: &str, hd: bool) {
     svc.cache.put(&crate::cache::norm_key(&video_url_key(id, hd)), Vec::new(), URL_MAX_TTL_S).await;
+}
+
+pub async fn cached_video_url(svc: &Services, id: &str, hd: bool) -> Option<String> {
+    if !valid_video_id(id) {
+        return None;
+    }
+    crate::cache::get_json::<String>(&*svc.cache, &video_url_key(id, hd))
+        .await
+        .filter(|u| !u.is_empty())
+}
+
+pub async fn put_video_url(svc: &Services, id: &str, hd: bool, raw: &str) {
+    if !valid_video_id(id) {
+        return;
+    }
+    let Ok(url) = url::Url::parse(raw) else { return };
+    if url.scheme() != "https" || !url.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) {
+        return;
+    }
+    let ttl = url_ttl_s(&url, svc.rt.now_ms() / 1000);
+    if ttl >= 60 {
+        let s: String = url.into();
+        crate::cache::put_json(&*svc.cache, &video_url_key(id, hd), &s, ttl).await;
+    }
+}
+
+pub async fn put_audio_url(svc: &Services, id: &str, raw: &str) {
+    if !valid_video_id(id) {
+        return;
+    }
+    let Ok(url) = url::Url::parse(raw) else { return };
+    if url.scheme() != "https" || !url.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) {
+        return;
+    }
+    let ttl = url_ttl_s(&url, svc.rt.now_ms() / 1000);
+    if ttl >= 60 {
+        let s: String = url.into();
+        crate::cache::put_json(&*svc.cache, &audio_url_key(id), &s, ttl).await;
+    }
 }
 
 /// Resolves a direct YouTube video stream URL (`hd = false` -> muxed MP4;

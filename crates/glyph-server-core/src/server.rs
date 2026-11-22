@@ -945,7 +945,7 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 if !svc.config.proxy_audio {
                     return Err(ApiErr::unavailable("video streaming is disabled on this server"));
                 }
-                let muxed = crate::media::video_path(id, false);
+                let sd = crate::media::video_path(id, false);
                 let hd = crate::media::video_path(id, true);
                 let audio = crate::media::audio_path(ProviderId::YouTube, id);
                 let resp = glyph_protocol::VideoResolveResponse {
@@ -953,22 +953,22 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     title: None,
                     channel: None,
                     duration_ms: None,
-                    url: muxed.clone(),
-                    audio_url: None,
+                    url: hd.clone(),
+                    audio_url: Some(audio.clone()),
                     mime: Some("video/mp4".into()),
                     qualities: vec![
                         glyph_protocol::VideoQuality {
                             label: "720p".into(),
                             height: 720,
                             url: hd,
-                            audio_url: Some(audio),
+                            audio_url: Some(audio.clone()),
                             mime: Some("video/mp4".into()),
                         },
                         glyph_protocol::VideoQuality {
                             label: "360p".into(),
                             height: 360,
-                            url: muxed,
-                            audio_url: None,
+                            url: sd,
+                            audio_url: Some(audio),
                             mime: Some("video/mp4".into()),
                         },
                     ],

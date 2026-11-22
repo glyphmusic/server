@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.2 - 2026-11-22
+
+### Fixed
+
+- **Faster & more reliable music video resolution (`r-dlp` workers & Worker validation)**: the native server now resolves H.264 MP4 video streams and audio together via persistent `r-dlp` workers (when `r-dlp` advertises `video` capability), caching all returned resolutions (`ytvideo:*:v2:*`) in one call with `yt-dlp` fallback; `/v1/video/resolve` defaults to 720p HD with paired audio; and the Cloudflare Worker validates upstream `content-type` (`video/*` / `application/octet-stream`) before streaming.
+
+### Changed
+
+- **Changelog & web player snapshots**: refreshed embedded desktop (`0.13.3`), r-dlp (`0.2.3`) and server (`0.12.2`) changelogs and updated the web player bundle.
+
 ## 0.12.1 - 2026-11-22
 
 ### Added
