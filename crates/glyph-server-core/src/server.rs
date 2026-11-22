@@ -141,6 +141,8 @@ enum Route {
     MatchAlternatives,
     MatchReport,
     Artist,
+    VideoSearch,
+    VideoResolve,
 }
 
 fn route(path: &str) -> Option<(Route, Method)> {
@@ -158,6 +160,8 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/match/alternatives" => (Route::MatchAlternatives, Method::Post),
         "/v1/match/report" => (Route::MatchReport, Method::Post),
         "/v1/artist" => (Route::Artist, Method::Get),
+        "/v1/video/search" => (Route::VideoSearch, Method::Get),
+        "/v1/video/resolve" => (Route::VideoResolve, Method::Get),
         _ => return None,
     })
 }
@@ -792,6 +796,7 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (true, YOUTUBE_HINTS),
         (true, RATINGS),
         (true, WRONG_SONG),
+        (youtube, VIDEO),
     ]
     .into_iter()
     .filter(|(on, _)| *on)
@@ -903,6 +908,71 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 let name = req.query.required("name")?;
                 let lang = req.query.get("lang").unwrap_or("en");
                 let resp = crate::artist::lookup(svc, name, lang).await?;
+                Ok(Response::json(200, &resp))
+            }
+            Route::VideoSearch => {
+                let artist = req.query.get("artist").unwrap_or("").trim();
+                let title = req.query.get("title").unwrap_or("").trim();
+                let explicit_q = req.query.get("q").unwrap_or("").trim();
+                let query = if !explicit_q.is_empty() {
+                    explicit_q.to_string()
+                } else if !artist.is_empty() || !title.is_empty() {
+                    format!("{artist} {title} official music video").trim().to_string()
+                } else {
+                    return Err(ApiErr::bad_request("q or title/artist required"));
+                };
+                if query.len() > 256 {
+                    return Err(ApiErr::bad_request("query too long"));
+                }
+                let cache_key = format!("vidsearch:v1:{}:{}:{}", query.to_lowercase(), artist.to_lowercase(), title.to_lowercase());
+                if let Some(hit) = cache::get_json::<glyph_protocol::VideoSearchResponse>(&*svc.cache, &cache_key).await {
+                    return Ok(Response::json(200, &hit));
+                }
+                let results = providers::youtube::search_videos(svc, &query, artist, title)
+                    .await
+                    .unwrap_or_default();
+                let resp = glyph_protocol::VideoSearchResponse { query, results };
+                if !resp.results.is_empty() {
+                    cache::put_json(&*svc.cache, &cache_key, &resp, HOUR).await;
+                }
+                Ok(Response::json(200, &resp))
+            }
+            Route::VideoResolve => {
+                let id = req.query.required("id")?.trim();
+                if !crate::media::valid_video_id(id) {
+                    return Err(ApiErr::bad_request("invalid video id"));
+                }
+                if !svc.config.proxy_audio {
+                    return Err(ApiErr::unavailable("video streaming is disabled on this server"));
+                }
+                let muxed = crate::media::video_path(id, false);
+                let hd = crate::media::video_path(id, true);
+                let audio = crate::media::audio_path(ProviderId::YouTube, id);
+                let resp = glyph_protocol::VideoResolveResponse {
+                    id: id.to_string(),
+                    title: None,
+                    channel: None,
+                    duration_ms: None,
+                    url: muxed.clone(),
+                    audio_url: None,
+                    mime: Some("video/mp4".into()),
+                    qualities: vec![
+                        glyph_protocol::VideoQuality {
+                            label: "720p".into(),
+                            height: 720,
+                            url: hd,
+                            audio_url: Some(audio),
+                            mime: Some("video/mp4".into()),
+                        },
+                        glyph_protocol::VideoQuality {
+                            label: "360p".into(),
+                            height: 360,
+                            url: muxed,
+                            audio_url: None,
+                            mime: Some("video/mp4".into()),
+                        },
+                    ],
+                };
                 Ok(Response::json(200, &resp))
             }
             Route::Cover => {

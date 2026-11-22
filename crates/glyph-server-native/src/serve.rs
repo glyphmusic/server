@@ -295,7 +295,9 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     };
 
     if matches!(path_only.as_str(),"/internal/import"|"/internal/ytdlp"|"/internal/resolve"|"/internal/lyrics"|"/internal/status"
-        |"/internal/update/check"|"/internal/update/apply"|"/internal/r-dlp/check"|"/internal/r-dlp/apply") || path_only.starts_with("/internal/audio/") {
+        |"/internal/update/check"|"/internal/update/apply"|"/internal/r-dlp/check"|"/internal/r-dlp/apply")
+        || path_only.starts_with("/internal/audio/")
+        || path_only.starts_with("/internal/video/") {
         return companion(&st.server, &path_only, &target, &headers, method, &body).await;
     }
     let probe = Request::new(method, &target, headers.clone(), vec![], Some(ip.clone())).with_transport(secure, local);
@@ -316,6 +318,9 @@ async fn handle(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<Socke
     // byte ranges and provider-side redirects).
     if path_only.starts_with("/v1/audio/") || path_only.starts_with("/v1/download/") {
         return media(&st.server, &target, &headers, method, Some(ip), None).await;
+    }
+    if path_only.starts_with("/v1/video/youtube/") {
+        return video_media(&st.server, &target, &headers, method, Some(ip)).await;
     }
     // A song of a short link as a plain audio file (web player, yt-dlp, curl).
     if glyph_server_core::share::audio_target(&path_only).is_some() {
@@ -399,6 +404,8 @@ async fn web_player(dir: Option<&std::path::Path>, req: &Request) -> Response {
 
 /// Largest audio payload we hand out (a long mix in M4A/AAC).
 const MAX_AUDIO_BYTES: u64 = 32 * 1024 * 1024;
+/// Largest video payload we stream through (music video MP4).
+const MAX_VIDEO_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Concurrency cap for audio transfers, so a few long tracks cannot exhaust
 /// the machine (yt-dlp runs here too).
@@ -502,12 +509,53 @@ async fn retry_stale_youtube(
     }
 }
 
+/// `/v1/video/youtube/{id}`: streams a YouTube MP4 video with Range support.
+async fn video_media(server: &Server, path: &str, headers: &[(String, String)], method: Method, ip: Option<String>) -> Response {
+    use glyph_server_core::media;
+    if !matches!(method, Method::Get) {
+        return plain(StatusCode::METHOD_NOT_ALLOWED, "GET required");
+    }
+    let svc = server.services();
+    let request = Request::new(method, path, headers.to_vec(), vec![], ip);
+    if let Err(e) = server.admit(&request, true).await {
+        let r = glyph_server_core::Response::error(e);
+        let mut out = Response::builder().status(r.status);
+        for (k, v) in &r.headers { out = out.header(k.as_str(), v.as_str()); }
+        return out.body(Body::from(r.bytes().unwrap_or_default().to_vec())).unwrap();
+    }
+    let Some(id) = request.path.strip_prefix("/v1/video/youtube/").filter(|id| media::valid_video_id(id)) else {
+        return plain(StatusCode::BAD_REQUEST, "invalid video path");
+    };
+    let hd = request.query.get("stream") == Some("hd");
+    let url = match media::video_url(&svc, id, hd).await {
+        Ok(u) => u,
+        Err(_) => return plain(StatusCode::BAD_GATEWAY, "video source unavailable"),
+    };
+    let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
+    let Ok(permit) = audio_slots().clone().try_acquire_owned() else {
+        return plain(StatusCode::TOO_MANY_REQUESTS, "busy, retry later");
+    };
+    let mut permit = Some(permit);
+    let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, &mut permit).await;
+    if matches!(out.status().as_u16(), 403 | 404) {
+        media::forget_video_url(&svc, id, hd).await;
+        if let Ok(fresh) = media::video_url(&svc, id, hd).await {
+            return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, &mut permit).await;
+        }
+    }
+    out
+}
+
 /// Streams one audio response from the provider. Byte ranges are forwarded
 /// upstream, so a seek only costs the requested bytes.
 /// Full `googlevideo.com` fetches are read in 1 MiB ranges because YouTube
 /// throttles non-ranged single-GET audio streams to ~25-35 KB/s.
 /// The permit moves into the body only on success, so a retry can reuse it.
 async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+    fetch_upstream_media(url, range, MAX_AUDIO_BYTES, permit).await
+}
+
+async fn fetch_upstream_media(url: &str, range: Option<&str>, max_bytes: u64, permit: &mut Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
     const GOOGLEVIDEO_CHUNK: u64 = 1024 * 1024;
     // Fetch on the extraction host: YouTube signatures can be bound to its IP.
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> = std::sync::OnceLock::new();
@@ -567,8 +615,8 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         else {
             return plain(StatusCode::BAD_GATEWAY, "invalid upstream content range");
         };
-        if full_total > MAX_AUDIO_BYTES {
-            return plain(StatusCode::PAYLOAD_TOO_LARGE, "full audio object exceeds size limit");
+        if full_total > max_bytes {
+            return plain(StatusCode::PAYLOAD_TOO_LARGE, "full media object exceeds size limit");
         }
         let mut out = Response::builder()
             .status(StatusCode::OK)
@@ -632,13 +680,13 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
     let total = resp.content_length();
     if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         match resp.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(glyph_server_core::media::content_range_total) {
-            Some(size) if size <= MAX_AUDIO_BYTES => {},
-            Some(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "full audio object exceeds size limit"),
+            Some(size) if size <= max_bytes => {},
+            Some(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "full media object exceeds size limit"),
             None => return plain(StatusCode::BAD_GATEWAY, "invalid upstream content range"),
         }
     }
-    if total.is_some_and(|n| n > MAX_AUDIO_BYTES) {
-        return plain(StatusCode::PAYLOAD_TOO_LARGE, "audio too large");
+    if total.is_some_and(|n| n > max_bytes) {
+        return plain(StatusCode::PAYLOAD_TOO_LARGE, "media too large");
     }
     let content_range = resp.headers().get("content-range").cloned();
     let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
@@ -660,8 +708,8 @@ async fn fetch_upstream_audio(url: &str, range: Option<&str>, permit: &mut Optio
         let _ = &permit;
         let chunk = chunk.map_err(|_| std::io::Error::other("audio transfer failed"))?;
         received += chunk.len() as u64;
-        if received > MAX_AUDIO_BYTES {
-            return Err(std::io::Error::other("audio too large"));
+        if received > max_bytes {
+            return Err(std::io::Error::other("media too large"));
         }
         Ok(chunk)
     });
@@ -776,6 +824,26 @@ async fn companion(server: &Server, path: &str, target: &str, headers: &[(String
         let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
         let out = fetch_upstream_audio(&url, range, &mut permit).await;
         return retry_stale_youtube(&svc, id, range, out, &mut permit).await;
+    }
+    if let Some(id) = path.strip_prefix("/internal/video/") {
+        if method != Method::Get || !glyph_server_core::media::valid_video_id(id) {
+            return plain(StatusCode::BAD_REQUEST, "invalid video request");
+        }
+        let hd = target.split_once('?').map(|(_, q)| glyph_server_core::params::Query::parse(q).get("stream") == Some("hd")).unwrap_or(false);
+        let url = match glyph_server_core::media::video_url(&svc, id, hd).await {
+            Ok(u) => u,
+            Err(_) => return plain(StatusCode::BAD_GATEWAY, "video lookup failed"),
+        };
+        let mut permit = Some(_permit);
+        let range = headers.iter().find(|(k, _)| k == "range").map(|(_, v)| v.as_str());
+        let out = fetch_upstream_media(&url, range, MAX_VIDEO_BYTES, &mut permit).await;
+        if matches!(out.status().as_u16(), 403 | 404) {
+            glyph_server_core::media::forget_video_url(&svc, id, hd).await;
+            if let Ok(fresh) = glyph_server_core::media::video_url(&svc, id, hd).await {
+                return fetch_upstream_media(&fresh, range, MAX_VIDEO_BYTES, &mut permit).await;
+            }
+        }
+        return out;
     }
     if method != Method::Post { return plain(StatusCode::METHOD_NOT_ALLOWED, "POST required"); }
     if path == "/internal/import" {

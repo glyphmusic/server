@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 // The app decodes AAC/Vorbis; selecting arbitrary WebM audio could return unsupported Opus.
 pub const AUDIO_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[acodec=vorbis]";
+/// Progressive MP4 (video + audio in one stream) for instant universal `<video>` playback.
+pub const VIDEO_MUXED_FORMAT: &str = "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]";
+/// Adaptive H.264 MP4 video up to 720p (paired with `AUDIO_FORMAT` on the client).
+pub const VIDEO_HD_FORMAT: &str = "bestvideo[ext=mp4][vcodec^=avc1][height<=720]/bestvideo[ext=mp4][height<=720]";
 
 /// A valid, ignorable MP4 free atom, appended only after successful encoding.
 /// Unknown-length HTTP streams may lose transport errors at proxy boundaries;
@@ -80,7 +84,7 @@ pub fn valid_command(args: &[String]) -> bool {
         ("--get-url", "--no-playlist") => {
             args.len() == 9
                 && args[5] == "-f"
-                && args[6] == AUDIO_FORMAT
+                && matches!(args[6].as_str(), AUDIO_FORMAT | VIDEO_MUXED_FORMAT | VIDEO_HD_FORMAT)
                 && args[7] == "--"
                 && args[8]
                     .strip_prefix("https://www.youtube.com/watch?v=")
@@ -100,6 +104,76 @@ const URL_MAX_TTL_S: u64 = 6 * 60 * 60;
 
 fn audio_url_key(id: &str) -> String {
     format!("ytaudio:v1:{id}")
+}
+
+fn video_url_key(id: &str, hd: bool) -> String {
+    if hd {
+        format!("ytvideo:hd:v1:{id}")
+    } else {
+        format!("ytvideo:muxed:v1:{id}")
+    }
+}
+
+pub fn video_path(id: &str, hd: bool) -> String {
+    if hd {
+        format!("/v1/video/youtube/{id}?stream=hd")
+    } else {
+        format!("/v1/video/youtube/{id}")
+    }
+}
+
+pub async fn forget_video_url(svc: &Services, id: &str, hd: bool) {
+    svc.cache.put(&crate::cache::norm_key(&video_url_key(id, hd)), Vec::new(), URL_MAX_TTL_S).await;
+}
+
+/// Resolves a direct YouTube video stream URL (`hd = false` -> muxed MP4;
+/// `hd = true` -> 720p H.264 video-only MP4 to pair with `/v1/audio/youtube/{id}`).
+pub async fn video_url(svc: &Services, id: &str, hd: bool) -> Result<String, ProviderError> {
+    if !valid_video_id(id) || !svc.config.provider_enabled(ProviderId::YouTube) {
+        return Err(ProviderError::NotConfigured);
+    }
+    let work = async {
+        let bin = svc.config.ytdlp_path.as_deref().ok_or(ProviderError::NotConfigured)?;
+        let key = video_url_key(id, hd);
+        if let Some(hit) = crate::cache::get_json::<String>(&*svc.cache, &key).await {
+            if !hit.is_empty() {
+                return Ok(hit);
+            }
+        }
+        let format = if hd { VIDEO_HD_FORMAT } else { VIDEO_MUXED_FORMAT };
+        let video = format!("https://www.youtube.com/watch?v={id}");
+        let args: Vec<String> = [
+            "--ignore-config",
+            "--no-warnings",
+            "--no-playlist-reverse",
+            "--get-url",
+            "--no-playlist",
+            "-f",
+            format,
+            "--",
+            &video,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let out = svc.cmds.run(bin, &args, 20_000).await.map_err(|_| ProviderError::Network)?;
+        let text = String::from_utf8(out).map_err(|_| ProviderError::Parse)?;
+        let lines: Vec<_> = text.lines().filter(|v| !v.trim().is_empty()).collect();
+        if lines.len() != 1 {
+            return Err(ProviderError::Parse);
+        }
+        let url = url::Url::parse(lines[0]).map_err(|_| ProviderError::Parse)?;
+        if url.scheme() != "https" || !url.host_str().is_some_and(|h| h.ends_with(".googlevideo.com")) {
+            return Err(ProviderError::Parse);
+        }
+        let ttl = url_ttl_s(&url, svc.rt.now_ms() / 1000);
+        let url: String = url.into();
+        if ttl >= 60 {
+            crate::cache::put_json(&*svc.cache, &key, &url, ttl).await;
+        }
+        Ok(url)
+    };
+    with_timeout(&*svc.rt, 22_000, work).await.ok_or(ProviderError::Timeout)?
 }
 
 /// Seconds a googlevideo URL may still be handed out, from its `expire=`.

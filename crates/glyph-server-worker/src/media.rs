@@ -5,6 +5,83 @@ use glyph_server_core::{media, Request, Server};
 use worker::{Context, Fetch, Headers, RequestInit, RequestRedirect, Response, Result};
 
 const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_VIDEO_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Streams `/v1/video/youtube/{id}` directly from the companion with HTTP Range
+/// support, bypassing R2 and the 32 MiB audio cache.
+pub async fn handle_video(
+    req: &worker::Request,
+    core: &Request,
+    server: &Server,
+    env: &worker::Env,
+) -> Result<Response> {
+    let svc = server.services();
+    if let Err(e) = server.admit(core, true).await {
+        let r = glyph_server_core::Response::error(e);
+        let mut out = Response::from_bytes(r.bytes().unwrap_or_default().to_vec())?.with_status(r.status);
+        for (k, v) in &r.headers { out.headers_mut().set(k, v)?; }
+        return Ok(out);
+    }
+    if !matches!(req.method(), worker::Method::Get | worker::Method::Head) {
+        return Response::error("GET or HEAD required", 405);
+    }
+    let Some(id) = core.path.strip_prefix("/v1/video/youtube/").filter(|id| media::valid_video_id(id)) else {
+        return Response::error("invalid video id", 400);
+    };
+    if !svc.config.companion_enabled {
+        return Response::error("companion disabled", 403);
+    }
+    let Some(base) = super::secret(env, "YTDLP_SERVICE_URL").filter(|u| u.starts_with("https://")) else {
+        return Response::error("yt-dlp companion not configured", 503);
+    };
+    let Some(creds) = super::CompanionCreds::from_env(env, glyph_server_core::companion_auth::Role::Service) else {
+        return Response::error("yt-dlp companion not configured", 503);
+    };
+    let hd = core.query.get("stream") == Some("hd");
+    let target = if hd {
+        format!("{}/internal/video/{id}?stream=hd", base.trim_end_matches('/'))
+    } else {
+        format!("{}/internal/video/{id}", base.trim_end_matches('/'))
+    };
+    let headers = creds.headers("GET", &target, b"")?;
+    if let Some(range) = req.headers().get("range")? {
+        headers.set("range", &range)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_headers(headers).with_redirect(RequestRedirect::Manual);
+    let upstream = Fetch::Request(worker::Request::new_with_init(&target, &init)?).send().await?;
+    let status = upstream.status_code();
+    if !matches!(status, 200 | 206) {
+        let mapped = match status {
+            401 | 403 | 404 => status,
+            _ => 502,
+        };
+        return Response::error("video upstream denied the request", mapped);
+    }
+    if status == 206 {
+        if let Some(cr) = upstream.headers().get("content-range")? {
+            if !media::content_range_total(&cr).is_some_and(|n| n <= MAX_VIDEO_BYTES) {
+                return Response::error("video exceeds size limit", 413);
+            }
+        }
+    } else if upstream.headers().get("content-length")?.and_then(|s| s.parse::<u64>().ok()).is_some_and(|n| n > MAX_VIDEO_BYTES) {
+        return Response::error("video exceeds size limit", 413);
+    }
+    let out_headers = Headers::new();
+    for name in ["content-type", "content-length", "content-range"] {
+        if let Some(v) = upstream.headers().get(name)? {
+            out_headers.set(name, &v)?;
+        }
+    }
+    out_headers.set("accept-ranges", "bytes")?;
+    out_headers.set("cache-control", "no-store")?;
+    let resp = upstream.with_status(status).with_headers(out_headers);
+    if req.method() == worker::Method::Head {
+        head(resp)
+    } else {
+        Ok(resp)
+    }
+}
 
 /// Exact provider-owned suffixes; redirects are checked again, never followed blindly.
 pub fn allowed_upstream(url: &worker::Url, audio: bool) -> bool {

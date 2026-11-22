@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.1 - 2026-11-22
+
+### Added
+
+- **Music video search, resolution & streaming (`/v1/video/*`, `video` capability)**: added `/v1/video/search`, `/v1/video/resolve` and `/v1/video/youtube/*` stream proxying on both the native server and Cloudflare Worker so desktop, mobile and web clients can search and play music videos with quality selection.
+
+### Changed
+
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.13.1` and refreshed embedded desktop (`0.13.1`) and server (`0.12.1`) changelogs.
+
 ## 0.12.0 - 2026-11-21
 
 ### Added

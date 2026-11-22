@@ -352,6 +352,148 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
     Ok(out)
 }
 
+/// Classify a YouTube video entry for the music-video picker.
+pub fn classify_video(title: &str, channel: &str) -> glyph_protocol::VideoKind {
+    use glyph_protocol::VideoKind;
+    let low = title.to_lowercase();
+    let ch = channel.to_lowercase();
+    if ch.ends_with(" - topic") || low.contains("provided to youtube") {
+        return VideoKind::Topic;
+    }
+    if low.contains("lyric") || low.contains("lyrics") || low.contains("letra") {
+        return VideoKind::Lyric;
+    }
+    if low.contains("live") || low.contains("concert") || low.contains("tiny desk")
+        || low.contains("colors show") || low.contains("acoustic") || low.contains("session")
+        || low.contains("festival") || low.contains("unplugged")
+    {
+        return VideoKind::Live;
+    }
+    if low.contains("official music video") || low.contains("official video")
+        || low.contains("music video") || low.contains("official mv")
+        || low.contains("(mv)") || low.contains("[mv]") || ch.ends_with("vevo")
+    {
+        return VideoKind::Official;
+    }
+    VideoKind::Video
+}
+
+fn video_rank(item: &glyph_protocol::VideoCandidate, artist: &str, title: &str) -> i32 {
+    use glyph_protocol::VideoKind;
+    let mut score = match item.kind {
+        VideoKind::Official => 40,
+        VideoKind::Video => 18,
+        VideoKind::Live => 14,
+        VideoKind::Lyric => 10,
+        VideoKind::Topic => -30,
+    };
+    let low_title = item.title.to_lowercase();
+    let low_ch = item.channel.to_lowercase();
+    if low_title.contains("official audio") || low_title.contains("(audio)") {
+        score -= 22;
+    }
+    if !title.trim().is_empty() && low_title.contains(&title.trim().to_lowercase()) {
+        score += 18;
+    }
+    if !artist.trim().is_empty() {
+        let a = artist.trim().to_lowercase();
+        if low_title.contains(&a) || low_ch.contains(&a) {
+            score += 14;
+        }
+    }
+    score
+}
+
+fn parse_native_videos(v: &serde_json::Value) -> Vec<glyph_protocol::VideoCandidate> {
+    let mut found = Vec::new();
+    video_renderers(v, &mut found);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in found {
+        let Some(id) = r["videoId"].as_str().filter(|id| crate::media::valid_video_id(id)) else { continue };
+        let Some(raw_title) = text_of(&r["title"]) else { continue };
+        let Some(ms) = text_of(&r["lengthText"]).and_then(|s| parse_length(&s)) else { continue };
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let channel = text_of(&r["ownerText"]).or_else(|| text_of(&r["longBylineText"])).unwrap_or_default();
+        let kind = classify_video(&raw_title, &channel);
+        out.push(glyph_protocol::VideoCandidate {
+            id: id.to_string(),
+            title: raw_title,
+            channel,
+            duration_ms: Some(ms),
+            thumbnail: Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")),
+            kind,
+        });
+        if out.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    out
+}
+
+/// Search YouTube for watchable music videos, preferring real music videos over
+/// static auto-generated Topic uploads.
+pub async fn search_videos(
+    svc: &Services,
+    query: &str,
+    artist: &str,
+    title: &str,
+) -> PResult<Vec<glyph_protocol::VideoCandidate>> {
+    let body = serde_json::json!({
+        "context": {"client": {"clientName": "WEB", "clientVersion": WEB_CLIENT_VERSION, "hl": "en", "gl": "US"}},
+        "query": query,
+        "params": "EgIQAQ==",
+    });
+    let req = crate::traits::HttpRequest {
+        method: crate::traits::Method::Post,
+        url: SEARCH_URL.into(),
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-youtube-client-name".into(), "1".into()),
+            ("x-youtube-client-version".into(), WEB_CLIENT_VERSION.into()),
+            ("origin".into(), "https://www.youtube.com".into()),
+        ],
+        body: Some(body.to_string().into_bytes()),
+    };
+    let mut results = match with_timeout(&*svc.rt, 5_000, fetch_json::<serde_json::Value>(svc, req)).await {
+        Some(Ok(v)) => parse_native_videos(&v),
+        _ => Vec::new(),
+    };
+    if results.is_empty() {
+        if let Some(bin) = svc.config.ytdlp_path.clone() {
+            let mut args = base_args();
+            args.push("--dump-json".into());
+            args.push("--flat-playlist".into());
+            args.push(format!("ytsearch{MAX_RESULTS}:{query}"));
+            if let Ok(flat) = run(svc, &bin, &args, FLAT_TIMEOUT_MS).await {
+                let mut seen = std::collections::HashSet::new();
+                for e in flat {
+                    if !crate::media::valid_video_id(&e.id) || e.title.is_empty() || !seen.insert(e.id.clone()) {
+                        continue;
+                    }
+                    if e.live_status.as_deref().is_some_and(|s| s != "not_live") || e.availability.as_deref() == Some("private") {
+                        continue;
+                    }
+                    let channel = e.channel.filter(|s| !s.is_empty()).or(e.uploader).unwrap_or_default();
+                    let kind = classify_video(&e.title, &channel);
+                    results.push(glyph_protocol::VideoCandidate {
+                        thumbnail: Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", e.id)),
+                        duration_ms: e.duration.filter(|d| *d > 0.0).map(|d| (d * 1000.0) as u64),
+                        id: e.id,
+                        title: e.title,
+                        channel,
+                        kind,
+                    });
+                }
+            }
+        }
+    }
+    results.sort_by(|a, b| video_rank(b, artist, title).cmp(&video_rank(a, artist, title)));
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

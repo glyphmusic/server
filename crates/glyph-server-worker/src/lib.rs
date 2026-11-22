@@ -878,6 +878,9 @@ async fn serve(mut req: worker::Request, env: Env, ctx: Context) -> Result<worke
         for (k,v) in &resp.headers { headers.set(k,v)?; }
         return Ok(worker::Response::from_bytes(resp.bytes().unwrap_or_default().to_vec())?.with_status(resp.status).with_headers(headers));
     }
+    if request.path.starts_with("/v1/video/youtube/") {
+        return media::handle_video(&req, &request, &server, &env).await;
+    }
     if request.path.starts_with("/v1/audio/") || request.path.starts_with("/v1/download/") || request.path == "/v1/upstream" {
         return media::handle(&req, &request, &server, &ctx, &env).await;
     }
