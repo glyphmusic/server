@@ -33,6 +33,7 @@ pub mod search;
 pub mod server;
 pub mod share;
 pub mod site;
+pub mod taste;
 pub mod traits;
 pub mod trust;
 

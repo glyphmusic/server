@@ -143,6 +143,9 @@ enum Route {
     Artist,
     VideoSearch,
     VideoResolve,
+    TasteTags,
+    TasteCollab,
+    TasteOnboarding,
 }
 
 fn route(path: &str) -> Option<(Route, Method)> {
@@ -162,6 +165,9 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/artist" => (Route::Artist, Method::Get),
         "/v1/video/search" => (Route::VideoSearch, Method::Get),
         "/v1/video/resolve" => (Route::VideoResolve, Method::Get),
+        "/v1/taste/tags" => (Route::TasteTags, Method::Post),
+        "/v1/taste/collab" => (Route::TasteCollab, Method::Post),
+        "/v1/taste/onboarding" => (Route::TasteOnboarding, Method::Get),
         _ => return None,
     })
 }
@@ -797,6 +803,7 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (true, RATINGS),
         (true, WRONG_SONG),
         (youtube, VIDEO),
+        (true, TASTE),
     ]
     .into_iter()
     .filter(|(on, _)| *on)
@@ -974,6 +981,32 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     ],
                 };
                 Ok(Response::json(200, &resp))
+            }
+            Route::TasteTags => {
+                let r: glyph_protocol::TasteTagsRequest = parse_body(&req)?;
+                Ok(Response::json(200, &crate::taste::tags_batch(svc, r).await?))
+            }
+            Route::TasteCollab => {
+                let r: glyph_protocol::TasteCollabRequest = parse_body(&req)?;
+                let mut voter: Option<String> = None;
+                if let Some(acc) = &server.accounts {
+                    if req.header("authorization").is_some_and(|h| h.starts_with("Bearer ")) {
+                        if let Some((uid, _)) = acc.abuse_identity(svc, &req).await {
+                            voter = Some(format!("acc:{uid}"));
+                        }
+                    }
+                }
+                let voter = voter
+                    .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
+                    .or_else(|| {
+                        req.header(INSTALL_ID_HEADER)
+                            .filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+                            .map(|id| format!("id:{id}"))
+                    });
+                Ok(Response::json(200, &crate::taste::collab(svc, voter.as_deref(), r).await?))
+            }
+            Route::TasteOnboarding => {
+                Ok(Response::json(200, &crate::taste::onboarding_catalog(svc).await?))
             }
             Route::Cover => {
                 let track: crate::trust::Claimed<glyph_protocol::Track> = parse_body::<glyph_protocol::Track>(&req)?.into();
