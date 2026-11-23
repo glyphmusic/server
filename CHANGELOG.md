@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.3 - 2026-11-23
+
+### Added
+
+- **Server-side Taste Engine** (`POST /v1/taste/recommend`, capability `taste_engine`): intent-aware recommendations for Home, Daily Mixes and Radio. It is purely additive: existing endpoints and the wire protocol version are unchanged, so apps that do not know about Taste keep working as before.
+
 ## 0.12.2 - 2026-11-22
 
 ### Fixed
