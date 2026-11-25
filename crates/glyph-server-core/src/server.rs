@@ -76,6 +76,28 @@ impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
+
+    /// The client address for rate limits and vote counting. One IPv6
+    /// customer usually gets a whole /64, so all of it counts as one client;
+    /// otherwise rotating addresses would skip every per-IP limit.
+    pub fn limit_ip(&self) -> Option<String> {
+        self.client_ip.as_deref().map(limit_key_ip)
+    }
+}
+
+/// See [`Request::limit_ip`].
+pub fn limit_key_ip(ip: &str) -> String {
+    match ip.trim().parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Ok(v4) => v4.to_string(),
+        Err(_) => ip.to_string(),
+    }
 }
 
 pub enum Body {
@@ -256,7 +278,7 @@ impl Server {
         if req.path.starts_with("/admin/v1") {
             if let Err(response) = self.check_access(&req) { return response; }
             let svc = self.services();
-            let ip = req.client_ip.as_deref().unwrap_or("unknown");
+            let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
             if let RateDecision::Limited { retry_after_s } = svc.limiter.check_admin(&format!("admin-request:{ip}"), 120, 60).await {
                 return Response::error(ApiErr::rate_limited(retry_after_s));
             }
@@ -337,7 +359,7 @@ impl Server {
     /// Shared by metadata and host-owned media routes. No client trust flags.
     pub async fn admit(&self, req: &Request, media: bool) -> Result<bool, ApiErr> {
         let svc = self.services();
-        let ip = req.client_ip.as_deref().unwrap_or("unknown");
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
         let ip_key = format!("ip:{ip}");
         let namespace = if media { "media" } else { "api" };
         let base = svc.config.rate_limit_per_min.max(1).saturating_mul(if media { 20 } else { 1 });
@@ -882,7 +904,7 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     .header(INSTALL_ID_HEADER)
                     .filter(|id| !id.is_empty() && id.len() <= 64)
                     .map(|id| format!("id:{id}"))
-                    .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
+                    .or_else(|| req.limit_ip().map(|ip| format!("ip:{ip}")))
                     .ok_or_else(|| ApiErr::bad_request("missing install id"))?;
                 Ok(Response::json(200, &crate::hints::report(svc, &voter, r).await?))
             }
@@ -905,7 +927,7 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                     }
                 }
                 let voter = voter
-                    .or_else(|| req.client_ip.as_ref().map(|ip| format!("ip:{ip}")))
+                    .or_else(|| req.limit_ip().map(|ip| format!("ip:{ip}")))
                     .or_else(|| {
                         req.header(INSTALL_ID_HEADER)
                             .filter(|id| !id.is_empty() && id.len() <= 64)
@@ -1100,7 +1122,7 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 if r.offset == 0 {
                     // Pace multi-playlist transfers gently without handing out
                     // 15-minute abuse bans (`admit` already guards raw floods).
-                    let ip = req.client_ip.as_deref().unwrap_or("unknown");
+                    let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
                     let limit = if member { 20 } else { 8 };
                     server.admit_rules_or_track(svc, &req, "import", &[(format!("import-start:{ip}"), format!("ip:{ip}"), limit)], false, None).await?;
                 }
@@ -1179,8 +1201,7 @@ async fn taste_voter(server: &Server, svc: &Arc<Services>, req: &Request) -> Opt
             }
         }
     }
-    req.client_ip
-        .as_ref()
+    req.limit_ip()
         .map(|ip| format!("ip:{ip}"))
         .or_else(|| {
             req.header(INSTALL_ID_HEADER)
@@ -1637,5 +1658,14 @@ mod tests {
         // Other API endpoints are NOT abuse-banned for this IP.
         let lyrics_req = Request::new(Method::Get, "/v1/lyrics?title=x&artist=y", vec![], vec![], Some("203.0.113.42".into()));
         assert_ne!(block_on(s.handle(lyrics_req)).status, 429);
+    }
+
+    #[test]
+    fn ipv6_clients_are_limited_per_64() {
+        assert_eq!(limit_key_ip("203.0.113.7"), "203.0.113.7");
+        assert_eq!(limit_key_ip("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(limit_key_ip("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+        assert_eq!(limit_key_ip("2001:db8:1:2:bbbb::9"), "2001:db8:1:2::/64");
+        assert_ne!(limit_key_ip("2001:db8:1:3::1"), "2001:db8:1:2::/64");
     }
 }

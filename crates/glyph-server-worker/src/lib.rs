@@ -56,7 +56,15 @@ impl HttpClient for FetchClient {
         let req = worker::Request::new_with_init(&r.url, &init).map_err(fail)?;
         let mut resp = Fetch::Request(req).send().await.map_err(fail)?;
         let status = resp.status_code();
+        // Never buffer a huge answer (a hostile file on an allowed host).
+        const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+        if resp.headers().get("content-length").ok().flatten().and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| n > MAX_RESPONSE_BYTES) {
+            return Err(HttpError("response too large".into()));
+        }
         let body = resp.bytes().await.map_err(fail)?;
+        if body.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(HttpError("response too large".into()));
+        }
         Ok(HttpResponse { status, body })
     }
 }

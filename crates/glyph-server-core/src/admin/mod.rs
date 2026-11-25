@@ -563,7 +563,7 @@ impl Server {
         key: &[u8],
         now: u64,
     ) -> Result<Response, ApiErr> {
-        let who = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let who = req.limit_ip().unwrap_or_else(|| "unknown".into());
         let lock_key = format!("admin:lock:{who}");
         let fail_key = format!("admin:fail:{who}");
         if let Some(until) = cache::get_json::<u64>(&*svc.cache, &lock_key).await {
@@ -626,7 +626,13 @@ impl Server {
     async fn guard_target(&self, caller: &Caller, handle: &str, svc: &Arc<Services>, now: u64) -> Result<(), ApiErr> {
         let Caller::Account(me) = caller else { return Ok(()) };
         let Some(acc) = &self.accounts else { return Ok(()) };
-        let Ok(target) = acc.admin_account(handle, &svc.config.bans, now).await else { return Ok(()) };
+        // Only "no such account" may pass (the action itself then fails the
+        // same way). Any other lookup error must not skip the check.
+        let target = match acc.admin_account(handle, &svc.config.bans, now).await {
+            Ok(t) => t,
+            Err(e) if e.status == 404 => return Ok(()),
+            Err(e) => return Err(e),
+        };
         if target.admin && target.id != me.id {
             return Err(ApiErr::new(403, "owner_only", "only the server owner can change another admin"));
         }
