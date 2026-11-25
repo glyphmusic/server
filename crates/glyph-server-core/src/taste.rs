@@ -688,7 +688,9 @@ pub async fn collab(
     // Sanitize & deduplicate positive signals (blending long-term + recent phase).
     let mut pos_map: HashMap<String, (String, f32)> = HashMap::new();
     for sig in req.positive.into_iter().take(MAX_POSITIVE_SIGNALS) {
-        let name = sig.artist.trim();
+        // Names are shown to other users: no control characters.
+        let cleaned: String = sig.artist.chars().filter(|c| !c.is_control()).collect();
+        let name = cleaned.trim();
         if name.is_empty() || name.len() > 120 || !sig.weight.is_finite() {
             continue;
         }

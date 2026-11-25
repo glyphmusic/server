@@ -117,7 +117,7 @@ impl Accounts {
                 };
                 let limit_key = match &viewer {
                     Some(u) => format!("prof-view:{}", u.id),
-                    None => format!("prof-img:{}", req.client_ip.as_deref().unwrap_or("unknown")),
+                    None => format!("prof-img:{}", req.limit_ip().unwrap_or_else(|| "unknown".into())),
                 };
                 self.limit(svc, &limit_key, 240, 60).await?;
                 return self.view(viewer.as_ref(), rest).await;

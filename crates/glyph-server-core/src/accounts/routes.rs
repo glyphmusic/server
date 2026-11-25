@@ -17,7 +17,7 @@ impl Accounts {
             return Ok(Response { status: 204, headers: vec![("allow".into(), "GET, POST, PUT, PATCH, DELETE, OPTIONS".into())], body: Body::Bytes(vec![]) });
         }
         let now = svc.rt.now_ms();
-        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
 
         if let Some(id) = path.strip_prefix("/account/login/") {
             if m != Method::Get {
@@ -652,6 +652,9 @@ impl Accounts {
         if let Some((bytes, ct)) = blobs.get(&key).await.map_err(store_err)? {
             return Ok(image(200, bytes, &ct, CACHE));
         }
+        // Only a miss fetches and stores: limit those per client.
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
+        self.limit(svc, &format!("cover-fetch:{ip}"), 300, 3600).await?;
         let fetched = crate::traits::with_timeout(&*svc.rt, svc.config.provider_timeout_ms.max(5000), svc.http.send(crate::HttpRequest::get(url))).await;
         let Some(Ok(resp)) = fetched else { return Err(ApiErr::new(502, "upstream_error", "cover fetch failed")) };
         if resp.status != 200 || resp.body.len() > MAX_CACHED_COVER {

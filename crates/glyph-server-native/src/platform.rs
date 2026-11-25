@@ -33,6 +33,15 @@ impl ReqwestClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::custom(|a| {
+                // An open redirect on an allowed host must not reach this
+                // machine or its network.
+                if a.previous().len() >= 10 || a.url().host().is_some_and(|h| private_host(&h)) {
+                    a.stop()
+                } else {
+                    a.follow()
+                }
+            }))
             .build()
             .expect("failed to build HTTP client");
         Self { client }
@@ -54,10 +63,41 @@ impl HttpClient for ReqwestClient {
         if let Some(body) = r.body {
             b = b.body(body);
         }
-        let resp = b.send().await.map_err(fail)?;
+        let mut resp = b.send().await.map_err(fail)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(fail)?.to_vec();
+        // Never hold a huge answer in memory (a hostile file on an allowed host).
+        if resp.content_length().is_some_and(|n| n > MAX_RESPONSE_BYTES as u64) {
+            return Err(HttpError("response too large".into()));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(fail)? {
+            if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                return Err(HttpError("response too large".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(HttpResponse { status, body })
+    }
+}
+
+/// Upper bound for one buffered upstream answer.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Loopback, private, link-local and similar addresses (and `localhost`).
+fn private_host(h: &url::Host<&str>) -> bool {
+    use std::net::IpAddr;
+    let ip = match h {
+        url::Host::Domain(d) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            return d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local") || d.ends_with(".internal");
+        }
+        url::Host::Ipv4(v4) => IpAddr::V4(*v4),
+        url::Host::Ipv6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(*v6)),
+    };
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+            || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
     }
 }
 
@@ -351,6 +391,18 @@ impl ClearExt for LruCache<String, (u64, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirects_to_private_hosts_are_refused() {
+        for u in ["http://127.0.0.1/", "http://10.0.0.5/", "http://192.168.1.1/", "http://169.254.169.254/", "http://[::1]/", "http://[fd00::1]/", "http://localhost/", "http://100.64.0.1/"] {
+            let url = url::Url::parse(u).unwrap();
+            assert!(private_host(&url.host().unwrap()), "{u}");
+        }
+        for u in ["https://archive.org/", "https://8.8.8.8/", "https://[2606:4700::1111]/"] {
+            let url = url::Url::parse(u).unwrap();
+            assert!(!private_host(&url.host().unwrap()), "{u}");
+        }
+    }
 
     #[tokio::test]
     async fn memory_ttl_and_disk_roundtrip() {

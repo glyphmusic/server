@@ -1580,6 +1580,11 @@ fn mcp_sessions_claim_rename_and_revoke() {
     assert_eq!((st, approval["client"].as_str()), (200, Some("Claude")));
     let (st, _) = call(&t, Method::Post, "/v1/mcp/approve", serde_json::json!({"id": auth_id, "allow": true}), Some(&s.access_token));
     assert_eq!(st, 200);
+    // An approved request cannot be moved to another account afterwards.
+    let (victim, _, _) = sign_up(&t, "mcpvictim");
+    let _ = victim;
+    let (st, _) = call(&t, Method::Post, "/oauth/authorize/start", serde_json::json!({"id": auth_id, "handle": "mcpvictim"}), None);
+    assert_eq!(st, 404);
     let (st, polled) = call(&t, Method::Get, &format!("/oauth/authorize/poll?id={auth_id}"), serde_json::Value::Null, None);
     assert_eq!((st, polled["status"].as_str()), (200, Some("allowed")));
     let redir = url::Url::parse(polled["redirect"].as_str().unwrap()).unwrap();

@@ -109,7 +109,7 @@ impl Accounts {
     /// `GET /p/<id>/cover` (the first song's cover, for link cards) and
     /// `/p/<id>/cover/<n>` (song rows); the app icon when there is none.
     pub(super) async fn share_cover(&self, svc: &Services, req: &Request, id: &str, n: usize) -> Result<Response, ApiErr> {
-        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
         self.limit(svc, &format!("cover:{ip}"), 1200, 3600).await?;
         let p = self.shared(id).await?;
         let song = crate::share::songs(&p.code).into_iter().take(crate::share::MAX_LISTED).nth(n);
@@ -123,7 +123,7 @@ impl Accounts {
     /// `GET /p/<id>/listen/<n>`: resolves song `n` and redirects to its
     /// audio, for the web players. 404 for songs that only play in the app.
     pub(super) async fn share_listen(&self, svc: &Services, req: &Request, id: &str, n: &str) -> Result<Response, ApiErr> {
-        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
         self.limit(svc, &format!("listen:{ip}"), 300, 3600).await?;
         let n: usize = n.parse().map_err(|_| ApiErr::not_found("no such song"))?;
         let p = self.shared(id).await?;
@@ -162,7 +162,7 @@ impl Accounts {
         if req.method != Method::Get {
             return Err(fail(method()));
         }
-        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
         // Players ask again on every seek; the media limits apply on top.
         self.limit(svc, &format!("share-audio:{ip}"), 3000, 3600).await.map_err(fail)?;
         let share = self.store.share(id).await.map_err(store_err).map_err(fail)?.ok_or_else(|| fail(ApiErr::not_found("no such playlist link")))?;

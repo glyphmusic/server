@@ -232,7 +232,7 @@ impl Accounts {
             return Ok(cors(Response { status: 204, headers: Vec::new(), body: Body::Bytes(Vec::new()) }));
         }
         let now = svc.rt.now_ms();
-        let ip = req.client_ip.clone().unwrap_or_else(|| "unknown".into());
+        let ip = req.limit_ip().unwrap_or_else(|| "unknown".into());
         match (path, m) {
             (p, Method::Get) if p.starts_with("/.well-known/oauth-protected-resource") => Ok(cors(Response::json(
                 200,
@@ -316,6 +316,11 @@ impl Accounts {
                 let Some(mut auth) = self.store.mcp_get(AUTHS, id, now).await.map_err(store_err)?.and_then(|a| serde_json::from_str::<Auth>(&a).ok()) else {
                     return Err(ApiErr::not_found("this sign-in expired; start again in your assistant"));
                 };
+                // Once decided, the request belongs to the account that decided:
+                // a later handle must never take over an approval.
+                if auth.status != "pending" {
+                    return Err(ApiErr::not_found("this sign-in expired; start again in your assistant"));
+                }
                 let handle = normalize_handle(v["handle"].as_str().unwrap_or("")).map_err(|_| ApiErr::bad_request("not a valid @handle"))?;
                 let user = self.store.user_by_handle(&handle).await.map_err(store_err)?;
                 // Unknown handles look the same as known ones (no account probing).

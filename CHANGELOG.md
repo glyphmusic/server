@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **AI assistant sign-in**: an approved sign-in request can no longer be moved to another account by typing a different @handle afterwards, so nobody can get an assistant token for someone else's account.
+- **Rate limits for IPv6 clients**: all addresses of one IPv6 /64 network now count as one client, so changing addresses inside it no longer skips the sign-up, sign-in, admin login and API limits.
+- **Cover cache**: fetching new covers is limited per client, upstream answers over 32 MB are refused instead of being held in memory, and the self-hosted server no longer follows redirects to this machine or its local network.
+- **Admin dashboard**: an admin account can no longer act on another admin when the account lookup fails for a reason other than "not found".
+- **Taste suggestions**: artist names sent by apps lose control characters before other users see them.
+
 ## 0.12.3 - 2026-11-23
 
 ### Added
