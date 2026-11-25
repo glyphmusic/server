@@ -981,3 +981,34 @@ fn admin_jams_lists_active_rooms_and_omits_ended_ones() {
     let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/jams", "", owner));
     assert_eq!((s, v["total"].as_u64(), v["jams"].as_array().map(Vec::len)), (200, Some(0), Some(0)));
 }
+
+#[test]
+fn app_releases_fall_back_to_the_feed_when_the_api_says_no() {
+    let t = setup(true, TestHost::default());
+    let pair = login(&t);
+    let token = Some(pair.access_token.as_str());
+    // A Worker's shared address is often out of API quota.
+    t.h.http.on("api.github.com/repos/glyphmusic/apps/releases", 403, r#"{"message":"API rate limit exceeded"}"#);
+    t.h.http.on(
+        "glyphmusic/apps/releases.atom",
+        200,
+        r#"<feed><entry><updated>2026-11-25T20:08:09Z</updated><link href="https://github.com/glyphmusic/apps/releases/tag/v0.13.10"/></entry>
+<entry><updated>2026-11-20T10:00:00Z</updated><link href="https://github.com/glyphmusic/apps/releases/tag/v0.13.0"/></entry>
+<entry><link href="https://github.com/glyphmusic/apps/releases/tag/not-a-version"/></entry></feed>"#,
+    );
+    t.h.http.on("glyphmusic/apps/releases/latest", 200, r#"<meta property="og:url" content="/glyphmusic/apps/releases/tag/v0.13.0" />"#);
+    let (s, v, _) = call(&t, req(Method::Get, "/admin/v1/app-releases", "", token));
+    assert_eq!(s, 200, "{v}");
+    let r = v["releases"].as_array().unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!((r[0]["version"].as_str(), r[0]["prerelease"].as_bool()), (Some("0.13.10"), Some(true)));
+    assert_eq!((r[1]["version"].as_str(), r[1]["prerelease"].as_bool()), (Some("0.13.0"), Some(false)));
+    assert_eq!(r[0]["published_at"].as_str(), Some("2026-11-25T20:08:09Z"));
+}
+
+#[test]
+fn release_feed_and_latest_page_parse() {
+    assert_eq!(latest_tag_from_page(r#"<head><meta property="og:url" content="/glyphmusic/apps/releases/tag/v1.2.3" /></head>"#).as_deref(), Some("1.2.3"));
+    assert_eq!(latest_tag_from_page("<html>nothing</html>"), None);
+    assert!(parse_release_feed("<feed></feed>").is_empty());
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.5 - 2026-11-25
+
+### Fixed
+
+- **App versions in the admin dashboard**: the list of app releases loads again. When GitHub's API refuses the server (it allows only a few requests per hour without a key, shared by many Cloudflare Workers), the server reads GitHub's release feed instead, and otherwise shows the last list that worked.
+
 ## 0.12.4 - 2026-11-25
 
 ### Fixed

@@ -783,11 +783,31 @@ pub const APPS_REPO: &str = "glyphmusic/apps";
 
 /// The app's GitHub releases for the version picker, newest first (cached
 /// 10 minutes so the dashboard does not use up GitHub's rate limit).
+///
+/// The API allows only 60 calls an hour per address without a key, and a
+/// Worker shares its address with many others, so the API often says no.
+/// Then the release feed and the "latest" page on github.com (no quota)
+/// stand in, and after that the last list that worked.
 async fn app_releases(svc: &Services) -> Result<AppReleasesResponse, ApiErr> {
     const KEY: &str = "admin:app_releases";
+    const LAST_GOOD: &str = "admin:app_releases:last";
     if let Some(r) = cache::get_json::<AppReleasesResponse>(&*svc.cache, KEY).await {
         return Ok(r);
     }
+    let last = cache::get_json::<AppReleasesResponse>(&*svc.cache, LAST_GOOD).await;
+    let fresh = match releases_from_api(svc).await {
+        Some(r) => Some(r),
+        None => releases_from_feed(svc, last.as_ref()).await,
+    };
+    let Some(out) = fresh.or(last) else {
+        return Err(ApiErr::unavailable("GitHub did not answer; try again later"));
+    };
+    cache::put_json(&*svc.cache, KEY, &out, 600).await;
+    cache::put_json(&*svc.cache, LAST_GOOD, &out, 30 * 86_400).await;
+    Ok(out)
+}
+
+async fn releases_from_api(svc: &Services) -> Option<AppReleasesResponse> {
     #[derive(serde::Deserialize)]
     struct Gh {
         tag_name: String,
@@ -801,20 +821,76 @@ async fn app_releases(svc: &Services) -> Result<AppReleasesResponse, ApiErr> {
     let mut req = crate::traits::HttpRequest::get(format!("https://api.github.com/repos/{APPS_REPO}/releases?per_page=20"));
     req.headers.push(("accept".into(), "application/vnd.github+json".into()));
     req.headers.push(("user-agent".into(), "glyph-server".into()));
-    let resp = svc.http.send(req).await.map_err(|_| ApiErr::unavailable("GitHub did not answer; try again later"))?;
+    let resp = svc.http.send(req).await.ok()?;
     if resp.status != 200 {
-        return Err(ApiErr::unavailable("GitHub did not answer; try again later"));
+        return None;
     }
-    let list: Vec<Gh> = serde_json::from_slice(&resp.body).map_err(|_| ApiErr::unavailable("GitHub sent something unexpected"))?;
+    let list: Vec<Gh> = serde_json::from_slice(&resp.body).ok()?;
     let releases = list
         .into_iter()
         .filter(|r| !r.draft)
         .map(|r| AppRelease { version: r.tag_name.trim_start_matches(['v', 'V']).to_string(), prerelease: r.prerelease, published_at: r.published_at })
         .filter(|r| valid_min_app_version(&r.version))
         .collect();
-    let out = AppReleasesResponse { releases };
-    cache::put_json(&*svc.cache, KEY, &out, 600).await;
-    Ok(out)
+    Some(AppReleasesResponse { releases })
+}
+
+/// Releases from `releases.atom` (newest first). The feed does not say which
+/// ones are pre-releases: the newest normal release comes from the page
+/// `releases/latest` points to, older ones keep what the last list knew,
+/// everything else counts as a pre-release.
+async fn releases_from_feed(svc: &Services, last: Option<&AppReleasesResponse>) -> Option<AppReleasesResponse> {
+    let get = |path: &str| crate::traits::HttpRequest::get(format!("https://github.com/{APPS_REPO}/{path}")).header("user-agent", "glyph-server");
+    let resp = svc.http.send(get("releases.atom")).await.ok()?;
+    if resp.status != 200 {
+        return None;
+    }
+    let feed = parse_release_feed(&String::from_utf8_lossy(&resp.body));
+    if feed.is_empty() {
+        return None;
+    }
+    let stable = match svc.http.send(get("releases/latest")).await {
+        Ok(r) if r.status == 200 => latest_tag_from_page(&String::from_utf8_lossy(&r.body)),
+        _ => None,
+    };
+    let releases = feed
+        .into_iter()
+        .map(|(version, published_at)| {
+            let prerelease = match (&stable, last.and_then(|l| l.releases.iter().find(|r| r.version == version))) {
+                (Some(s), _) if *s == version => false,
+                (_, Some(known)) => known.prerelease,
+                _ => true,
+            };
+            AppRelease { version, prerelease, published_at }
+        })
+        .collect();
+    Some(AppReleasesResponse { releases })
+}
+
+/// `(version, updated)` for each `<entry>` of a GitHub release feed.
+fn parse_release_feed(xml: &str) -> Vec<(String, Option<String>)> {
+    xml.split("<entry>")
+        .skip(1)
+        .filter_map(|e| {
+            let tag = between(e, "/releases/tag/", "\"")?;
+            let version = tag.trim_start_matches(['v', 'V']).to_string();
+            valid_min_app_version(&version).then(|| (version, between(e, "<updated>", "</updated>").map(str::to_string)))
+        })
+        .collect()
+}
+
+/// The tag a release page is about (`og:url` ends in `/releases/tag/<tag>`).
+fn latest_tag_from_page(html: &str) -> Option<String> {
+    let rest = &html[html.find("og:url")?..];
+    let tag = between(rest, "/releases/tag/", "\"")?;
+    let version = tag.trim_start_matches(['v', 'V']).to_string();
+    valid_min_app_version(&version).then_some(version)
+}
+
+fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let from = s.find(start)? + start.len();
+    let len = s[from..].find(end)?;
+    Some(&s[from..from + len])
 }
 
 async fn is_revoked(svc: &Services, sid: &str) -> bool {
