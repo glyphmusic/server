@@ -1,5 +1,5 @@
-# Glyph server 0.12.3 - 2026-11-23
+# Glyph server 0.12.4 - 2026-11-25
 
-- **Server-side Taste Engine**: new `POST /v1/taste/recommend` endpoint (capability `taste_engine`) for Home, Daily Mixes and Radio. Additive only; the protocol version and existing endpoints are unchanged, so older apps keep working.
+- **Security fixes**: an approved AI assistant sign-in can no longer be taken over with another @handle, IPv6 clients are rate limited per /64 network, the cover cache is limited per client and refuses huge or local-network answers, the admin guard fails closed, and taste artist names lose control characters.
 
 See CHANGELOG.md for details.

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.13.6 - 2026-11-25
+
+### Added
+
+- **Glyph Drift (beta)**: a new radio that keeps playing when the queue ends, built on Glyph's own taste instead of Last.fm. Songs you play to the end lead the way, skipped songs steer it away, and it adds a few songs at a time so it follows your mood. Turn it on in Settings > Playback > Content.
+- **Plugins can change the app icon and the whole font**: a plugin's look can bring its own app icon (window, taskbar, tray, Dock, and the app overview on Android), its own font file for all text, and its own monospaced font. Turn the plugin off and Glyph's icon and fonts come back.
+- **Plugins can rearrange the home page, sidebar and tabs**: a plugin's look can put the sections of the home page, the sidebar entries and the tabs on phones in a new order, or hide some. Settings always stays in the sidebar.
+- **Plugins can move the sidebar and change the startup animation**: a plugin's look can put the sidebar on the right (the queue and lyrics panel then opens on the left) and bring its own ASCII picture for the startup animation, shown from the next start.
+- **Downloads keep their info**: album, cover and lyrics are now saved with every download.
+- **Better plugin versions**: a plugin can say up to which Glyph version it works (`max_app`). If your Glyph is too new or too old for a plugin, it stays installed but pauses until an update fits, and Settings > Plugins shows it under "Paused". If the newest version does not fit your Glyph, Glyph offers the newest one that does. Each plugin's page lists its earlier versions to go back to, with "Keep this version" to stop updates for it, and shows what changed in an update.
+
+### Changed
+
+- **Smarter recommendations**: Glyph now links artists you put in the same playlists, play one after another, or that are known to be similar, and suggests new artists close to your favourites first.
+- **Better search**: small typos ("beleiver", "metalica") still find the right song, and songs you picked from search before rank higher.
+- **Better "Add songs" for playlists**: suggestions now match the sound and artists of the playlist itself, not only your overall taste.
+
+### Fixed
+
+- **Server dashboard bans**: a banned person shows as one row in the ban list, with the number of device entries next to it, and "Unban" there lifts the account ban and its device bans together. The "banned" badge disappears right after an unban, without reloading the page.
+
+## 0.13.5 - 2026-11-24
+
+### Fixed
+
+- **Black screen on startup (Android, desktop and web)**: version 0.13.4 could stop at a black screen right after launch because the music video player was set up too early. It is now set up only when needed. Update to 0.13.5 to fix it.
+
 ## 0.13.4 - 2026-11-23
 
 ### Added
