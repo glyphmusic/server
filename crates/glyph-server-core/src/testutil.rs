@@ -199,5 +199,6 @@ pub fn track(id: &str, source: glyph_protocol::ProviderId, title: &str, artist: 
         permalink: None,
         external_ids: Default::default(),
         explicit: false,
+        explicit_rating: None,
     }
 }

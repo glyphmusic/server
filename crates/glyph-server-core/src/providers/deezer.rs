@@ -17,6 +17,10 @@ pub(crate) struct DzTrack {
     pub album: Option<DzAlbum>,
     #[serde(default)]
     pub explicit_lyrics: Option<bool>,
+    /// Deezer content rating code: 0 = naturally clean, 1 = explicit,
+    /// 2 = unknown, 3 = edited/clean, 4/7 = partially explicit, 6 = no advice.
+    #[serde(default, deserialize_with = "de_u64_lenient")]
+    pub explicit_content_lyrics: Option<u64>,
 }
 #[derive(Deserialize)]
 pub(crate) struct DzArtist {
@@ -40,7 +44,12 @@ pub(crate) fn to_candidate(t: DzTrack) -> Candidate {
     out.duration_ms = t.duration.map(|s| s * 1000);
     out.permalink = t.link;
     out.isrc = t.isrc.filter(|s| !s.is_empty());
-    out.explicit = t.explicit_lyrics == Some(true);
+    match (t.explicit_lyrics, t.explicit_content_lyrics) {
+        (Some(true), _) | (_, Some(1 | 4 | 7)) => out.set_rating(glyph_protocol::ExplicitRating::Explicit),
+        (_, Some(2 | 6)) => out.set_rating(glyph_protocol::ExplicitRating::Unknown),
+        (_, Some(0 | 3)) | (Some(false), None) => out.set_rating(glyph_protocol::ExplicitRating::Clean),
+        _ => {}
+    }
     if let Some(a) = t.album {
         out.album = a.title;
         out.cover_url = a.cover_big.or(a.cover_medium);

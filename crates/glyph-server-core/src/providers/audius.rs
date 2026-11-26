@@ -72,6 +72,58 @@ pub async fn search_page(svc: &Services, q: &str, page: usize) -> PResult<Vec<Ca
         .collect())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudiusArtist {
+    pub name: String,
+    pub is_verified: bool,
+    pub photo: Option<String>,
+    pub url: Option<String>,
+}
+
+/// Checks Audius's official artist directory (which exposes native `is_verified`).
+pub async fn lookup_artist(svc: &Services, name: &str) -> PResult<Option<AudiusArtist>> {
+    #[derive(Deserialize)]
+    struct UsersResp {
+        #[serde(default)]
+        data: Vec<UserItem>,
+    }
+    #[derive(Deserialize)]
+    struct UserItem {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        handle: Option<String>,
+        #[serde(default)]
+        is_verified: bool,
+        #[serde(default, deserialize_with = "de_u64_lenient")]
+        follower_count: Option<u64>,
+        profile_picture: Option<Artwork>,
+    }
+    let url = build_url(
+        &format!("{BASE}/users/search"),
+        &[("query", name.trim()), ("limit", "5"), ("app_name", &svc.config.audius_app_name)],
+    );
+    let resp: UsersResp = fetch_json(svc, HttpRequest::get(url)).await?;
+    let want = crate::merge::plain_words(name);
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let best = resp
+        .data
+        .into_iter()
+        .filter(|u| {
+            crate::merge::plain_words(&u.name) == want
+                || u.handle.as_deref().is_some_and(|h| crate::merge::plain_words(h) == want)
+        })
+        .max_by_key(|u| (u.is_verified, u.follower_count.unwrap_or(0)));
+    Ok(best.map(|u| AudiusArtist {
+        name: u.name,
+        is_verified: u.is_verified,
+        photo: u.profile_picture.and_then(|p| p.medium.or(p.small)).filter(|p| p.starts_with("https://")),
+        url: u.handle.filter(|h| !h.trim().is_empty()).map(|h| format!("https://audius.co/{h}")),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

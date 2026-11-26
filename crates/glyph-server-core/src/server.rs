@@ -163,6 +163,7 @@ enum Route {
     MatchAlternatives,
     MatchReport,
     Artist,
+    ArtistsMeta,
     VideoSearch,
     VideoResolve,
     TasteTags,
@@ -186,6 +187,7 @@ fn route(path: &str) -> Option<(Route, Method)> {
         "/v1/match/alternatives" => (Route::MatchAlternatives, Method::Post),
         "/v1/match/report" => (Route::MatchReport, Method::Post),
         "/v1/artist" => (Route::Artist, Method::Get),
+        "/v1/artists/meta" => (Route::ArtistsMeta, Method::Post),
         "/v1/video/search" => (Route::VideoSearch, Method::Get),
         "/v1/video/resolve" => (Route::VideoResolve, Method::Get),
         "/v1/taste/tags" => (Route::TasteTags, Method::Post),
@@ -829,6 +831,7 @@ fn capabilities(svc: &Services, accounts: bool, covers: bool) -> Vec<String> {
         (youtube, VIDEO),
         (true, TASTE),
         (true, TASTE_ENGINE),
+        (true, ARTISTS_META),
     ]
     .into_iter()
     .filter(|(on, _)| *on)
@@ -940,6 +943,11 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 let name = req.query.required("name")?;
                 let lang = req.query.get("lang").unwrap_or("en");
                 let resp = crate::artist::lookup(svc, name, lang).await?;
+                Ok(Response::json(200, &resp))
+            }
+            Route::ArtistsMeta => {
+                let r: glyph_protocol::ArtistsMetaRequest = parse_body(&req)?;
+                let resp = crate::artist::batch_meta(svc, r).await?;
                 Ok(Response::json(200, &resp))
             }
             Route::VideoSearch => {
@@ -1071,16 +1079,18 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 let artist = req.query.required("artist")?;
                 let title = req.query.required("title")?;
                 let key = format!("similar:{}:{}", plain_words(artist), plain_words(title));
-                if let Some(hit) = cache::get_json::<SimilarResponse>(&*svc.cache, &key).await {
+                if let Some(mut hit) = cache::get_json::<SimilarResponse>(&*svc.cache, &key).await {
+                    crate::rating::apply_cached_ratings(svc, &mut hit.tracks).await;
                     return Ok(Response::json(200, &hit));
                 }
                 // Radio is a bonus feature: a missing Last.fm key or a short
                 // upstream outage answers with an empty list instead of a 5xx,
                 // and the client keeps its own fallbacks.
-                let (tracks, ttl) = match lastfm::similar(svc, artist, title).await {
+                let (mut tracks, ttl) = match lastfm::similar(svc, artist, title).await {
                     Ok(t) => (t, DAY),
                     Err(_) => (Vec::new(), SIMILAR_TROUBLE_TTL),
                 };
+                crate::rating::apply_cached_ratings(svc, &mut tracks).await;
                 let resp = SimilarResponse { tracks };
                 cache::put_json(&*svc.cache, &key, &resp, ttl).await;
                 Ok(Response::json(200, &resp))
@@ -1090,13 +1100,15 @@ async fn dispatch(server: &Server, svc: &Arc<Services>, route: Route, req: Reque
                 // player's home page. Cached for an hour; a provider problem
                 // answers with an empty list, like radio.
                 let key = "chart:v1:deezer";
-                if let Some(hit) = cache::get_json::<SimilarResponse>(&*svc.cache, key).await {
+                if let Some(mut hit) = cache::get_json::<SimilarResponse>(&*svc.cache, key).await {
+                    crate::rating::apply_cached_ratings(svc, &mut hit.tracks).await;
                     return Ok(Response::json(200, &hit));
                 }
-                let (tracks, ttl) = match providers::deezer::chart(svc).await {
+                let (mut tracks, ttl) = match providers::deezer::chart(svc).await {
                     Ok(t) => (t.into_iter().map(|c| c.track).collect(), HOUR),
                     Err(_) => (Vec::new(), SIMILAR_TROUBLE_TTL),
                 };
+                crate::rating::apply_cached_ratings(svc, &mut tracks).await;
                 let resp = SimilarResponse { tracks };
                 cache::put_json(&*svc.cache, key, &resp, ttl).await;
                 Ok(Response::json(200, &resp))
@@ -1185,6 +1197,9 @@ async fn lyrics(svc: &Arc<Services>, req: &Request) -> Result<Response, ApiErr> 
         };
         if ttl > 0 {
             cache::put_json(&*svc.cache, &key, &found, ttl).await;
+        }
+        if let Some(ref l) = found {
+            crate::rating::note_lyrics_rating(svc, title, artist, l).await;
         }
         match found {
             Some(l) => Ok(Response::json(200, &l)),

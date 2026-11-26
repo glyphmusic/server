@@ -194,6 +194,8 @@ pub fn prefer_cover(primary: &mut Option<String>, other: &Option<String>) {
 
 /// Fold `other` into `primary`: record its id under `external_ids` and fill gaps.
 pub fn merge_into(primary: &mut Track, other: &Track) {
+    let merged_rating = primary.rating().merge(other.rating());
+    let keep_rating = primary.explicit_rating.is_some() || other.explicit_rating.is_some();
     if other.source != primary.source {
         primary.external_ids.entry(other.source).or_insert_with(|| other.id.clone());
     }
@@ -201,6 +203,9 @@ pub fn merge_into(primary: &mut Track, other: &Track) {
         if *p != primary.source {
             primary.external_ids.entry(*p).or_insert_with(|| id.clone());
         }
+    }
+    if merged_rating != primary.rating() || keep_rating || merged_rating == glyph_protocol::ExplicitRating::Explicit {
+        primary.set_rating(merged_rating);
     }
     macro_rules! fill {
         ($f:ident) => {
@@ -372,5 +377,25 @@ mod tests {
         let mut merged = sp.clone();
         merge_into(&mut merged, &yt);
         assert_eq!(merged.cover_url, sp.cover_url);
+    }
+
+    #[test]
+    fn merge_preserves_explicit_and_unknown_ratings() {
+        use glyph_protocol::ExplicitRating;
+        let mut yt = track("yt1", YouTube, "Song", "Artist", 200);
+        let mut dz_exp = track("dz1", Deezer, "Song", "Artist", 200);
+        dz_exp.set_rating(ExplicitRating::Explicit);
+        merge_into(&mut yt, &dz_exp);
+        assert!(yt.explicit);
+        assert_eq!(yt.rating(), ExplicitRating::Explicit);
+
+        // Deezer "no advice" (Unknown) must not turn a YouTube track into Clean.
+        let mut yt2 = track("yt2", YouTube, "Song", "Artist", 200);
+        let mut dz_unk = track("dz2", Deezer, "Song", "Artist", 200);
+        dz_unk.set_rating(ExplicitRating::Unknown);
+        merge_into(&mut yt2, &dz_unk);
+        assert!(!yt2.explicit);
+        assert_eq!(yt2.rating(), ExplicitRating::Unknown);
+        assert!(yt2.explicit_unknown());
     }
 }

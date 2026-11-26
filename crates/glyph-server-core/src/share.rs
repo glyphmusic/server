@@ -189,6 +189,7 @@ pub fn songs(code: &str) -> Vec<glyph_protocol::Track> {
             permalink: None,
             external_ids: Default::default(),
             explicit: s.x,
+            explicit_rating: s.x.then_some(glyph_protocol::ExplicitRating::Explicit),
         })
         .collect()
 }

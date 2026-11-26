@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.6 - 2026-11-26
+
+### Fixed
+
+- **Multi-source Explicit & unknown ratings**: songs now resolve a three-state explicit rating (`Explicit`, `Clean`, `Unknown`) combining Deezer explicit codes, Apple Music/iTunes metadata and LRCLIB lyrics scanning (with `/v1/lyrics` feeding back into the shared rating cache), so mislabeled explicit songs are caught while genuinely unrated uploads keep `?`.
+- **Service-based artist verification (`POST /v1/artists/meta`, capability `artists_meta`)**: replaced the arbitrary fan-count cutoff with service-level verification signals (Audius, SoundCloud, Deezer, Apple Music/iTunes, Spotify and Wikipedia), served in batched lookups with 14-day caching and without caching transient errors as unverified.
+- **Complete server-side artist catalog caching & incremental album updates (`/v1/artist`)**: on first visit, the server indexes popular songs plus discography tracklists, caches total unique song and release counts, genre tags, links and related artist metadata for 30 days, and automatically checks every 12 hours to incrementally merge newly released albums and singles on the server.
+
+### Changed
+
+- **Protocol & changelog snapshots**: updated `release-protocol` to `0.14.1` and refreshed embedded desktop (`0.14.1`) and server (`0.12.6`) changelogs.
+
 ## 0.12.5 - 2026-11-25
 
 ### Fixed

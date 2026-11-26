@@ -91,6 +91,39 @@ pub async fn search(svc: &Services, q: &str) -> PResult<Vec<Candidate>> {
         .collect())
 }
 
+/// Checks whether SoundCloud's official API marks an exact-name artist profile as verified.
+pub async fn is_artist_verified(svc: &Services, name: &str) -> PResult<bool> {
+    #[derive(Deserialize)]
+    struct UserItem {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        full_name: Option<String>,
+        #[serde(default)]
+        verified: Option<bool>,
+        #[serde(default)]
+        badges: Option<Badges>,
+    }
+    #[derive(Deserialize)]
+    struct Badges {
+        #[serde(default)]
+        verified: Option<bool>,
+    }
+    let tok = token(svc).await?;
+    let url = build_url("https://api.soundcloud.com/users", &[("q", name.trim()), ("limit", "5")]);
+    let items: Vec<UserItem> = fetch_json(svc, HttpRequest::get(url).header("authorization", format!("OAuth {tok}"))).await?;
+    let want = crate::merge::plain_words(name);
+    if want.is_empty() {
+        return Ok(false);
+    }
+    Ok(items.into_iter().any(|u| {
+        let name_ok = crate::merge::plain_words(&u.username) == want
+            || u.full_name.as_deref().is_some_and(|f| crate::merge::plain_words(f) == want);
+        let ver = u.verified == Some(true) || u.badges.as_ref().is_some_and(|b| b.verified == Some(true));
+        name_ok && ver
+    }))
+}
+
 /// Import: a playable song keeps SoundCloud as its source (the embed plays
 /// it), others are metadata only and get matched elsewhere by the app.
 fn import_track(v: &serde_json::Value) -> Option<Track> {

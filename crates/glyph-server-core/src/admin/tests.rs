@@ -953,6 +953,7 @@ fn admin_jams_lists_active_rooms_and_omits_ended_ones() {
             isrc: None,
             external_ids: Default::default(),
             explicit: false,
+            explicit_rating: None,
         },
         position_ms: 12_000,
         playing: true,

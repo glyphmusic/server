@@ -2595,6 +2595,7 @@ mod tests {
             permalink: None,
             external_ids: Default::default(),
             explicit: false,
+            explicit_rating: None,
         }
     }
 

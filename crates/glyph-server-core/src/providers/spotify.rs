@@ -14,6 +14,8 @@ pub(crate) struct SpTrack {
     pub duration_ms: Option<u64>,
     pub external_ids: Option<ExtIds>,
     pub external_urls: Option<ExtUrls>,
+    #[serde(default)]
+    pub explicit: Option<bool>,
 }
 #[derive(Deserialize)]
 pub(crate) struct Named {
@@ -62,7 +64,46 @@ pub(crate) fn to_track(t: SpTrack) -> Option<Track> {
     }
     out.isrc = t.external_ids.and_then(|e| e.isrc);
     out.permalink = t.external_urls.and_then(|u| u.spotify);
+    if let Some(exp) = t.explicit {
+        out.set_rating(if exp {
+            glyph_protocol::ExplicitRating::Explicit
+        } else {
+            glyph_protocol::ExplicitRating::Clean
+        });
+    }
     Some(out)
+}
+
+/// Checks whether Spotify's official artist catalog contains an exact-name match.
+pub async fn artist_exists(svc: &Services, name: &str) -> PResult<Option<(String, Vec<String>, Option<String>)>> {
+    #[derive(Deserialize)]
+    struct Resp {
+        artists: Page,
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(default)]
+        items: Vec<SpArtist>,
+    }
+    #[derive(Deserialize)]
+    struct SpArtist {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        genres: Vec<String>,
+        external_urls: Option<ExtUrls>,
+    }
+    let tok = token(svc).await?;
+    let url = build_url("https://api.spotify.com/v1/search", &[("q", name), ("type", "artist"), ("limit", "5")]);
+    let (k, v) = auth(&tok);
+    let resp: Resp = fetch_json(svc, HttpRequest::get(url).header(k, v)).await?;
+    let want = crate::merge::plain_words(name);
+    let hit = resp
+        .artists
+        .items
+        .into_iter()
+        .find(|a| !want.is_empty() && crate::merge::plain_words(&a.name) == want);
+    Ok(hit.map(|a| (a.name, a.genres, a.external_urls.and_then(|u| u.spotify))))
 }
 
 pub(crate) fn auth(tok: &str) -> (&'static str, String) {

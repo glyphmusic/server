@@ -4,6 +4,7 @@
 pub mod archive;
 pub mod audius;
 pub mod deezer;
+pub mod itunes;
 pub mod jamendo;
 pub mod lastfm;
 pub mod lrclib;
@@ -111,6 +112,7 @@ pub(crate) fn new_track(id: impl Into<String>, source: ProviderId, title: &str, 
         permalink: None,
         external_ids: BTreeMap::new(),
         explicit: false,
+        explicit_rating: None,
     }
 }
 
