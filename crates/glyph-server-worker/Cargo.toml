@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 glyph-server-core.workspace = true
 glyph-protocol.workspace = true
 serde_json.workspace = true
-worker = { version = "0.8", features = ["d1"] }
+worker = { version = "0.9", features = ["d1"] }
 async-trait.workspace = true
 futures.workspace = true
 console_error_panic_hook = "0.1"
