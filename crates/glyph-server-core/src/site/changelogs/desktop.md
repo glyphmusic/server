@@ -1,11 +1,22 @@
 # Changelog
 
+## 0.14.2 - 2026-11-26
+
+### Added
+
+- **No connection bar**: when the internet is gone for a few seconds, a thin bar shows "No connection" at the very bottom, with your downloaded songs and a button to play them. It goes away as soon as you are back online.
+- **Saved music when offline** (phone): a sheet comes up with Downloads and every playlist that has downloaded songs, ready to play.
+
+### Fixed
+
+- **Folders on the phone**: the library now has a "New folder" button next to "New playlist", so you can make folders on the phone too.
+
 ## 0.14.1 - 2026-11-26
 
 ### Fixed
 
-- **Reliable Explicit & unknown ratings**: songs now carry a three-state explicit rating (Explicit, Clean, Unknown `?`) across Deezer, Apple Music/iTunes and lyrics scanning, so songs with explicit lyrics no longer appear clean and unrated uploads keep their `?` marker reliably (including when merged across providers or filtered by enabled sources).
-- **Consistent artist verification**: verified badges now come from service-level signals instead of arbitrary fan-count cutoffs, batch-resolve through the server without rate-limit flicker, never cache temporary lookup errors as unverified, and show consistently everywhere artists appear (artist pages, similar artists, search, home, library, taste, profile, stats and recap).
+- **Reliable Explicit & unknown ratings**: songs now carry a three-state explicit rating (Explicit, Clean, Unknown `?`) across Deezer, Apple Music/iTunes and lyrics scanning, cached persistently both on the server and locally across restarts, so songs with explicit lyrics no longer appear clean and unrated uploads keep their `?` marker reliably (including when merged across providers or filtered by enabled sources).
+- **Consistent artist verification**: verified badges now come from service-level signals instead of arbitrary fan-count cutoffs, batch-resolve through the server without rate-limit flicker, cache both verified and unverified results persistently on the server and locally without caching temporary lookup errors, and show consistently everywhere artists appear (artist pages, similar artists, search, home, library, taste, profile, stats and recap).
 - **Complete artist pages & full song catalogs**: artist pages now show the server-cached full catalog, real total song count, genre tags, external links, related artist portraits and stepped song expansion instead of stopping at a handful of songs, and work consistently in the desktop, mobile and web apps.
 
 ## 0.14.0 - 2026-11-25
